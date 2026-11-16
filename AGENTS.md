@@ -16,6 +16,8 @@ Per `docs/requirements.md`:
 - **Postgres** as the only required dependency, through [pgx](https://github.com/jackc/pgx) (`pgxpool`). Schema migrations are [goose](https://github.com/pressly/goose) SQL files embedded in the binary.
 - **Declarative configuration files** for provisioned objects (sources, integrations, routing, escalation policies, teams, schedule rotations); the database holds runtime state (planned)
 
+- **HTTP**: the standard library `net/http` server and router, `log/slog` for structured logs, and [client_golang](https://github.com/prometheus/client_golang) for `/metrics`. There is no web framework.
+
 Tooling:
 
 - **golangci-lint** for linting and formatting checks, configured in `.golangci.yml`
@@ -42,9 +44,11 @@ Tooling:
 ├── docs/                     # Project documentation (markdown source for the docs site)
 ├── internal/
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
+│   ├── logging/              # slog setup; request identifiers in log records
 │   ├── postgres/             # Connection pool and migrator
 │   │   ├── migrations/       # Versioned SQL migrations, embedded in the binary
 │   │   └── postgrestest/     # Test helper: one empty database per test
+│   ├── server/               # HTTP server, middleware, health, readiness and metrics endpoints
 │   └── version/              # Build version reporting
 ├── .golangci.yml             # golangci-lint configuration
 ├── .tool-versions            # Pinned language/tool versions (asdf/mise)
@@ -70,12 +74,21 @@ Run `mise install` first so that the pinned versions are used.
 | Run | `./bin/beacon version` (or `go run ./cmd/beacon version`) |
 | Start Postgres | `docker compose up -d --wait postgres` |
 | Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' go test -race ./...` |
+| Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon serve` then `curl localhost:8080/readyz` |
 | Apply migrations | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon migrate` |
 | Lint | `golangci-lint run ./...` |
 | Fix formatting | `golangci-lint fmt ./...` |
 | Check module files | `go mod tidy -diff` |
 
 CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres from `compose.yaml`, so CI and development use the same Postgres version.
+
+### Server
+
+- `beacon serve` applies pending migrations (unless `--migrate=false`), then serves `GET /healthz`, `GET /readyz` and `GET /metrics` on `--listen-address` (default `:8080`).
+- Attach routes to `Server.Mux()` in `internal/server`. Every route passes through the request identifier, access log and panic recovery middleware.
+- Log with the `slog` methods that take a context (`InfoContext` and so on) inside request handling, so the record carries `request_id`.
+- Register metrics on the registry from `server.NewRegistry()`, not the global default. Keep label values to bounded sets (see the cardinality warning in `docs/requirements.md`).
+- The process must stay stateless: anything that has to survive a restart or be seen by another replica goes in Postgres, never in memory or on local disk.
 
 ### Database
 

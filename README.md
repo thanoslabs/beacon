@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. The `beacon` command builds and runs, but it does not handle alerts yet. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. The server starts, connects to Postgres and reports its health, but it does not handle alerts yet. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -52,9 +52,20 @@ Beacon needs Postgres. `compose.yaml` starts the pinned version for development,
 ```sh
 docker compose up -d --wait postgres
 export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable'
-./bin/beacon migrate            # apply schema migrations
+./bin/beacon serve              # apply pending migrations, then serve on :8080
+./bin/beacon migrate            # apply schema migrations without serving
 ./bin/beacon migrate --status   # list migrations and their state
 ```
+
+The server answers on three operational endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /healthz` | Liveness: the process is running. It does not check the database. |
+| `GET /readyz` | Readiness: the database answers and the server is not shutting down. Returns `503` otherwise. |
+| `GET /metrics` | Prometheus metrics: Go runtime, process and build information. |
+
+Logs are JSON on standard error (`--log-format text` for reading by eye). Every request gets an identifier, returned in the `X-Request-Id` header and written on each log record for that request. On `SIGTERM` or `SIGINT` the server stops accepting connections and lets in-flight requests finish, for up to `--shutdown-timeout`.
 
 Tests that need a database are skipped unless `BEACON_TEST_DATABASE_URL` points at a Postgres server. Each test creates and drops its own database, so the server's other contents are left alone:
 
