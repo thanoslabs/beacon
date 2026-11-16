@@ -9,3 +9,4 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 ## Pages
 
 - [[requirements]]: what Beacon must do, split into MVP and later
+- [[configuration-and-data-model]]: proposed YAML configuration schema and Postgres data model
