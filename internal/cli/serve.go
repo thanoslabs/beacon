@@ -4,15 +4,21 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/logging"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/server"
 	"github.com/thanoslabs/beacon/internal/version"
 )
+
+// snoozeExpiryInterval is how often the server looks for snoozes that have run
+// out, and so the longest a snoozed alert stays quiet past its time.
+const snoozeExpiryInterval = 5 * time.Second
 
 func runServe(ctx context.Context, e env, args []string) error {
 	var (
@@ -75,7 +81,15 @@ func runServe(ctx context.Context, e env, args []string) error {
 	if err := srv.Listen(); err != nil {
 		return err
 	}
-	if err := srv.Serve(ctx); err != nil {
+
+	// Background work stops with the server: it watches the same context.
+	alerts := alert.NewStore(pool)
+	var background sync.WaitGroup
+	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
+
+	err = srv.Serve(ctx)
+	background.Wait()
+	if err != nil {
 		return err
 	}
 	logger.Info("beacon stopped")

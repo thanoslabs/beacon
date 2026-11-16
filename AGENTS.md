@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: the foundations are in place, and no alert handling exists yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: the foundations and the alert model are in place, and the first path from a webhook to Slack is being built. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -43,6 +43,7 @@ Tooling:
 │   └── beacon/               # Entry point of the single binary
 ├── docs/                     # Project documentation (markdown source for the docs site)
 ├── internal/
+│   ├── alert/                # Alert model, state machine and timeline
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
 │   ├── logging/              # slog setup; request identifiers in log records
 │   ├── postgres/             # Connection pool and migrator
@@ -107,6 +108,13 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Tests that need a database call `postgrestest.New(t)` or `postgrestest.NewMigrated(t)`. Without `BEACON_TEST_DATABASE_URL` they are skipped locally and fail in CI. Always run them against a real Postgres before claiming a database change works; do not mock the database.
 - Add a migration as `internal/postgres/migrations/<next 5-digit number>_<snake_case>.sql` with `-- +goose Up` and `-- +goose Down` sections. Never edit a migration that has been released; add a new one. Each migration runs in a transaction, and a Postgres advisory lock keeps replicas from applying one twice.
 - The schema follows `docs/configuration-and-data-model.md`. If a migration departs from it, update that page in the same PR.
+
+### Alerts
+
+- `internal/alert` owns the `alerts`, `alert_groups` and `alert_events` tables. Change alert state only through `alert.Store`, so that every change passes the state machine (`alert.Next`) and is written with its timeline event in one transaction. `docs/alert-lifecycle.md` describes the states.
+- To react to a state change, register an `alert.Observer`. It runs inside the transaction that makes the change, so what it writes commits or rolls back with it.
+- The store takes the time from its clock, not from Postgres, so tests can move time with `SetClock`.
+- Background work started by `beacon serve` watches the command's context and is waited for before the command returns. Anything it needs to remember goes in Postgres.
 
 To add a subcommand, add a file under `internal/cli/` and register it in `commands()` in `internal/cli/cli.go`. Commands take their environment, output streams and arguments as parameters, so tests can run them in-process.
 
