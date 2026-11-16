@@ -11,7 +11,7 @@ Each requirement is marked **MVP** (needed for the first usable release) or **La
 ## Principles
 
 - **Five minutes to the first page.** A new user gets from `docker compose up` to a test page in Slack or Discord in about five minutes.
-- **Configuration as code first.** Sources, integrations, routing and escalation policies are defined in files that live in version control. The database holds runtime state.
+- **Configuration as code first.** Sources, integrations, teams, routing and escalation policies are defined in YAML files that live in version control. The database holds users and runtime state.
 - **One binary plus Postgres.** Beacon ships as a single Go binary and needs only a Postgres database, so it can scale out without a storage migration.
 - **Works with what people already run.** Beacon sits behind an existing Alertmanager or Grafana setup; adopting it does not require changing Prometheus.
 - **Observable by default.** Beacon exposes its own state as Prometheus metrics, so the same stack that produces alerts can report on how they were handled.
@@ -107,11 +107,11 @@ Beacon separates what is provisioned from what happens at runtime. Provisioned o
 | Kind | Managed as | Examples |
 |---|---|---|
 | Provisioned | Code | Sources, notification integrations, routing rules, escalation policies, teams, schedule rotations |
-| Runtime | Database | Alert state, acknowledgements, snoozes, silences, schedule overrides, notification history |
+| Runtime | Database | Users, alert state, acknowledgements, snoozes, silences, schedule overrides, notification history |
 
 | Requirement | Phase |
 |---|---|
-| Declarative configuration files for all provisioned objects | MVP |
+| Declarative YAML configuration files for all provisioned objects | MVP |
 | Validation command that checks configuration without applying it, for use in CI | MVP |
 | Reload configuration without restart | MVP |
 | Clear errors that name the file, object and field at fault | MVP |
@@ -123,7 +123,7 @@ Beacon separates what is provisioned from what happens at runtime. Provisioned o
 
 | Requirement | Phase |
 |---|---|
-| Web UI to view alerts, schedules and escalation policies, and to act on runtime state (acknowledge, snooze, silence, override) | MVP |
+| Web UI, built as a separate single-page app on the REST API, to view alerts, schedules and escalation policies, and to act on runtime state (acknowledge, snooze, silence, override) | MVP |
 | REST API for runtime state and read access to provisioned objects | MVP |
 | API tokens | MVP |
 | CLI | Later |
@@ -132,10 +132,15 @@ Beacon separates what is provisioned from what happens at runtime. Provisioned o
 
 | Requirement | Phase |
 |---|---|
-| Local users | MVP |
-| Teams | MVP |
-| Admin and member roles | MVP |
-| OIDC single sign-on | Later |
+| Sign-in through OAuth 2.0 and OpenID Connect | MVP |
+| Users stored in the database, created on first sign-in | MVP |
+| Admin and member roles, mapped from identity provider roles or groups | MVP |
+| Team membership mapped from identity provider groups | MVP |
+| Teams defined in configuration with a list of users; a listed user who does not exist is skipped and logged as an error | MVP |
+| Link each user to their Slack and Discord identity | MVP |
+| Bootstrap admin account for installs with no identity provider | MVP |
+| SCIM provisioning, so users and groups sync without a sign-in | Later |
+| Local users with passwords, managed in the UI | Later |
 | Fine-grained RBAC | Later |
 | Audit log | Later |
 | Multi-tenancy | Later |
@@ -149,6 +154,7 @@ Beacon separates what is provisioned from what happens at runtime. Provisioned o
 | Postgres as the only required dependency | MVP |
 | Docker Compose file that starts Beacon and Postgres together | MVP |
 | Stateless server process, so more replicas can be added later | MVP |
+| Frontend assets embedded in the binary for releases, so an install is still one binary | MVP |
 | Helm chart | Later |
 | High availability with multiple replicas | Later |
 | Self-monitoring dead man's switch | Later |
@@ -184,3 +190,7 @@ Beacon exposes a Prometheus `/metrics` endpoint. It covers both how Beacon is ru
 | Notification channels in the MVP | Slack and Discord first, with email and outbound webhook; SMS and voice later | Chat is where teams already respond, and it avoids a paid provider at the start |
 | Storage | Postgres from the start | Scalability is accounted for from the beginning, with no later migration |
 | Incident management | Out of scope for now | It is a separate product; the gap is in alerting and paging |
+| Users and teams | Users live in the database; teams are defined in configuration as lists of users, and unknown users are skipped and logged | People come and go through the identity provider, while team structure is reviewed like other configuration |
+| Authentication | OAuth 2.0 and OpenID Connect first, with roles and team membership mapped from the provider's roles and groups | Access follows the organisation's existing identity provider |
+| Configuration format | YAML | It is what the Prometheus audience already uses |
+| Frontend | A separate single-page app that uses the REST API | The API is exercised by a real client from the start |
