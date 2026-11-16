@@ -11,6 +11,7 @@ import (
 
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/logging"
+	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/server"
 	"github.com/thanoslabs/beacon/internal/version"
@@ -28,6 +29,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 		logFormat string
 		migrate   bool
 		boot      bootstrapSettings
+		notifyCfg notify.Config
 		envErrs   []error
 	)
 	fs := newFlagSet(e, "serve", "Run the Beacon server")
@@ -41,6 +43,8 @@ func runServe(ctx context.Context, e env, args []string) error {
 		"log level: debug, info, warn or error")
 	stringSetting(fs, e, &logFormat, "log-format", "BEACON_LOG_FORMAT", logging.FormatJSON,
 		"log format: json or text")
+	intSetting(fs, e, &notifyCfg.Workers, "notification-workers", "BEACON_NOTIFICATION_WORKERS", notify.DefaultWorkers,
+		"how many notifications this process delivers at a time", &envErrs)
 	databaseSettings(fs, e, &dbCfg, &envErrs)
 	boot.register(fs, e)
 	if err := parseFlags(fs, args, envErrs...); err != nil {
@@ -56,6 +60,9 @@ func runServe(ctx context.Context, e env, args []string) error {
 	}
 	if srvCfg.ShutdownTimeout <= 0 {
 		return fmt.Errorf("--shutdown-timeout must be positive, got %s", srvCfg.ShutdownTimeout)
+	}
+	if notifyCfg.Workers < 1 || notifyCfg.Workers > 64 {
+		return fmt.Errorf("--notification-workers must be between 1 and 64, got %d", notifyCfg.Workers)
 	}
 	// Logs go to stderr, so stdout stays free for command output.
 	logger, err := logging.New(e.stderr, logLevel, logFormat)
@@ -93,8 +100,11 @@ func runServe(ctx context.Context, e env, args []string) error {
 		return err
 	}
 
+	pipeline := notify.New(pool, alerts, logger, notifyCfg)
+
 	// Background work stops with the server: it watches the same context.
 	var background sync.WaitGroup
+	background.Go(func() { pipeline.Run(ctx) })
 	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
 
 	err = srv.Serve(ctx)

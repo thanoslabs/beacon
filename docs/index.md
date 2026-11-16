@@ -12,3 +12,4 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[configuration-and-data-model]]: proposed YAML configuration schema and Postgres data model
 - [[alert-lifecycle]]: the states an alert moves through, and its timeline
 - [[webhook]]: send alerts to Beacon as JSON over HTTP
+- [[notifications]]: how notifications are queued, retried and recorded

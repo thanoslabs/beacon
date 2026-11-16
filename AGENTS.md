@@ -48,6 +48,7 @@ Tooling:
 │   ├── config/               # Typed provisioned objects (sources) and the Secret type
 │   ├── ingest/               # Webhook receiver: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
+│   ├── notify/               # Notification queue, workers, retries and the Channel interface
 │   ├── postgres/             # Connection pool and migrator
 │   │   ├── migrations/       # Versioned SQL migrations, embedded in the binary
 │   │   └── postgrestest/     # Test helper: one empty database per test
@@ -129,6 +130,14 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 - `internal/ingest` serves `POST /api/v1/ingest/<source>`; `docs/webhook.md` is the contract for the generic JSON payload. Every payload error must name the field at fault.
 - Receivers change alerts only through `alert.Store`.
+
+### Notifications
+
+- `internal/notify` owns the `notifications` and `notification_attempts` tables. `docs/notifications.md` describes the delivery rules; keep it true.
+- Queue a notification with `Pipeline.Enqueue` inside the transaction of the change that causes it, never after the commit and never by sending directly.
+- A new notification service is a type that implements `notify.Channel`, registered with `Pipeline.Register`. The pipeline must not learn anything specific to a service. A channel returns `notify.Permanent` for failures that retrying cannot fix and `notify.RetryAfter` when the service says how long to wait; anything else is retried with backoff. Channel errors are stored and shown on the timeline, so they must never contain a credential.
+- Delivery is at least once. A channel should make a repeated `Send` harmless where the service allows it.
+- `Pipeline.NotifyAll` is temporary: it notifies fixed targets on every state change until routing and escalation exist.
 
 To add a subcommand, add a file under `internal/cli/` and register it in `commands()` in `internal/cli/cli.go`. Commands take their environment, output streams and arguments as parameters, so tests can run them in-process.
 
