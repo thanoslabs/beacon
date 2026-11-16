@@ -1,13 +1,25 @@
-# CLAUDE.md
+# AGENTS.md
+
+Operational expectations for humans and AI agents working in this repository.
 
 ## Purpose
 
-GitHub template repository for bootstrapping `thanoslabs` projects. Provides Renovate-managed dependency updates, branch protection, CODEOWNERS, license, and standard `.gitignore` as a starting point — not a runnable application.
+Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
+
+The project is at the design stage: there is no application code yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
-- **Renovate** for dependency updates (managers: `docker-compose`, `github-actions`, `gomod`)
-- **GitHub Actions** for the Renovate, release, and docs workflows
+Planned, per `docs/requirements.md`:
+
+- **Go** for the server, shipped as a single binary
+- **Postgres** as the only required dependency
+- **Declarative configuration files** for provisioned objects (sources, integrations, routing, escalation policies, teams, schedule rotations); the database holds runtime state
+
+Already in place:
+
+- **Renovate** for dependency updates (managers: `asdf`, `docker-compose`, `github-actions`, `gomod`)
+- **GitHub Actions** for the CI, Renovate, release, and docs workflows
 - **[nebula-md](https://github.com/thanoslabs/nebula-md)** for building `docs/` into a static markdown site
 - **MIT License**
 
@@ -20,12 +32,13 @@ GitHub template repository for bootstrapping `thanoslabs` projects. Provides Ren
 │   ├── CODEOWNERS            # @thanoslabs/reviewers
 │   ├── renovate-config.js    # Renovate platform config
 │   └── workflows/
+│       ├── ci.yml            # Validation on pushes to main and on pull requests
 │       ├── docs.yaml         # nebula-md docs build + GitHub Pages deploy
 │       ├── release.yaml      # Label-driven SemVer release workflow
 │       └── renovate.yaml     # Renovate workflow
 ├── docs/                     # Project documentation (markdown source for the docs site)
 ├── .tool-versions            # Pinned language/tool versions (asdf/mise)
-├── AGENTS.md                 # Operational expectations for humans and AI agents
+├── AGENTS.md                 # This file
 ├── CONTRIBUTING.md
 ├── LICENSE
 ├── README.md
@@ -33,14 +46,14 @@ GitHub template repository for bootstrapping `thanoslabs` projects. Provides Ren
 └── renovate.json             # Renovate settings
 ```
 
+Update this section, and add build, test and run commands, when application code is added.
+
 ## Conventions
 
 - `.tool-versions` is the single source of truth for language and tool versions. Before building, testing, or running any tooling, check it and use the pinned versions (install via `asdf install` or `mise install`). When adding a new language or tool to the project, pin its version there first — never assume a globally installed version.
 - Versioning: project artifacts (releases, tags, packages, images) follow [SemVer](https://semver.org/) as bare `X.Y.Z` — no `v` prefix (`1.4.2`, not `v1.4.2`). Bump MAJOR for breaking changes, MINOR for backwards-compatible features, PATCH for fixes.
-- See `AGENTS.md` for full agent workflow, code style, testing, and git/PR guidance.
 - Branch protection: never push directly to `main`; all changes via PR with review.
-- When adapting this template for a new project, update `renovate.json` managers/schedules and enable the repo in the Renovate GitHub App.
-- Project-specific `CLAUDE.md` / `AGENTS.md` content should be filled in once the actual stack is added (`src/`, `tests/`, build commands, etc. are placeholders in `AGENTS.md`, not present here).
+- Branch names and commit messages follow `CONTRIBUTING.md`.
 
 ## Releases
 
@@ -51,7 +64,7 @@ GitHub template repository for bootstrapping `thanoslabs` projects. Provides Ren
   - `patch` — fixes
   - No label — defaults to a `patch` bump
 - **Manual releases**: a specific version may be cut manually by supplying an explicit `X.Y.Z` version tag when needed (e.g. via a manual workflow dispatch). This bypasses the label-based bump.
-- Release automation lives in `.github/workflows/release.yaml`: it computes the next version, tags, and creates the GitHub release. Building and publishing artifacts (images, binaries) is project-specific and left as a TODO stub in the workflow.
+- Release automation lives in `.github/workflows/release.yaml`: it computes the next version, tags, and creates the GitHub release. Building and publishing artifacts (images, binaries) is still a TODO stub in the workflow.
 
 ## Docs
 
