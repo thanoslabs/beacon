@@ -32,6 +32,27 @@ The full list, including what comes later, is in the [requirements](docs/require
 - **One binary plus Postgres.** Beacon ships as a single Go binary and needs only a Postgres database.
 - **Works with what people already run.** Beacon sits behind an existing Alertmanager or Grafana setup.
 
+## Run it
+
+Beacon needs only Postgres. With Docker, this builds Beacon from the checkout and starts both:
+
+```sh
+docker compose up --build
+curl http://localhost:8080/readyz
+```
+
+Set `BEACON_PORT` to publish Beacon on a different host port, for example `BEACON_PORT=18080 docker compose up --build`.
+
+Releases publish a container image for `linux/amd64` and `linux/arm64`, tagged with the bare version:
+
+```sh
+docker run --rm -p 8080:8080 \
+  -e BEACON_DATABASE_URL='postgres://user:password@host:5432/beacon' \
+  ghcr.io/thanoslabs/beacon:X.Y.Z
+```
+
+The image runs as a non-root user (`65532`) and its default command is `beacon serve`.
+
 ## Documentation
 
 Documentation lives in [`docs/`](docs/) and is published to <https://thanoslabs.github.io/beacon/> on every merge to `main` that touches it. The site is built with [nebula-md](https://github.com/thanoslabs/nebula-md).
@@ -47,7 +68,7 @@ go test -race ./...                   # run the tests
 golangci-lint run ./...               # lint
 ```
 
-Beacon needs Postgres. `compose.yaml` starts the pinned version for development, with throwaway credentials:
+To run the binary outside Docker, start only Postgres from `compose.yaml`, which pins the version and uses throwaway credentials:
 
 ```sh
 docker compose up -d --wait postgres
@@ -76,7 +97,7 @@ go test -race ./...
 
 Every setting can be given as a flag or as an environment variable; run `beacon <command> -h` to list them.
 
-- **Releases**: merging a PR to `main` cuts a [SemVer](https://semver.org/) release with a bare `X.Y.Z` tag. The bump comes from the PR's `major`, `minor` or `patch` label, and defaults to `patch`.
+- **Releases**: merging a PR to `main` cuts a [SemVer](https://semver.org/) release with a bare `X.Y.Z` tag and publishes the container image `ghcr.io/thanoslabs/beacon:X.Y.Z`. The bump comes from the PR's `major`, `minor` or `patch` label, and defaults to `patch`.
 - **Dependencies**: [Renovate](https://docs.renovatebot.com/) opens update PRs, configured in `renovate.json`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming, commit style and the pull request process, and [SECURITY.md](SECURITY.md) to report a vulnerability.
