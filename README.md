@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. The server starts, connects to Postgres and reports its health, but it does not handle alerts yet. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It receives alerts through a [JSON webhook](docs/webhook.md) and tracks their [state](docs/alert-lifecycle.md), but it does not notify anyone yet. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -42,6 +42,18 @@ curl http://localhost:8080/readyz
 ```
 
 Set `BEACON_PORT` to publish Beacon on a different host port, for example `BEACON_PORT=18080 docker compose up --build`.
+
+To receive alerts, give the webhook source a token before starting, then send an alert:
+
+```sh
+export BEACON_SOURCE_TOKEN="$(openssl rand -hex 32)"
+docker compose up --build -d --wait
+curl -X POST http://localhost:8080/api/v1/ingest/default \
+  -H "Authorization: Bearer $BEACON_SOURCE_TOKEN" \
+  -d '{"labels": {"alertname": "DiskFull", "severity": "critical"}, "annotations": {"summary": "Disk is full"}}'
+```
+
+The [webhook page](docs/webhook.md) describes the payload and the responses.
 
 Releases publish a container image for `linux/amd64` and `linux/arm64`, tagged with the bare version:
 
@@ -78,10 +90,11 @@ export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmo
 ./bin/beacon migrate --status   # list migrations and their state
 ```
 
-The server answers on three operational endpoints:
+The server answers on these endpoints:
 
 | Endpoint | Purpose |
 |---|---|
+| `POST /api/v1/ingest/<source>` | Receives alerts from a source. See the [webhook page](docs/webhook.md). |
 | `GET /healthz` | Liveness: the process is running. It does not check the database. |
 | `GET /readyz` | Readiness: the database answers and the server is not shutting down. Returns `503` otherwise. |
 | `GET /metrics` | Prometheus metrics: Go runtime, process and build information. |

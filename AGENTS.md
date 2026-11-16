@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: the foundations and the alert model are in place, and the first path from a webhook to Slack is being built. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: alerts can be received over a webhook and stored, and the first path from a webhook to Slack is being built. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -45,10 +45,13 @@ Tooling:
 ├── internal/
 │   ├── alert/                # Alert model, state machine and timeline
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
+│   ├── config/               # Typed provisioned objects (sources) and the Secret type
+│   ├── ingest/               # Webhook receiver: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
 │   ├── postgres/             # Connection pool and migrator
 │   │   ├── migrations/       # Versioned SQL migrations, embedded in the binary
 │   │   └── postgrestest/     # Test helper: one empty database per test
+│   ├── provision/            # Copies provisioned objects into Postgres
 │   ├── server/               # HTTP server, middleware, health, readiness and metrics endpoints
 │   └── version/              # Build version reporting
 ├── .dockerignore             # Build context allow-list; add new source directories here
@@ -115,6 +118,17 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - To react to a state change, register an `alert.Observer`. It runs inside the transaction that makes the change, so what it writes commits or rolls back with it.
 - The store takes the time from its clock, not from Postgres, so tests can move time with `SetClock`.
 - Background work started by `beacon serve` watches the command's context and is waited for before the command returns. Anything it needs to remember goes in Postgres.
+
+### Configuration and secrets
+
+- Provisioned objects are typed in `internal/config`, following `docs/configuration-and-data-model.md`. Configuration files do not exist yet: `bootstrapSettings` in `internal/cli/bootstrap.go` fills `config.Config` from a few temporary flags and environment variables. Do not add a second route into the features; extend `config.Config`, so the YAML loader can replace the bootstrap settings without touching them.
+- Hold every credential in a `config.Secret`. It prints, logs and encodes as a reference to where it came from, never as its value; call `Reveal` only at the point of use. Register a credential setting with `secretSetting`, and add it to `secretSettings` in `internal/cli/secrets_test.go`, which checks that no secret reaches help, errors or logs.
+- `provision.Ensure` gives a provisioned object its row, which runtime rows reference.
+
+### Ingestion
+
+- `internal/ingest` serves `POST /api/v1/ingest/<source>`; `docs/webhook.md` is the contract for the generic JSON payload. Every payload error must name the field at fault.
+- Receivers change alerts only through `alert.Store`.
 
 To add a subcommand, add a file under `internal/cli/` and register it in `commands()` in `internal/cli/cli.go`. Commands take their environment, output streams and arguments as parameters, so tests can run them in-process.
 

@@ -11,3 +11,4 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[requirements]]: what Beacon must do, split into MVP and later
 - [[configuration-and-data-model]]: proposed YAML configuration schema and Postgres data model
 - [[alert-lifecycle]]: the states an alert moves through, and its timeline
+- [[webhook]]: send alerts to Beacon as JSON over HTTP

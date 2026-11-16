@@ -27,6 +27,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 		logLevel  string
 		logFormat string
 		migrate   bool
+		boot      bootstrapSettings
 		envErrs   []error
 	)
 	fs := newFlagSet(e, "serve", "Run the Beacon server")
@@ -41,11 +42,16 @@ func runServe(ctx context.Context, e env, args []string) error {
 	stringSetting(fs, e, &logFormat, "log-format", "BEACON_LOG_FORMAT", logging.FormatJSON,
 		"log format: json or text")
 	databaseSettings(fs, e, &dbCfg, &envErrs)
+	boot.register(fs, e)
 	if err := parseFlags(fs, args, envErrs...); err != nil {
 		return err
 	}
 
 	if err := checkDatabaseSettings(dbCfg); err != nil {
+		return err
+	}
+	cfg := boot.config()
+	if err := cfg.Validate(); err != nil {
 		return err
 	}
 	if srvCfg.ShutdownTimeout <= 0 {
@@ -82,8 +88,12 @@ func runServe(ctx context.Context, e env, args []string) error {
 		return err
 	}
 
-	// Background work stops with the server: it watches the same context.
 	alerts := alert.NewStore(pool)
+	if err := attachIngest(ctx, logger, pool, cfg, alerts, srv.Mux()); err != nil {
+		return err
+	}
+
+	// Background work stops with the server: it watches the same context.
 	var background sync.WaitGroup
 	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
 

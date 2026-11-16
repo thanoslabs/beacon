@@ -60,47 +60,84 @@ func TestServeSettingsErrors(t *testing.T) {
 	}
 }
 
-// TestServe runs the whole server against a real database: it migrates on
-// start, answers the operational endpoints, and stops cleanly when its
-// context is cancelled, which is what SIGTERM does in the real binary.
-func TestServe(t *testing.T) {
-	dbURL := postgrestest.NewURL(t)
-	environ := map[string]string{
-		"BEACON_DATABASE_URL":   dbURL,
-		"BEACON_LISTEN_ADDRESS": "127.0.0.1:0",
+// serving is a beacon serve command running in the test process.
+type serving struct {
+	baseURL string
+	logs    *lockedBuffer
+	cancel  context.CancelFunc
+	exit    chan int
+}
+
+// startServe runs beacon serve with the given environment, on a free port,
+// and waits until it listens. The server is stopped when the test ends.
+func startServe(t *testing.T, environ map[string]string) *serving {
+	t.Helper()
+	env := map[string]string{"BEACON_LISTEN_ADDRESS": "127.0.0.1:0"}
+	for k, v := range environ {
+		env[k] = v
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	logs := &lockedBuffer{}
-	exit := make(chan int, 1)
+	s := &serving{logs: &lockedBuffer{}, cancel: cancel, exit: make(chan int, 1)}
 	go func() {
-		exit <- Run(ctx, []string{"serve"}, func(k string) string { return environ[k] }, io.Discard, logs)
+		s.exit <- Run(ctx, []string{"serve"}, func(k string) string { return env[k] }, io.Discard, s.logs)
 	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-s.exit:
+		case <-time.After(15 * time.Second):
+			t.Errorf("serve did not stop: %s", s.logs.String())
+		}
+	})
 
 	// The bound address is in the "http server listening" log record.
-	var baseURL string
 	deadline := time.Now().Add(15 * time.Second)
-	for baseURL == "" {
+	for s.baseURL == "" {
 		select {
-		case code := <-exit:
-			t.Fatalf("serve exited early with code %d: %s", code, logs.String())
+		case code := <-s.exit:
+			s.exit <- code
+			t.Fatalf("serve exited early with code %d: %s", code, s.logs.String())
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("server did not start listening: %s", logs.String())
+			t.Fatalf("server did not start listening: %s", s.logs.String())
 		}
-		for line := range strings.SplitSeq(logs.String(), "\n") {
+		for line := range strings.SplitSeq(s.logs.String(), "\n") {
 			var rec struct {
 				Msg  string `json:"msg"`
 				Addr string `json:"addr"`
 			}
 			if json.Unmarshal([]byte(line), &rec) == nil && rec.Msg == "http server listening" {
-				baseURL = "http://" + rec.Addr
+				s.baseURL = "http://" + rec.Addr
 			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	return s
+}
+
+// stop ends the server, as SIGTERM does in the real binary, and returns its
+// exit code.
+func (s *serving) stop(t *testing.T) int {
+	t.Helper()
+	s.cancel()
+	select {
+	case code := <-s.exit:
+		s.exit <- code
+		return code
+	case <-time.After(15 * time.Second):
+		t.Fatalf("serve did not stop after its context was cancelled: %s", s.logs.String())
+		return -1
+	}
+}
+
+// TestServe runs the whole server against a real database: it migrates on
+// start, answers the operational endpoints, and stops cleanly when its
+// context is cancelled, which is what SIGTERM does in the real binary.
+func TestServe(t *testing.T) {
+	srv := startServe(t, map[string]string{"BEACON_DATABASE_URL": postgrestest.NewURL(t)})
+	baseURL, logs := srv.baseURL, srv.logs
 
 	get := func(path string) (int, string) {
 		t.Helper()
@@ -129,14 +166,8 @@ func TestServe(t *testing.T) {
 		t.Errorf("GET /metrics = %d, missing expected metrics", code)
 	}
 
-	cancel()
-	select {
-	case code := <-exit:
-		if code != exitOK {
-			t.Errorf("exit code after shutdown = %d, want %d: %s", code, exitOK, logs.String())
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatalf("serve did not stop after its context was cancelled: %s", logs.String())
+	if code := srv.stop(t); code != exitOK {
+		t.Errorf("exit code after shutdown = %d, want %d: %s", code, exitOK, logs.String())
 	}
 
 	out := logs.String()
