@@ -47,6 +47,24 @@ go test -race ./...                   # run the tests
 golangci-lint run ./...               # lint
 ```
 
+Beacon needs Postgres. `compose.yaml` starts the pinned version for development, with throwaway credentials:
+
+```sh
+docker compose up -d --wait postgres
+export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable'
+./bin/beacon migrate            # apply schema migrations
+./bin/beacon migrate --status   # list migrations and their state
+```
+
+Tests that need a database are skipped unless `BEACON_TEST_DATABASE_URL` points at a Postgres server. Each test creates and drops its own database, so the server's other contents are left alone:
+
+```sh
+export BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable'
+go test -race ./...
+```
+
+Every setting can be given as a flag or as an environment variable; run `beacon <command> -h` to list them.
+
 - **Releases**: merging a PR to `main` cuts a [SemVer](https://semver.org/) release with a bare `X.Y.Z` tag. The bump comes from the PR's `major`, `minor` or `patch` label, and defaults to `patch`.
 - **Dependencies**: [Renovate](https://docs.renovatebot.com/) opens update PRs, configured in `renovate.json`.
 

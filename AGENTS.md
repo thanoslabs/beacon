@@ -13,7 +13,7 @@ The project is at an early stage: the foundations are in place, and no alert han
 Per `docs/requirements.md`:
 
 - **Go** for the server, shipped as a single binary (`cmd/beacon`). The command line uses the standard library `flag` package; there is no CLI framework.
-- **Postgres** as the only required dependency (planned)
+- **Postgres** as the only required dependency, through [pgx](https://github.com/jackc/pgx) (`pgxpool`). Schema migrations are [goose](https://github.com/pressly/goose) SQL files embedded in the binary.
 - **Declarative configuration files** for provisioned objects (sources, integrations, routing, escalation policies, teams, schedule rotations); the database holds runtime state (planned)
 
 Tooling:
@@ -42,9 +42,13 @@ Tooling:
 ├── docs/                     # Project documentation (markdown source for the docs site)
 ├── internal/
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
+│   ├── postgres/             # Connection pool and migrator
+│   │   ├── migrations/       # Versioned SQL migrations, embedded in the binary
+│   │   └── postgrestest/     # Test helper: one empty database per test
 │   └── version/              # Build version reporting
 ├── .golangci.yml             # golangci-lint configuration
 ├── .tool-versions            # Pinned language/tool versions (asdf/mise)
+├── compose.yaml              # Postgres for development, version pinned
 ├── AGENTS.md                 # This file
 ├── CONTRIBUTING.md
 ├── LICENSE
@@ -64,12 +68,21 @@ Run `mise install` first so that the pinned versions are used.
 |---|---|
 | Build | `go build -o bin/beacon ./cmd/beacon` |
 | Run | `./bin/beacon version` (or `go run ./cmd/beacon version`) |
-| Test | `go test -race ./...` |
+| Start Postgres | `docker compose up -d --wait postgres` |
+| Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' go test -race ./...` |
+| Apply migrations | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon migrate` |
 | Lint | `golangci-lint run ./...` |
 | Fix formatting | `golangci-lint fmt ./...` |
 | Check module files | `go mod tidy -diff` |
 
-CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch.
+CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres from `compose.yaml`, so CI and development use the same Postgres version.
+
+### Database
+
+- Settings are read from flags first, then environment variables (`BEACON_DATABASE_URL`, `BEACON_DATABASE_MAX_CONNS`, `BEACON_DATABASE_CONNECT_TIMEOUT`). Register new settings with the helpers in `internal/cli/flags.go` so both forms always exist.
+- Tests that need a database call `postgrestest.New(t)` or `postgrestest.NewMigrated(t)`. Without `BEACON_TEST_DATABASE_URL` they are skipped locally and fail in CI. Always run them against a real Postgres before claiming a database change works; do not mock the database.
+- Add a migration as `internal/postgres/migrations/<next 5-digit number>_<snake_case>.sql` with `-- +goose Up` and `-- +goose Down` sections. Never edit a migration that has been released; add a new one. Each migration runs in a transaction, and a Postgres advisory lock keeps replicas from applying one twice.
+- The schema follows `docs/configuration-and-data-model.md`. If a migration departs from it, update that page in the same PR.
 
 To add a subcommand, add a file under `internal/cli/` and register it in `commands()` in `internal/cli/cli.go`. Commands take their environment, output streams and arguments as parameters, so tests can run them in-process.
 
