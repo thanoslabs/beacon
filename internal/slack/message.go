@@ -20,11 +20,59 @@ type message struct {
 	Blocks []block `json:"blocks"`
 }
 
-// block is a section or a context block.
+// block is a section, a context block or an actions block. The elements of a
+// context block are text objects, and those of an actions block are buttons.
 type block struct {
 	Type     string `json:"type"`
 	Text     *text  `json:"text,omitempty"`
-	Elements []text `json:"elements,omitempty"`
+	Elements []any  `json:"elements,omitempty"`
+}
+
+// button is a Block Kit button element.
+type button struct {
+	Type     string `json:"type"`
+	Text     text   `json:"text"`
+	ActionID string `json:"action_id"`
+	Value    string `json:"value"`
+	Style    string `json:"style,omitempty"`
+}
+
+// The action identifiers of the buttons. Slack sends the identifier back when
+// a button is pressed.
+const (
+	actionAcknowledge = "beacon_acknowledge"
+	actionSnooze      = "beacon_snooze"
+	actionResolve     = "beacon_resolve"
+)
+
+// SnoozeDuration is how long the snooze button snoozes for.
+const SnoozeDuration = time.Hour
+
+// buttons lists the buttons in the order they are shown, with the action each
+// one takes.
+var buttons = []struct {
+	id, label, style string
+	action           alert.Action
+}{
+	{actionAcknowledge, "Acknowledge", "primary", alert.ActionAcknowledge},
+	{actionSnooze, "Snooze 1h", "", alert.ActionSnooze},
+	{actionResolve, "Resolve", "", alert.ActionResolve},
+}
+
+// actionsBlock returns the buttons for the actions the alert's state allows,
+// or false when there are none. The value of each button is the group to act
+// on.
+func actionsBlock(a alert.Alert) (block, bool) {
+	var elements []any
+	for _, b := range buttons {
+		if _, err := alert.Next(a.Status, b.action); err == nil {
+			elements = append(elements, button{
+				Type: "button", Text: text{Type: "plain_text", Text: b.label},
+				ActionID: b.id, Value: a.GroupID, Style: b.style,
+			})
+		}
+	}
+	return block{Type: "actions", Elements: elements}, len(elements) > 0
 }
 
 // text is a Block Kit text object.
@@ -89,7 +137,10 @@ func render(m notify.Message) message {
 	if more := len(m.Alerts) - 1; more > 0 {
 		detail += fmt.Sprintf(" · and %d more in this group", more)
 	}
-	blocks = append(blocks, block{Type: "context", Elements: []text{*mrkdwn(detail)}})
+	blocks = append(blocks, block{Type: "context", Elements: []any{mrkdwn(detail)}})
+	if actions, ok := actionsBlock(a); ok {
+		blocks = append(blocks, actions)
+	}
 
 	return message{
 		Text:   fmt.Sprintf("[%s] %s: %s", strings.ToUpper(look.word), a.Severity, title),

@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. It receives alerts through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md) and posts them to one [Slack channel](docs/slack.md). Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It receives alerts through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md) and posts them to one [Slack channel](docs/slack.md), where they can be acknowledged, snoozed and resolved. Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -53,7 +53,7 @@ curl -X POST http://localhost:8080/api/v1/ingest/default \
   -d '{"labels": {"alertname": "DiskFull", "severity": "critical"}, "annotations": {"summary": "Disk is full"}}'
 ```
 
-The [webhook page](docs/webhook.md) describes the payload and the responses. To have alerts posted to Slack, also set `BEACON_SLACK_BOT_TOKEN` and `BEACON_SLACK_CHANNEL` as the [Slack page](docs/slack.md) describes.
+The [webhook page](docs/webhook.md) describes the payload and the responses. To have alerts posted to Slack, also set `BEACON_SLACK_BOT_TOKEN`, `BEACON_SLACK_SIGNING_SECRET` and `BEACON_SLACK_CHANNEL` as the [Slack page](docs/slack.md) describes.
 
 Releases publish a container image for `linux/amd64` and `linux/arm64`, tagged with the bare version:
 
@@ -95,6 +95,7 @@ The server answers on these endpoints:
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/v1/ingest/<source>` | Receives alerts from a source. See the [webhook page](docs/webhook.md). |
+| `POST /api/v1/integrations/<name>/interactions` | Receives button presses from Slack. See the [Slack page](docs/slack.md). |
 | `GET /healthz` | Liveness: the process is running. It does not check the database. |
 | `GET /readyz` | Readiness: the database answers and the server is not shutting down. Returns `503` otherwise. |
 | `GET /metrics` | Prometheus metrics: Go runtime, process and build information. |

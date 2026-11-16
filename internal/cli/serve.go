@@ -112,7 +112,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 	}
 
 	pipeline := notify.New(pool, alerts, logger, notifyCfg)
-	if err := attachNotifications(ctx, logger, pool, cfg, alerts, pipeline, slackAPIURL); err != nil {
+	if err := attachNotifications(ctx, logger, pool, cfg, alerts, pipeline, srv.Mux(), slackAPIURL); err != nil {
 		return err
 	}
 

@@ -13,10 +13,11 @@ var secretSettings = []struct{ env, flag, value string }{
 	{"BEACON_DATABASE_URL", "--database-url", "postgres://beacon:db-pass-marker-1f9a@127.0.0.1:1/beacon?sslmode=disable"},
 	{"BEACON_SOURCE_TOKEN", "--source-token", "source-token-marker-7c2e41d0"},
 	{"BEACON_SLACK_BOT_TOKEN", "--slack-bot-token", "xoxb-bot-token-marker-55d1"},
+	{"BEACON_SLACK_SIGNING_SECRET", "--slack-signing-secret", "signing-secret-marker-e07b"},
 }
 
 // secretMarkers are the substrings that must never be printed.
-var secretMarkers = []string{"db-pass-marker-1f9a", "source-token-marker-7c2e41d0", "bot-token-marker-55d1"}
+var secretMarkers = []string{"db-pass-marker-1f9a", "source-token-marker-7c2e41d0", "bot-token-marker-55d1", "signing-secret-marker-e07b"}
 
 func assertNoSecrets(t *testing.T, what, out string, markers ...string) {
 	t.Helper()
@@ -49,7 +50,7 @@ func TestSecretsAreNeverPrinted(t *testing.T) {
 		{"invalid setting", []string{"serve", "--log-level", "loud"}},
 		{"invalid source name", []string{"serve", "--source-name", "Not Valid"}},
 		{"bad flag value", []string{"serve", "--shutdown-timeout", "soon"}},
-		{"Slack token without a channel", []string{"serve"}},
+		{"Slack secrets without a channel", []string{"serve"}},
 		{"invalid Slack API URL", []string{"serve", "--slack-channel", "C0ALERTS", "--slack-api-url", "not a url"}},
 		{"database unreachable", []string{"serve", "--slack-channel", "C0ALERTS", "--database-connect-timeout", "1s", "--listen-address", "127.0.0.1:0"}},
 	}

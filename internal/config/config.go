@@ -160,6 +160,8 @@ func (c Config) Validate() error {
 			errs = append(errs, fmt.Errorf("%s: slack: the settings are missing", at))
 		case !i.Slack.BotToken.IsSet():
 			errs = append(errs, fmt.Errorf("%s: slack.bot_token is required", at))
+		case !i.Slack.SigningSecret.IsSet():
+			errs = append(errs, fmt.Errorf("%s: slack.signing_secret is required", at))
 		}
 	}
 	for n, t := range c.Notify {
