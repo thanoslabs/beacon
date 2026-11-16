@@ -13,6 +13,27 @@ import (
 // wins, then the environment variable, then the default. The helpers below
 // register a flag and apply that order.
 
+// stringSetting registers a string flag that falls back to envName.
+func stringSetting(fs *flag.FlagSet, e env, p *string, name, envName, def, usage string) {
+	if v := e.getenv(envName); v != "" {
+		def = v
+	}
+	fs.StringVar(p, name, def, fmt.Sprintf("%s (env %s)", usage, envName))
+}
+
+// boolSetting registers a bool flag that falls back to envName.
+func boolSetting(fs *flag.FlagSet, e env, p *bool, name, envName string, def bool, usage string, envErrs *[]error) {
+	if v := e.getenv(envName); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			*envErrs = append(*envErrs, fmt.Errorf("%s: %q is not true or false", envName, v))
+		} else {
+			def = b
+		}
+	}
+	fs.BoolVar(p, name, def, fmt.Sprintf("%s (env %s)", usage, envName))
+}
+
 // secretSetting registers a string flag that falls back to envName, for values
 // that hold credentials. The value from the environment is deliberately not
 // made the flag's default, so the command's help never prints it.
