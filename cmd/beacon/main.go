@@ -7,6 +7,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	// Embed the time zone database, so schedules work on hosts and images
+	// that do not ship one.
+	_ "time/tzdata"
+
 	"github.com/thanoslabs/beacon/internal/cli"
 )
 

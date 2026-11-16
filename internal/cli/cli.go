@@ -36,6 +36,7 @@ type command struct {
 func commands() map[string]command {
 	return map[string]command{
 		"migrate": {summary: "Apply database schema migrations", run: runMigrate},
+		"serve":   {summary: "Run the Beacon server", run: runServe},
 		"version": {summary: "Print the version and exit", run: runVersion},
 	}
 }

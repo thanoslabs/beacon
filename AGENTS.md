@@ -16,10 +16,12 @@ Per `docs/requirements.md`:
 - **Postgres** as the only required dependency, through [pgx](https://github.com/jackc/pgx) (`pgxpool`). Schema migrations are [goose](https://github.com/pressly/goose) SQL files embedded in the binary.
 - **Declarative configuration files** for provisioned objects (sources, integrations, routing, escalation policies, teams, schedule rotations); the database holds runtime state (planned)
 
+- **HTTP**: the standard library `net/http` server and router, `log/slog` for structured logs, and [client_golang](https://github.com/prometheus/client_golang) for `/metrics`. There is no web framework.
+
 Tooling:
 
 - **golangci-lint** for linting and formatting checks, configured in `.golangci.yml`
-- **Renovate** for dependency updates (managers: `asdf`, `docker-compose`, `github-actions`, `gomod`)
+- **Renovate** for dependency updates (managers: `asdf`, `docker-compose`, `dockerfile`, `github-actions`, `gomod`)
 - **GitHub Actions** for the CI, Renovate, release, and docs workflows
 - **[nebula-md](https://github.com/thanoslabs/nebula-md)** for building `docs/` into a static markdown site
 - **MIT License**
@@ -42,13 +44,17 @@ Tooling:
 ├── docs/                     # Project documentation (markdown source for the docs site)
 ├── internal/
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
+│   ├── logging/              # slog setup; request identifiers in log records
 │   ├── postgres/             # Connection pool and migrator
 │   │   ├── migrations/       # Versioned SQL migrations, embedded in the binary
 │   │   └── postgrestest/     # Test helper: one empty database per test
+│   ├── server/               # HTTP server, middleware, health, readiness and metrics endpoints
 │   └── version/              # Build version reporting
+├── .dockerignore             # Build context allow-list; add new source directories here
 ├── .golangci.yml             # golangci-lint configuration
 ├── .tool-versions            # Pinned language/tool versions (asdf/mise)
-├── compose.yaml              # Postgres for development, version pinned
+├── Dockerfile                # Multi-stage build of the release image
+├── compose.yaml              # Beacon and Postgres together; Postgres version pinned
 ├── AGENTS.md                 # This file
 ├── CONTRIBUTING.md
 ├── LICENSE
@@ -70,12 +76,30 @@ Run `mise install` first so that the pinned versions are used.
 | Run | `./bin/beacon version` (or `go run ./cmd/beacon version`) |
 | Start Postgres | `docker compose up -d --wait postgres` |
 | Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' go test -race ./...` |
+| Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon serve` then `curl localhost:8080/readyz` |
 | Apply migrations | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon migrate` |
 | Lint | `golangci-lint run ./...` |
 | Fix formatting | `golangci-lint fmt ./...` |
 | Check module files | `go mod tidy -diff` |
+| Build the image | `docker build -t beacon:dev .` |
+| Run Beacon and Postgres | `docker compose up --build -d --wait`, then `curl localhost:8080/readyz` (set `BEACON_PORT` if 8080 is taken) |
 
-CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres from `compose.yaml`, so CI and development use the same Postgres version.
+CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres from `compose.yaml`, so CI and development use the same Postgres version. A separate job builds the image, starts Beacon and Postgres with Compose, and checks the endpoints, the non-root user and a clean exit on termination.
+
+### Container image
+
+- The Go version appears in `.tool-versions` and in the `Dockerfile` build stage. Change both together; CI fails when they differ, and Renovate groups them as "go toolchain".
+- `.dockerignore` excludes everything except what the `Dockerfile` copies. A new top-level source directory must be added to both files.
+- The final stage has no `RUN` step, so building for another platform needs no emulation. Keep it that way, or add QEMU to the release workflow.
+- The image runs as the numeric user `65532`. Do not write to the container file system at runtime.
+
+### Server
+
+- `beacon serve` applies pending migrations (unless `--migrate=false`), then serves `GET /healthz`, `GET /readyz` and `GET /metrics` on `--listen-address` (default `:8080`).
+- Attach routes to `Server.Mux()` in `internal/server`. Every route passes through the request identifier, access log and panic recovery middleware.
+- Log with the `slog` methods that take a context (`InfoContext` and so on) inside request handling, so the record carries `request_id`.
+- Register metrics on the registry from `server.NewRegistry()`, not the global default. Keep label values to bounded sets (see the cardinality warning in `docs/requirements.md`).
+- The process must stay stateless: anything that has to survive a restart or be seen by another replica goes in Postgres, never in memory or on local disk.
 
 ### Database
 
@@ -102,7 +126,7 @@ To add a subcommand, add a file under `internal/cli/` and register it in `comman
   - `patch` — fixes
   - No label — defaults to a `patch` bump
 - **Manual releases**: a specific version may be cut manually by supplying an explicit `X.Y.Z` version tag when needed (e.g. via a manual workflow dispatch). This bypasses the label-based bump.
-- Release automation lives in `.github/workflows/release.yaml`: it computes the next version, tags, and creates the GitHub release. Building and publishing artifacts (images, binaries) is still a TODO stub in the workflow.
+- Release automation lives in `.github/workflows/release.yaml`: it computes the next version, builds and pushes the container image `ghcr.io/thanoslabs/beacon:X.Y.Z` for `linux/amd64` and `linux/arm64`, then tags and creates the GitHub release. The image is pushed before the tag is created, so a failed build leaves no tag behind. Standalone binaries are not published yet.
 
 ## Docs
 

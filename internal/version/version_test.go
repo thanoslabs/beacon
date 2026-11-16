@@ -45,3 +45,13 @@ func TestGetDefaults(t *testing.T) {
 		t.Errorf("GoVersion = %q, want a go version", info.GoVersion)
 	}
 }
+
+func TestGetPrefersCommitSetAtBuildTime(t *testing.T) {
+	old := Commit
+	t.Cleanup(func() { Commit = old })
+
+	Commit = "0123456789abcdef"
+	if got := Get().Commit; got != "0123456789abcdef" {
+		t.Errorf("Commit = %q, want the value set at build time", got)
+	}
+}
