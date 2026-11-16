@@ -1,0 +1,43 @@
+# Beacon and its only dependency, Postgres.
+#
+#   docker compose up --build        # build Beacon from this checkout and start both
+#   docker compose up -d --wait postgres   # only Postgres, for development and tests
+#
+# The credentials below are for local use only. Change them before exposing
+# either service.
+services:
+  beacon:
+    build:
+      context: .
+    environment:
+      BEACON_DATABASE_URL: postgres://beacon:beacon@postgres:5432/beacon?sslmode=disable
+    ports:
+      - "127.0.0.1:${BEACON_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:18.7-alpine
+    environment:
+      POSTGRES_USER: beacon
+      POSTGRES_PASSWORD: beacon
+      POSTGRES_DB: beacon
+    ports:
+      - "127.0.0.1:${BEACON_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username beacon --dbname beacon"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  postgres-data:

@@ -12,10 +12,24 @@
   "enabledManagers": [
     "asdf",
     "docker-compose",
+    "dockerfile",
     "github-actions",
     "gomod"
   ],
   "packageRules": [
+    {
+      "description": "Go is pinned in .tool-versions, go.mod and the Dockerfile; CI fails if they drift, so update them in one PR.",
+      "matchManagers": [
+        "asdf",
+        "dockerfile",
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "golang",
+        "go"
+      ],
+      "groupName": "go toolchain"
+    },
     {
       "matchManagers": [
         "asdf"
