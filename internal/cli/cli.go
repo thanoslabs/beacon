@@ -35,6 +35,7 @@ type command struct {
 // commands lists every subcommand by name.
 func commands() map[string]command {
 	return map[string]command{
+		"migrate": {summary: "Apply database schema migrations", run: runMigrate},
 		"version": {summary: "Print the version and exit", run: runVersion},
 	}
 }
@@ -114,13 +115,17 @@ func newFlagSet(e env, name, summary string) *flag.FlagSet {
 }
 
 // parseFlags parses args and rejects positional arguments, which no beacon
-// command takes.
-func parseFlags(fs *flag.FlagSet, args []string) error {
+// command takes. envErrs are problems found in environment variables while the
+// flags were registered; they are reported unless the user only asked for help.
+func parseFlags(fs *flag.FlagSet, args []string, envErrs ...error) error {
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return err
 		}
 		return errUsage
+	}
+	if len(envErrs) > 0 {
+		return errors.Join(envErrs...)
 	}
 	if fs.NArg() > 0 {
 		fmt.Fprintf(fs.Output(), "unexpected argument %q\n", fs.Arg(0))
