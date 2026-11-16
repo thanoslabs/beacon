@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: alerts can be received over a webhook and stored, and the first path from a webhook to Slack is being built. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: alerts are received over a webhook, stored and posted to a Slack channel. Acting on them from Slack, routing and escalation do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -45,7 +45,7 @@ Tooling:
 ├── internal/
 │   ├── alert/                # Alert model, state machine and timeline
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
-│   ├── config/               # Typed provisioned objects (sources) and the Secret type
+│   ├── config/               # Typed provisioned objects (sources, integrations) and the Secret type
 │   ├── ingest/               # Webhook receiver: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
 │   ├── notify/               # Notification queue, workers, retries and the Channel interface
@@ -54,6 +54,8 @@ Tooling:
 │   │   └── postgrestest/     # Test helper: one empty database per test
 │   ├── provision/            # Copies provisioned objects into Postgres
 │   ├── server/               # HTTP server, middleware, health, readiness and metrics endpoints
+│   ├── slack/                # Slack channel: Web API client and message rendering
+│   │   └── slacktest/        # Fake Slack for tests
 │   └── version/              # Build version reporting
 ├── .dockerignore             # Build context allow-list; add new source directories here
 ├── .golangci.yml             # golangci-lint configuration
@@ -138,6 +140,13 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - A new notification service is a type that implements `notify.Channel`, registered with `Pipeline.Register`. The pipeline must not learn anything specific to a service. A channel returns `notify.Permanent` for failures that retrying cannot fix and `notify.RetryAfter` when the service says how long to wait; anything else is retried with backoff. Channel errors are stored and shown on the timeline, so they must never contain a credential.
 - Delivery is at least once. A channel should make a repeated `Send` harmless where the service allows it.
 - `Pipeline.NotifyAll` is temporary: it notifies fixed targets on every state change until routing and escalation exist.
+
+### Slack
+
+- `internal/slack` is the Slack channel. It calls two Web API methods, `chat.postMessage` and `chat.update`, with the standard library; there is no Slack SDK.
+- Beacon has no Slack credentials for testing. Test against `slacktest`, the fake Slack, which checks requests against the documented shapes and limits. When you change what is sent, read Slack's current documentation rather than trusting memory, teach the fake the same rule, and say in the PR that real delivery is unverified.
+- Everything that comes from an alert passes through `escape` before it goes into message text, and each part is clipped so a message stays within Block Kit's limits.
+- `docs/slack.md` is the setup guide. Update it when scopes or settings change.
 
 To add a subcommand, add a file under `internal/cli/` and register it in `commands()` in `internal/cli/cli.go`. Commands take their environment, output streams and arguments as parameters, so tests can run them in-process.
 

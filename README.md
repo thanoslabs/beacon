@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. It receives alerts through a [JSON webhook](docs/webhook.md) and tracks their [state](docs/alert-lifecycle.md), but it does not notify anyone yet. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It receives alerts through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md) and posts them to one [Slack channel](docs/slack.md). Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -53,7 +53,7 @@ curl -X POST http://localhost:8080/api/v1/ingest/default \
   -d '{"labels": {"alertname": "DiskFull", "severity": "critical"}, "annotations": {"summary": "Disk is full"}}'
 ```
 
-The [webhook page](docs/webhook.md) describes the payload and the responses.
+The [webhook page](docs/webhook.md) describes the payload and the responses. To have alerts posted to Slack, also set `BEACON_SLACK_BOT_TOKEN` and `BEACON_SLACK_CHANNEL` as the [Slack page](docs/slack.md) describes.
 
 Releases publish a container image for `linux/amd64` and `linux/arm64`, tagged with the bare version:
 

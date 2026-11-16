@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/server"
+	"github.com/thanoslabs/beacon/internal/slack"
 	"github.com/thanoslabs/beacon/internal/version"
 )
 
@@ -30,7 +33,10 @@ func runServe(ctx context.Context, e env, args []string) error {
 		migrate   bool
 		boot      bootstrapSettings
 		notifyCfg notify.Config
-		envErrs   []error
+		// slackAPIURL is a process setting, not part of an integration: it
+		// exists so that tests can point Beacon at a fake Slack.
+		slackAPIURL string
+		envErrs     []error
 	)
 	fs := newFlagSet(e, "serve", "Run the Beacon server")
 	stringSetting(fs, e, &srvCfg.Addr, "listen-address", "BEACON_LISTEN_ADDRESS", server.DefaultAddr,
@@ -45,6 +51,8 @@ func runServe(ctx context.Context, e env, args []string) error {
 		"log format: json or text")
 	intSetting(fs, e, &notifyCfg.Workers, "notification-workers", "BEACON_NOTIFICATION_WORKERS", notify.DefaultWorkers,
 		"how many notifications this process delivers at a time", &envErrs)
+	stringSetting(fs, e, &slackAPIURL, "slack-api-url", "BEACON_SLACK_API_URL", slack.DefaultAPIURL,
+		"base URL of the Slack Web API; change it only to test against a fake Slack")
 	databaseSettings(fs, e, &dbCfg, &envErrs)
 	boot.register(fs, e)
 	if err := parseFlags(fs, args, envErrs...); err != nil {
@@ -54,9 +62,12 @@ func runServe(ctx context.Context, e env, args []string) error {
 	if err := checkDatabaseSettings(dbCfg); err != nil {
 		return err
 	}
-	cfg := boot.config()
-	if err := cfg.Validate(); err != nil {
+	cfg, err := boot.config()
+	if err != nil {
 		return err
+	}
+	if _, err := url.ParseRequestURI(slackAPIURL); err != nil || !strings.HasPrefix(slackAPIURL, "http") {
+		return fmt.Errorf("--slack-api-url must be an http or https URL, got %q", slackAPIURL)
 	}
 	if srvCfg.ShutdownTimeout <= 0 {
 		return fmt.Errorf("--shutdown-timeout must be positive, got %s", srvCfg.ShutdownTimeout)
@@ -101,6 +112,9 @@ func runServe(ctx context.Context, e env, args []string) error {
 	}
 
 	pipeline := notify.New(pool, alerts, logger, notifyCfg)
+	if err := attachNotifications(ctx, logger, pool, cfg, alerts, pipeline, slackAPIURL); err != nil {
+		return err
+	}
 
 	// Background work stops with the server: it watches the same context.
 	var background sync.WaitGroup
