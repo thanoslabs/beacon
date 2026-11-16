@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at the design stage. There is no runnable code yet. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. The `beacon` command builds and runs, but it does not handle alerts yet. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -38,7 +38,15 @@ Documentation lives in [`docs/`](docs/) and is published to <https://thanoslabs.
 
 ## Development
 
-- **Tool versions**: `.tool-versions` pins language and tool versions. Install them with `asdf install` or `mise install`.
+`.tool-versions` pins Go and the other tools. Install them with `mise install` (or `asdf install`) before running anything.
+
+```sh
+go build -o bin/beacon ./cmd/beacon   # build the binary
+./bin/beacon version                  # run it
+go test -race ./...                   # run the tests
+golangci-lint run ./...               # lint
+```
+
 - **Releases**: merging a PR to `main` cuts a [SemVer](https://semver.org/) release with a bare `X.Y.Z` tag. The bump comes from the PR's `major`, `minor` or `patch` label, and defaults to `patch`.
 - **Dependencies**: [Renovate](https://docs.renovatebot.com/) opens update PRs, configured in `renovate.json`.
 

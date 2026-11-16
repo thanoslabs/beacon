@@ -6,18 +6,19 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at the design stage: there is no application code yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: the foundations are in place, and no alert handling exists yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
-Planned, per `docs/requirements.md`:
+Per `docs/requirements.md`:
 
-- **Go** for the server, shipped as a single binary
-- **Postgres** as the only required dependency
-- **Declarative configuration files** for provisioned objects (sources, integrations, routing, escalation policies, teams, schedule rotations); the database holds runtime state
+- **Go** for the server, shipped as a single binary (`cmd/beacon`). The command line uses the standard library `flag` package; there is no CLI framework.
+- **Postgres** as the only required dependency (planned)
+- **Declarative configuration files** for provisioned objects (sources, integrations, routing, escalation policies, teams, schedule rotations); the database holds runtime state (planned)
 
-Already in place:
+Tooling:
 
+- **golangci-lint** for linting and formatting checks, configured in `.golangci.yml`
 - **Renovate** for dependency updates (managers: `asdf`, `docker-compose`, `github-actions`, `gomod`)
 - **GitHub Actions** for the CI, Renovate, release, and docs workflows
 - **[nebula-md](https://github.com/thanoslabs/nebula-md)** for building `docs/` into a static markdown site
@@ -36,17 +37,41 @@ Already in place:
 │       ├── docs.yaml         # nebula-md docs build + GitHub Pages deploy
 │       ├── release.yaml      # Label-driven SemVer release workflow
 │       └── renovate.yaml     # Renovate workflow
+├── cmd/
+│   └── beacon/               # Entry point of the single binary
 ├── docs/                     # Project documentation (markdown source for the docs site)
+├── internal/
+│   ├── cli/                  # Subcommand dispatch and the subcommands themselves
+│   └── version/              # Build version reporting
+├── .golangci.yml             # golangci-lint configuration
 ├── .tool-versions            # Pinned language/tool versions (asdf/mise)
 ├── AGENTS.md                 # This file
 ├── CONTRIBUTING.md
 ├── LICENSE
 ├── README.md
 ├── SECURITY.md
+├── go.mod                    # Go module: github.com/thanoslabs/beacon
 └── renovate.json             # Renovate settings
 ```
 
-Update this section, and add build, test and run commands, when application code is added.
+Keep this section and the commands below up to date as code is added.
+
+## Commands
+
+Run `mise install` first so that the pinned versions are used.
+
+| Task | Command |
+|---|---|
+| Build | `go build -o bin/beacon ./cmd/beacon` |
+| Run | `./bin/beacon version` (or `go run ./cmd/beacon version`) |
+| Test | `go test -race ./...` |
+| Lint | `golangci-lint run ./...` |
+| Fix formatting | `golangci-lint fmt ./...` |
+| Check module files | `go mod tidy -diff` |
+
+CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch.
+
+To add a subcommand, add a file under `internal/cli/` and register it in `commands()` in `internal/cli/cli.go`. Commands take their environment, output streams and arguments as parameters, so tests can run them in-process.
 
 ## Conventions
 
