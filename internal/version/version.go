@@ -15,6 +15,11 @@ import (
 // Builds that do not set it report "dev".
 var Version = "dev"
 
+// Commit is the commit the binary was built from. It only needs to be set,
+// in the same way as Version, when the build has no access to the repository
+// (the container image build). Otherwise the Go toolchain records it.
+var Commit = ""
+
 // Info describes a build.
 type Info struct {
 	Version   string
@@ -31,6 +36,10 @@ func Get() Info {
 		Version:   Version,
 		GoVersion: runtime.Version(),
 		Platform:  runtime.GOOS + "/" + runtime.GOARCH,
+	}
+	if Commit != "" {
+		info.Commit = Commit
+		return info
 	}
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		for _, s := range bi.Settings {
