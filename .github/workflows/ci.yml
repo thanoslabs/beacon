@@ -4,7 +4,12 @@ on:
   push:
     branches:
       - main
+  # No branch filter: runs for pull requests against any base branch,
+  # including stacked pull requests that do not target main.
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   validate:
@@ -27,9 +32,24 @@ jobs:
             python3 -c "import yaml, sys; yaml.safe_load(open('$f'))" 2>/dev/null || echo "Invalid YAML: $f"
           done
 
-      # Add project-specific validation steps below, e.g.:
-      # - name: Run tests
-      #   run: go test ./...
-      #
-      # - name: Build Docker image
-      #   run: docker build .
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      # Installs the Go and golangci-lint versions pinned in .tool-versions.
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5.2.9
+
+      - name: Check go.mod and go.sum are tidy
+        run: go mod tidy -diff
+
+      - name: Build
+        run: go build ./...
+
+      - name: Lint
+        run: golangci-lint run ./...
+
+      - name: Test
+        run: go test -race ./...

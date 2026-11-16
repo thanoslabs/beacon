@@ -1,0 +1,28 @@
+# golangci-lint configuration. The version is pinned in .tool-versions.
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gocritic
+    - misspell
+    - nolintlint
+    - revive
+    - sloglint
+    - unconvert
+  exclusions:
+    rules:
+      # Write errors on stdout and stderr cannot be handled usefully.
+      - linters: [errcheck]
+        source: 'fmt\.Fp?rint'
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/thanoslabs/beacon
