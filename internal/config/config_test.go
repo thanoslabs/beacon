@@ -157,3 +157,68 @@ func TestValidName(t *testing.T) {
 		}
 	}
 }
+
+func testSlack() Integration {
+	return Integration{Name: "slack", Type: IntegrationTypeSlack, Slack: &SlackIntegration{
+		BotToken:      NewSecret(SecretRef{Env: "BEACON_SLACK_BOT_TOKEN"}, "xoxb-"+secretValue),
+		SigningSecret: NewSecret(SecretRef{Env: "BEACON_SLACK_SIGNING_SECRET"}, "signing-"+secretValue),
+	}}
+}
+
+func TestValidateIntegrations(t *testing.T) {
+	valid := Config{Integrations: []Integration{testSlack()}, Notify: []ChannelTarget{{Channel: "C0123456789", Integration: "slack"}}}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid config: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		change func(*Config)
+		want   string
+	}{
+		{name: "bad name", change: func(c *Config) { c.Integrations[0].Name = "Slack!" }, want: `integration "Slack!": name must be`},
+		{name: "duplicate", change: func(c *Config) { c.Integrations = append(c.Integrations, testSlack()) }, want: `integration "slack": name is used twice`},
+		{name: "unknown type", change: func(c *Config) { c.Integrations[0].Type = "pager" }, want: `type "pager" is not supported`},
+		{name: "missing settings", change: func(c *Config) { c.Integrations[0].Slack = nil }, want: "slack: the settings are missing"},
+		{name: "missing bot token", change: func(c *Config) { c.Integrations[0].Slack.BotToken = Secret{} }, want: "slack.bot_token is required"},
+		{name: "target without channel", change: func(c *Config) { c.Notify[0].Channel = "" }, want: "notify target 1: channel is required"},
+		{name: "target with unknown integration", change: func(c *Config) { c.Notify[0].Integration = "email" }, want: `notify target 1: integration "email" does not exist`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Integrations: []Integration{testSlack()}, Notify: []ChannelTarget{{Channel: "C0123456789", Integration: "slack"}}}
+			tt.change(&cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate = %v, want an error containing %q", err, tt.want)
+			}
+			if strings.Contains(err.Error(), secretValue) {
+				t.Errorf("the error contains a secret: %v", err)
+			}
+		})
+	}
+}
+
+func TestIntegrationSecretsAreNeverPrinted(t *testing.T) {
+	cfg := Config{Integrations: []Integration{testSlack()}}
+	encoded, err := json.Marshal(cfg.Integrations[0])
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var logs bytes.Buffer
+	slog.New(slog.NewTextHandler(&logs, nil)).Info("integration", slog.Any("integration", cfg.Integrations[0]), slog.Any("config", cfg))
+	for name, out := range map[string]string{
+		"%+v":  fmt.Sprintf("%+v %+v", cfg, cfg.Integrations[0].Slack),
+		"%#v":  fmt.Sprintf("%#v %#v", cfg, *cfg.Integrations[0].Slack),
+		"json": string(encoded),
+		"slog": logs.String(),
+	} {
+		if strings.Contains(out, secretValue) {
+			t.Errorf("%s prints a secret: %s", name, out)
+		}
+	}
+	want := `{"name":"slack","type":"slack","slack":{"bot_token":{"env":"BEACON_SLACK_BOT_TOKEN"},"signing_secret":{"env":"BEACON_SLACK_SIGNING_SECRET"}}}`
+	if string(encoded) != want {
+		t.Errorf("stored form = %s, want %s", encoded, want)
+	}
+}

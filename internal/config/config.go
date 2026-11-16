@@ -17,7 +17,14 @@ import (
 
 // Config is everything provisioned.
 type Config struct {
-	Sources []Source
+	Sources      []Source
+	Integrations []Integration
+
+	// Notify lists the shared channels that are told about every alert.
+	//
+	// Temporary: it stands in for routing and escalation policies, whose
+	// steps will name their targets. It is not part of the file schema.
+	Notify []ChannelTarget
 }
 
 // SourceTypeWebhook is the generic JSON webhook source type.
@@ -68,6 +75,32 @@ func (m SeverityMapping) Resolve(labels map[string]string) alert.Severity {
 	return alert.SeverityWarning
 }
 
+// IntegrationTypeSlack is the Slack integration type.
+const IntegrationTypeSlack = "slack"
+
+// Integration is a connection to a notification service.
+type Integration struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	// Slack holds the settings when Type is IntegrationTypeSlack.
+	Slack *SlackIntegration `json:"slack,omitempty"`
+}
+
+// SlackIntegration holds the credentials of a Slack app.
+type SlackIntegration struct {
+	// BotToken is the app's bot user OAuth token.
+	BotToken Secret `json:"bot_token"`
+	// SigningSecret verifies that requests come from Slack.
+	SigningSecret Secret `json:"signing_secret"`
+}
+
+// ChannelTarget is a shared channel reached through an integration, in the
+// form escalation steps use: {channel: <channel>, integration: <name>}.
+type ChannelTarget struct {
+	Channel     string `json:"channel"`
+	Integration string `json:"integration"`
+}
+
 var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
 // ValidName reports whether name can identify a provisioned object: lowercase
@@ -107,6 +140,35 @@ func (c Config) Validate() error {
 		}
 		if d := s.Severity.Default; d != "" && !d.Valid() {
 			errs = append(errs, fmt.Errorf("%s: severity.default: %q is not critical, warning or info", at, d))
+		}
+	}
+
+	integrations := map[string]bool{}
+	for _, i := range c.Integrations {
+		at := fmt.Sprintf("integration %q", i.Name)
+		switch {
+		case !ValidName(i.Name):
+			errs = append(errs, fmt.Errorf("%s: name must be lowercase letters, digits and hyphens, start with a letter and be at most 63 characters", at))
+		case integrations[i.Name]:
+			errs = append(errs, fmt.Errorf("%s: name is used twice", at))
+		}
+		integrations[i.Name] = true
+		switch {
+		case i.Type != IntegrationTypeSlack:
+			errs = append(errs, fmt.Errorf("%s: type %q is not supported; use %q", at, i.Type, IntegrationTypeSlack))
+		case i.Slack == nil:
+			errs = append(errs, fmt.Errorf("%s: slack: the settings are missing", at))
+		case !i.Slack.BotToken.IsSet():
+			errs = append(errs, fmt.Errorf("%s: slack.bot_token is required", at))
+		}
+	}
+	for n, t := range c.Notify {
+		at := fmt.Sprintf("notify target %d", n+1)
+		if t.Channel == "" {
+			errs = append(errs, fmt.Errorf("%s: channel is required", at))
+		}
+		if !integrations[t.Integration] {
+			errs = append(errs, fmt.Errorf("%s: integration %q does not exist", at, t.Integration))
 		}
 	}
 	return errors.Join(errs...)
