@@ -13,3 +13,4 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[alert-lifecycle]]: the states an alert moves through, and its timeline
 - [[webhook]]: send alerts to Beacon as JSON over HTTP
 - [[notifications]]: how notifications are queued, retried and recorded
+- [[slack]]: set up the Slack app and send alerts to a channel

@@ -13,6 +13,10 @@ services:
       BEACON_DATABASE_URL: postgres://beacon:beacon@postgres:5432/beacon?sslmode=disable
       # Token of the webhook source. Empty means no source. See docs/webhook.md.
       BEACON_SOURCE_TOKEN: ${BEACON_SOURCE_TOKEN:-}
+      # Slack app credentials and channel. Empty means nobody is notified. See docs/slack.md.
+      BEACON_SLACK_BOT_TOKEN: ${BEACON_SLACK_BOT_TOKEN:-}
+      BEACON_SLACK_SIGNING_SECRET: ${BEACON_SLACK_SIGNING_SECRET:-}
+      BEACON_SLACK_CHANNEL: ${BEACON_SLACK_CHANNEL:-}
     ports:
       - "127.0.0.1:${BEACON_PORT:-8080}:8080"
     depends_on:
