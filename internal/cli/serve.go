@@ -5,17 +5,20 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/thanoslabs/beacon/internal/alert"
+	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/logging"
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres"
-	"github.com/thanoslabs/beacon/internal/provision"
 	"github.com/thanoslabs/beacon/internal/server"
 	"github.com/thanoslabs/beacon/internal/slack"
 	"github.com/thanoslabs/beacon/internal/version"
@@ -108,28 +111,52 @@ func runServe(ctx context.Context, e env, args []string) error {
 		}
 	}
 
-	srv := server.New(srvCfg, logger, pool, server.NewRegistry())
+	registry := server.NewRegistry()
+	srv := server.New(srvCfg, logger, pool, registry)
 	if err := srv.Listen(); err != nil {
 		return err
 	}
 
+	// The parts that follow the configuration start empty. The provisioner
+	// fills them now, and again on every reload.
+	alerts := alert.NewStore(pool)
+	pipeline := notify.New(pool, alerts, logger, notifyCfg)
+	alerts.Observe(pipeline.NotifyAll(nil))
+	prov := &provisioner{
+		logger: logger, pool: pool, path: cfgPath, getenv: e.getenv, slackAPIURL: slackAPIURL,
+		ingest:       ingest.New(logger, alerts, nil),
+		interactions: slack.NewInteractions(logger, alerts, nil),
+		pipeline:     pipeline,
+	}
+	prov.registerMetrics(registry)
+	prov.ingest.Register(srv.Mux())
+	prov.interactions.Register(srv.Mux())
 	// The provisioned rows are made to match the files before anything that
 	// refers to them is served.
-	rows, err := reconcile(ctx, logger, pool, cfg)
-	if err != nil {
+	if err := prov.apply(ctx, cfg); err != nil {
 		return err
 	}
 
-	alerts := alert.NewStore(pool)
-	attachIngest(ctx, logger, cfg, rows.IDs[provision.Sources], alerts, srv.Mux())
-
-	pipeline := notify.New(pool, alerts, logger, notifyCfg)
-	attachNotifications(ctx, logger, cfg, rows.IDs[provision.Integrations], alerts, pipeline, srv.Mux(), slackAPIURL)
+	// SIGHUP asks for the configuration to be read again.
+	hangup := make(chan os.Signal, 1)
+	signal.Notify(hangup, syscall.SIGHUP)
+	defer signal.Stop(hangup)
 
 	// Background work stops with the server: it watches the same context.
 	var background sync.WaitGroup
 	background.Go(func() { pipeline.Run(ctx) })
 	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
+	background.Go(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hangup:
+				// The outcome is logged and counted by reload.
+				_ = prov.reload(ctx, "signal")
+			}
+		}
+	})
 
 	err = srv.Serve(ctx)
 	background.Wait()

@@ -118,6 +118,8 @@ type beacon struct {
 	logs strings.Builder
 	done chan struct{}
 	addr chan string
+	// dir holds the configuration the process was started with.
+	dir string
 }
 
 // start runs the binary against a new database and a new fake Slack, and
@@ -138,7 +140,7 @@ func launch(t *testing.T, dbURL, dir string) *beacon {
 	t.Helper()
 	bin := build(t)
 
-	b := &beacon{t: t, slack: slacktest.New(t, botToken), done: make(chan struct{}), addr: make(chan string, 1)}
+	b := &beacon{t: t, slack: slacktest.New(t, botToken), done: make(chan struct{}), addr: make(chan string, 1), dir: dir}
 	b.cmd = exec.Command(bin, "serve")
 	b.cmd.Env = []string{
 		"BEACON_DATABASE_URL=" + dbURL,
@@ -238,7 +240,13 @@ func (b *beacon) terminate() int {
 // returns the status and the decoded response.
 func (b *beacon) webhook(payload string) (int, map[string]string) {
 	b.t.Helper()
-	req, err := http.NewRequest(http.MethodPost, b.url+"/api/v1/ingest/e2e", strings.NewReader(payload))
+	return b.webhookTo("e2e", payload)
+}
+
+// webhookTo is webhook for another source with the same token.
+func (b *beacon) webhookTo(source, payload string) (int, map[string]string) {
+	b.t.Helper()
+	req, err := http.NewRequest(http.MethodPost, b.url+"/api/v1/ingest/"+source, strings.NewReader(payload))
 	if err != nil {
 		b.t.Fatalf("new request: %v", err)
 	}
@@ -588,5 +596,156 @@ func TestConfigurationChangesBetweenStarts(t *testing.T) {
 	// The removed source no longer accepts alerts.
 	if code, _ := second.webhook(diskFull); code != http.StatusUnauthorized {
 		t.Errorf("webhook to the removed source = %d, want 401", code)
+	}
+}
+
+// reload replaces the configuration file, sends SIGHUP, as an operator
+// would, and waits for the n-th outcome in the log.
+func (b *beacon) reload(yaml string, n int) (logs string) {
+	b.t.Helper()
+	if err := os.WriteFile(filepath.Join(b.dir, "beacon.yaml"), []byte(yaml), 0o600); err != nil {
+		b.t.Fatalf("write configuration: %v", err)
+	}
+	if err := b.cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		b.t.Fatalf("signal beacon: %v", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		logs = b.output()
+		if strings.Count(logs, `"msg":"configuration reloaded"`)+strings.Count(logs, `"msg":"configuration reload failed`) >= n {
+			return logs
+		}
+		if time.Now().After(deadline) {
+			b.t.Fatalf("no outcome of reload %d in the logs:\n%s", n, logs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// metrics returns the lines of the metrics endpoint that start with prefix.
+func (b *beacon) metrics(prefix string) string {
+	b.t.Helper()
+	resp, err := http.Get(b.url + "/metrics")
+	if err != nil {
+		b.t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		b.t.Fatalf("read metrics: %v", err)
+	}
+	var lines []string
+	for line := range strings.SplitSeq(string(body), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// TestReload changes the configuration of a running process three times: a
+// valid change, an invalid one, and a valid one again. The process keeps
+// serving throughout; the invalid configuration is rejected as a whole and
+// changes nothing.
+func TestReload(t *testing.T) {
+	b := start(t)
+	if got, want := b.metrics("beacon_config_reloads_total"), `beacon_config_reloads_total{result="failure"} 0`+"\n"+`beacon_config_reloads_total{result="success"} 0`; got != want {
+		t.Errorf("metrics at start:\n%s", got)
+	}
+	if got := b.metrics("beacon_config_last_reload_successful"); got != "beacon_config_last_reload_successful 1" {
+		t.Errorf("metrics at start: %s", got)
+	}
+
+	// 1. A valid change: a second source, and the channel by another name
+	// (the fake Slack knows one channel, by its ID and by the name alerts).
+	second := strings.Replace(configuration, "sources:\n", "sources:\n  - name: second\n    type: webhook\n    token: {env: BEACON_SOURCE_TOKEN}\n", 1)
+	second = strings.Replace(second, "channel: C0ALERTS", "channel: alerts", 1)
+	if code, _ := b.webhookTo("second", diskFull); code != http.StatusUnauthorized {
+		t.Fatalf("webhook to a source that does not exist yet = %d, want 401", code)
+	}
+	logs := b.reload(second, 1)
+	if !strings.Contains(logs, `"msg":"configuration reloaded","trigger":"signal"`) || !strings.Contains(logs, `"msg":"provisioned object created","kind":"sources","name":"second"`) {
+		t.Fatalf("the reload is not in the logs:\n%s", logs)
+	}
+	code, res := b.webhookTo("second", diskFull)
+	if code != http.StatusCreated {
+		t.Fatalf("webhook to the new source = %d %v", code, res)
+	}
+	b.message("the alert in Slack", contains("*Firing*"))
+	var destination string
+	if err := b.db.QueryRow(context.Background(), `SELECT destination FROM notifications`).Scan(&destination); err != nil || destination != "alerts" {
+		t.Errorf("the alert was sent to %q, %v; want the channel of the reloaded configuration", destination, err)
+	}
+
+	// 2. An invalid change: the first source is gone, and so is the policy
+	// that routing names. Nothing of it may take effect.
+	broken := strings.Replace(second, "  - name: e2e\n    type: webhook\n    token: {env: BEACON_SOURCE_TOKEN}\n", "", 1)
+	broken = strings.Replace(broken, "escalation_policy: default", "escalation_policy: missing", 1)
+	logs = b.reload(broken, 2)
+	for _, want := range []string{
+		`"msg":"configuration reload failed; the previous configuration stays active"`,
+		`"msg":"configuration problem"`, `"object":"routing","field":"default.escalation_policy","problem":"escalation policy \"missing\" does not exist"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("the logs do not contain %s", want)
+		}
+	}
+	if code, res := b.webhook(diskFullResolved); code != http.StatusOK {
+		t.Errorf("webhook to the source that the rejected configuration removed = %d %v, want it still served", code, res)
+	}
+	if got := b.rows("sources"); got != "e2e, second" {
+		t.Errorf("sources after the rejected reload = %q", got)
+	}
+	if got, want := b.metrics("beacon_config_"), `beacon_config_last_reload_successful 0`; !strings.Contains(got, want) ||
+		!strings.Contains(got, `beacon_config_reloads_total{result="failure"} 1`) || !strings.Contains(got, `beacon_config_reloads_total{result="success"} 1`) {
+		t.Errorf("metrics after the rejected reload:\n%s", got)
+	}
+
+	// 3. Fixed: the removal now takes effect.
+	fixed := strings.Replace(broken, "escalation_policy: missing", "escalation_policy: default", 1)
+	b.reload(fixed, 3)
+	if code, _ := b.webhook(diskFull); code != http.StatusUnauthorized {
+		t.Errorf("webhook to the removed source = %d, want 401", code)
+	}
+	if got := b.rows("sources"); got != "e2e (removed), second" {
+		t.Errorf("sources after the reload = %q", got)
+	}
+	if got := b.metrics("beacon_config_"); !strings.Contains(got, "beacon_config_last_reload_successful 1") || !strings.Contains(got, `beacon_config_reloads_total{result="success"} 2`) {
+		t.Errorf("metrics after the last reload:\n%s", got)
+	}
+
+	if code := b.terminate(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+	for _, secret := range []string{sourceToken, botToken, signingSecret} {
+		if strings.Contains(b.output(), secret) {
+			t.Errorf("the logs contain the credential %q", secret)
+		}
+	}
+}
+
+// TestReloadReadsSecretFilesAgain rotates a secret that is kept in a file.
+func TestReloadReadsSecretFilesAgain(t *testing.T) {
+	b := start(t)
+	code, res := b.webhook(diskFull)
+	if code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	msg := b.message("the alert in Slack", contains("*Firing*"))
+
+	const rotated = "e2e-rotated-signing-secret-17aa"
+	if err := os.WriteFile(filepath.Join(b.dir, "signing-secret"), []byte(rotated+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.reload(configuration, 1)
+	alice := slacktest.User{ID: "U0ALICE", Username: "alice"}
+	if code := b.click(msg, "beacon_acknowledge", alice); code != http.StatusUnauthorized {
+		t.Errorf("a press signed with the old secret = %d, want 401", code)
+	}
+	if code := b.slack.Click(t, b.url+"/api/v1/integrations/slack/interactions", rotated, msg, "beacon_acknowledge", alice); code != http.StatusOK {
+		t.Errorf("a press signed with the new secret = %d, want 200", code)
+	}
+	if strings.Contains(b.output(), rotated) {
+		t.Error("the logs contain the rotated secret")
 	}
 }

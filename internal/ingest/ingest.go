@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/thanoslabs/beacon/internal/alert"
@@ -42,18 +43,28 @@ type Alerts interface {
 
 // Handler serves the ingest endpoint.
 type Handler struct {
-	logger  *slog.Logger
-	alerts  Alerts
-	sources map[string]Source
+	logger *slog.Logger
+	alerts Alerts
+	// sources is replaced as a whole when the configuration is reloaded, so
+	// a request sees either the old set or the new one.
+	sources atomic.Pointer[map[string]Source]
 }
 
 // New returns a handler for the given sources.
 func New(logger *slog.Logger, alerts Alerts, sources []Source) *Handler {
-	h := &Handler{logger: logger, alerts: alerts, sources: make(map[string]Source, len(sources))}
-	for _, s := range sources {
-		h.sources[s.Name] = s
-	}
+	h := &Handler{logger: logger, alerts: alerts}
+	h.SetSources(sources)
 	return h
+}
+
+// SetSources replaces the sources that the handler serves. It is safe while
+// requests are being handled.
+func (h *Handler) SetSources(sources []Source) {
+	byName := make(map[string]Source, len(sources))
+	for _, s := range sources {
+		byName[s.Name] = s
+	}
+	h.sources.Store(&byName)
 }
 
 // Register attaches the endpoint to mux.
@@ -116,7 +127,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // authenticate returns the source named in the path when the request carries
 // its token. An unknown source and a wrong token are not told apart.
 func (h *Handler) authenticate(r *http.Request) (Source, bool) {
-	src, known := h.sources[r.PathValue("source")]
+	src, known := (*h.sources.Load())[r.PathValue("source")]
 	scheme, token, _ := strings.Cut(r.Header.Get("Authorization"), " ")
 	// Hashing first makes the comparison take the same time whatever the
 	// lengths, and it runs for unknown sources too.
