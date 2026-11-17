@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/thanoslabs/beacon/internal/access"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/config"
 	"github.com/thanoslabs/beacon/internal/ingest"
@@ -48,6 +51,82 @@ type provisioner struct {
 
 	// teams are the teams of the active configuration.
 	teams atomic.Pointer[[]config.Team]
+}
+
+// ReloadPath is the route that reloads the configuration.
+const ReloadPath = "/api/v1/config/reload"
+
+// routes lists every route that beacon serve adds to the server, with who
+// may use it. The server refuses anything that is not listed, and puts every
+// route that is not public behind a session.
+//
+// The public routes are the explicit allow-list of what is reachable without
+// a session. Each must either be harmless to a stranger or check a
+// credential of its own. TestRoutes holds the same list; a route added here
+// must be added there, which is a second look at its level.
+func (p *provisioner) routes() []access.Route {
+	routes := []access.Route{
+		// The source's token is checked by the handler.
+		{Pattern: "POST " + ingest.Path, Level: access.Public, Handler: p.ingest},
+		// Slack's signature over the body is checked by the handler.
+		{Pattern: "POST " + slack.InteractionsPath, Level: access.Public, Handler: p.interactions},
+		{Pattern: "POST " + ReloadPath, Level: access.Admin, Handler: http.HandlerFunc(p.handleReload)},
+	}
+	return append(routes, p.auth.Routes()...)
+}
+
+// handleReload reloads the configuration for an admin. It does what SIGHUP
+// does, and answers with the outcome.
+func (p *provisioner) handleReload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	err := p.reload(r.Context(), "api")
+	if err == nil {
+		_ = json.NewEncoder(w).Encode(map[string]string{"result": "reloaded"})
+		return
+	}
+	// The problems name files, objects and fields, never the value of a
+	// secret, and the caller is an admin.
+	body := struct {
+		Error    string          `json:"error"`
+		Problems []reloadProblem `json:"problems,omitempty"`
+	}{Error: err.Error() + "; the previous configuration stays active"}
+	var problems config.Errors
+	status := http.StatusInternalServerError
+	if errors.As(err, &problems) {
+		status = http.StatusUnprocessableEntity
+		for _, problem := range problems {
+			body.Problems = append(body.Problems, reloadProblem{File: problem.File, Line: problem.Line, Object: problem.Object, Field: problem.Field, Problem: problem.Msg})
+		}
+	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// reloadProblem is one problem of a rejected configuration, as the reload
+// endpoint reports it.
+type reloadProblem struct {
+	File    string `json:"file,omitempty"`
+	Line    int    `json:"line,omitempty"`
+	Object  string `json:"object,omitempty"`
+	Field   string `json:"field,omitempty"`
+	Problem string `json:"problem"`
+}
+
+// invalidConfig is a configuration that was rejected, with its problems.
+type invalidConfig struct{ problems config.Errors }
+
+func (e *invalidConfig) Error() string {
+	return "the configuration is not valid: " + plural(len(e.problems), "problem")
+}
+
+// As lets errors.As find the problems.
+func (e *invalidConfig) As(target any) bool {
+	if t, ok := target.(*config.Errors); ok {
+		*t = e.problems
+		return true
+	}
+	return false
 }
 
 // Values of the result label of the reload counter.
@@ -177,7 +256,7 @@ func (p *provisioner) reloadFrom(ctx context.Context) error {
 				slog.String("file", problem.File), slog.Int("line", problem.Line),
 				slog.String("object", problem.Object), slog.String("field", problem.Field), slog.String("problem", problem.Msg))
 		}
-		return errors.New("the configuration is not valid: " + plural(len(problems), "problem"))
+		return &invalidConfig{problems: problems}
 	}
 	if err != nil {
 		return err

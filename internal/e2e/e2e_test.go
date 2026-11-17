@@ -927,3 +927,60 @@ func TestTeamMembersFromConfiguration(t *testing.T) {
 		t.Errorf("members after the list changed = %q", got)
 	}
 }
+
+// TestRolesAreEnforced signs in a member and an admin through the identity
+// provider and sends both to a route that only an admin may use.
+func TestRolesAreEnforced(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, signInConfiguration(t)))
+	b.waitUntilServing()
+	addr := strings.TrimPrefix(b.url, "http://")
+	const reload = "/api/v1/config/reload"
+
+	stranger := oidctest.Browser(t, addr)
+	if code, body := do(t, stranger, http.MethodPost, reload); code != http.StatusUnauthorized {
+		t.Errorf("reload without a session = %d %s, want 401", code, body)
+	}
+
+	// Grace is a member: she may ask who she is, and may not reload.
+	member := oidctest.Browser(t, addr)
+	if code, body := oidctest.SignIn(t, member, oidctest.Grace, oidctest.Password); code != http.StatusOK || !strings.Contains(body, `"role":"member"`) {
+		t.Fatalf("Grace after sign-in = %d %s", code, body)
+	}
+	if code, body := do(t, member, http.MethodPost, reload); code != http.StatusForbidden || !strings.Contains(body, "needs the admin role") {
+		t.Errorf("reload as a member = %d %s, want 403", code, body)
+	}
+	if strings.Contains(b.output(), `"msg":"configuration reloaded"`) {
+		t.Error("a member reloaded the configuration")
+	}
+
+	// Ada is an admin.
+	admin := oidctest.Browser(t, addr)
+	if code, body := oidctest.SignIn(t, admin, oidctest.Ada, oidctest.Password); code != http.StatusOK || !strings.Contains(body, `"role":"admin"`) {
+		t.Fatalf("Ada after sign-in = %d %s", code, body)
+	}
+	if code, body := do(t, admin, http.MethodPost, reload); code != http.StatusOK || !strings.Contains(body, `"result":"reloaded"`) {
+		t.Errorf("reload as an admin = %d %s, want 200", code, body)
+	}
+	if !strings.Contains(b.output(), `"msg":"configuration reloaded","trigger":"api"`) {
+		t.Error("the reload by the admin is not in the logs")
+	}
+
+	// An invalid configuration is refused through the endpoint as it is by
+	// the signal, and the answer says what is wrong.
+	broken := strings.Replace(signInConfiguration(t), "escalation_policy: default", "escalation_policy: missing", 1)
+	if err := os.WriteFile(filepath.Join(b.dir, "beacon.yaml"), []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, body := do(t, admin, http.MethodPost, reload)
+	if code != http.StatusUnprocessableEntity || !strings.Contains(body, `"field":"default.escalation_policy"`) || !strings.Contains(body, "the previous configuration stays active") {
+		t.Errorf("reload of an invalid configuration = %d %s, want 422 with the problem", code, body)
+	}
+	if code, res := b.webhook(diskFull); code != http.StatusCreated {
+		t.Errorf("webhook after the rejected reload = %d %v", code, res)
+	}
+	// The admin's session is still good, and a member still cannot reload.
+	if code, _ := do(t, admin, http.MethodGet, "/api/v1/me"); code != http.StatusOK {
+		t.Errorf("GET /api/v1/me as the admin = %d", code)
+	}
+}

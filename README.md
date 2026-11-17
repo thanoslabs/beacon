@@ -94,7 +94,7 @@ export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmo
 ./bin/beacon validate --config examples/full   # check configuration files; needs no database
 ```
 
-The server answers on these endpoints:
+The server answers on these endpoints. Everything that is not listed as open in the [access page](docs/access.md) needs a session, and an address that does not exist answers `401` like one that does:
 
 | Endpoint | Purpose |
 |---|---|
@@ -102,6 +102,7 @@ The server answers on these endpoints:
 | `POST /api/v1/integrations/<name>/interactions` | Receives button presses from Slack. See the [Slack page](docs/slack.md). |
 | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` | Sign-in through an OpenID Connect identity provider. See the [access page](docs/access.md). |
 | `GET /api/v1/me` | Who is signed in. Needs a session. |
+| `POST /api/v1/config/reload` | Reloads the configuration. Needs the admin role. |
 | `GET /healthz` | Liveness: the process is running. It does not check the database. |
 | `GET /readyz` | Readiness: the database answers and the server is not shutting down. Returns `503` otherwise. |
 | `GET /metrics` | Prometheus metrics: Go runtime, process and build information, configuration reloads, and team members that are not users yet. |

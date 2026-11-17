@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/thanoslabs/beacon/internal/access"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/auth/oidctest"
 	"github.com/thanoslabs/beacon/internal/config"
@@ -55,8 +56,12 @@ func newBeacon(t *testing.T, a *config.Auth) *beacon {
 	b.store = auth.NewStore(b.pool)
 	b.handler = auth.NewHandler(slog.New(slog.NewJSONHandler(b.logs, nil)), b.store)
 	b.handler.Configure(context.Background(), a, nil)
+	// The routes are guarded as the server guards them.
 	mux := http.NewServeMux()
-	b.handler.Register(mux)
+	guard := access.NewGuard(slog.New(slog.NewJSONHandler(b.logs, nil)), b.handler)
+	for _, route := range b.handler.Routes() {
+		mux.Handle(route.Pattern, guard.Wrap(route))
+	}
 	b.server = httptest.NewServer(mux)
 	t.Cleanup(b.server.Close)
 	return b

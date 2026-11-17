@@ -33,8 +33,6 @@ type Handler struct {
 	// settings follow the configuration, and are replaced as a whole when it
 	// is reloaded. Nil means that nobody can sign in.
 	settings atomic.Pointer[settings]
-	// csrf refuses requests that another site made a browser send.
-	csrf *http.CrossOriginProtection
 	// afterSignIn is called after each completed sign-in.
 	afterSignIn atomic.Pointer[func(context.Context)]
 }
@@ -64,7 +62,7 @@ type settings struct {
 // NewHandler returns a handler with which nobody can sign in until
 // Configure is called.
 func NewHandler(logger *slog.Logger, store *Store) *Handler {
-	return &Handler{logger: logger, store: store, csrf: http.NewCrossOriginProtection()}
+	return &Handler{logger: logger, store: store}
 }
 
 // Configure makes a the active sign-in settings; nil turns sign-in off.
@@ -126,16 +124,21 @@ func (s *settings) flowCookie() string {
 	return "beacon_sign_in"
 }
 
-// Register attaches the endpoints to mux.
-func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET "+LoginPath, h.handleLogin)
-	mux.HandleFunc("GET "+CallbackPath, h.handleCallback)
-	mux.Handle("POST "+LogoutPath, h.RequireSession(http.HandlerFunc(h.handleLogout)))
-	mux.Handle("GET "+MePath, h.RequireSession(http.HandlerFunc(h.handleMe)))
+// Routes returns the sign-in endpoints with who may use each. Starting and
+// completing a sign-in are public, as they must be: they are how a person
+// gets a session.
+func (h *Handler) Routes() []access.Route {
+	return []access.Route{
+		{Pattern: "GET " + LoginPath, Level: access.Public, Handler: http.HandlerFunc(h.handleLogin)},
+		{Pattern: "GET " + CallbackPath, Level: access.Public, Handler: http.HandlerFunc(h.handleCallback)},
+		{Pattern: "POST " + LogoutPath, Level: access.Member, Handler: http.HandlerFunc(h.handleLogout)},
+		{Pattern: "GET " + MePath, Level: access.Member, Handler: http.HandlerFunc(h.handleMe)},
+	}
 }
 
 // Authenticate returns who is behind r, from its session cookie. It returns
-// ErrNoSession when there is no valid session.
+// ErrNoSession, which wraps access.ErrUnauthenticated, when there is no
+// valid session. It implements access.Authenticator.
 func (h *Handler) Authenticate(r *http.Request) (access.Principal, error) {
 	p, _, err := h.session(r)
 	return p, err
@@ -155,29 +158,6 @@ func (h *Handler) session(r *http.Request) (access.Principal, time.Time, error) 
 		return access.Principal{}, time.Time{}, err
 	}
 	return access.Principal{UserID: u.ID, Email: u.Email, Name: u.DisplayName, Role: u.Role}, expires, nil
-}
-
-// RequireSession lets a request through only when it carries a valid
-// session, and puts the principal into its context. A request that changes
-// something is also refused when another site made the browser send it.
-func (h *Handler) RequireSession(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := h.csrf.Check(r); err != nil {
-			h.fail(w, r, http.StatusForbidden, "the request came from another site")
-			return
-		}
-		p, err := h.Authenticate(r)
-		if errors.Is(err, ErrNoSession) {
-			h.fail(w, r, http.StatusUnauthorized, "sign in first, at "+LoginPath)
-			return
-		}
-		if err != nil {
-			h.logger.ErrorContext(r.Context(), "read session", slog.Any("error", err))
-			h.fail(w, r, http.StatusInternalServerError, "internal error")
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(access.WithPrincipal(r.Context(), p)))
-	})
 }
 
 // handleLogin starts a sign-in and sends the browser to the provider.

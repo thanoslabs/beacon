@@ -204,6 +204,8 @@ docker compose kill --signal HUP beacon
 kubectl exec deploy/beacon -- kill -HUP 1
 ```
 
+An admin can ask for the same over HTTP, with `POST /api/v1/config/reload` (see [[access]]). It answers `200` with `{"result": "reloaded"}`, or `422` with the list of problems when the configuration is rejected. The request reaches one replica; the signal is the way to reach each of them.
+
 - The files are checked first, exactly as `beacon validate --check-secrets` checks them. If anything is wrong, **nothing** of the new configuration is applied and the previous one stays active. The log has one `configuration problem` record per problem, then `configuration reload failed; the previous configuration stays active`.
 - A valid configuration is applied as a whole, as at start: the database is brought in line, then sources, integrations and notification targets switch over together. Requests in progress finish with what they started with. The log says `configuration reloaded`.
 - Secrets kept in files are read again, so a reload also picks up a rotated secret. Secrets from environment variables cannot change while the process runs; rotating one needs a restart.

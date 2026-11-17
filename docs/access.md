@@ -48,14 +48,25 @@ The `auth` block is one group of settings and must be in a single file. Without 
 
 Beacon reads the provider's discovery document when it starts. If the provider cannot be reached, Beacon starts anyway, logs a warning, and tries again when someone signs in: alerts keep flowing while the provider is down.
 
-## Endpoints
+## Who may use what
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /auth/login` | Starts a sign-in and sends the browser to the provider |
-| `GET /auth/callback` | Where the provider sends the browser back. This is the redirect URI. |
-| `POST /auth/logout` | Ends the session. Answers `204`. |
-| `GET /api/v1/me` | Who is signed in: `id`, `email`, `display_name`, `role` and `session_expires_at`. Answers `401` without a session. |
+Beacon is closed by default. Every route needs a session unless it is on the short list of public routes below, and a request to anything else, including an address that does not exist, is answered with `401`.
+
+| Endpoint | Who | Purpose |
+|---|---|---|
+| `GET /auth/login` | Public | Starts a sign-in and sends the browser to the provider |
+| `GET /auth/callback` | Public | Where the provider sends the browser back. This is the redirect URI. |
+| `POST /auth/logout` | Member | Ends the session. Answers `204`. |
+| `GET /api/v1/me` | Member | Who is signed in: `id`, `email`, `display_name`, `role` and `session_expires_at` |
+| `POST /api/v1/config/reload` | Admin | Reloads the configuration; see [[configuration#Reload without a restart]] |
+| `POST /api/v1/ingest/<source>` | Public | Receives alerts. The source's own token is checked; see [[webhook]]. |
+| `POST /api/v1/integrations/<name>/interactions` | Public | Receives button presses from Slack. Slack's signature is checked; see [[slack]]. |
+| `GET /healthz`, `GET /readyz`, `GET /metrics` | Public | Probes and metrics, for machines that have no session |
+
+"Member" means anyone who is signed in, with either role. "Admin" needs the admin role; a member gets `403`.
+
+> [!warning] Keep `/metrics` off the public internet
+> The probes and the metrics need no session, because the systems that call them have none. Metrics name your teams. If Beacon is reachable from outside, let your proxy expose only what outsiders need: `/api/v1/ingest/`, `/api/v1/integrations/` and `/auth/`.
 
 ## Users
 

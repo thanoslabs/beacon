@@ -116,30 +116,32 @@ func runServe(ctx context.Context, e env, args []string) error {
 		}
 	}
 
-	registry := server.NewRegistry()
-	srv := server.New(srvCfg, logger, pool, registry)
-	if err := srv.Listen(); err != nil {
-		return err
-	}
-
 	// The parts that follow the configuration start empty. The provisioner
 	// fills them now, and again on every reload.
 	alerts := alert.NewStore(pool)
 	sessions := auth.NewStore(pool)
+	signIn := auth.NewHandler(logger, sessions)
 	pipeline := notify.New(pool, alerts, logger, notifyCfg)
+
+	registry := server.NewRegistry()
+	srvCfg.Authenticator = signIn
+	srv := server.New(srvCfg, logger, pool, registry)
+	if err := srv.Listen(); err != nil {
+		return err
+	}
 	alerts.Observe(pipeline.NotifyAll(nil))
 	prov := &provisioner{
 		logger: logger, pool: pool, path: cfgPath, getenv: e.getenv, slackAPIURL: slackAPIURL,
 		ingest:       ingest.New(logger, alerts, nil),
 		interactions: slack.NewInteractions(logger, alerts, nil),
 		pipeline:     pipeline,
-		auth:         auth.NewHandler(logger, sessions),
+		auth:         signIn,
 	}
 	prov.registerMetrics(registry)
 	prov.auth.AfterSignIn(prov.refreshSkipped)
-	prov.ingest.Register(srv.Mux())
-	prov.interactions.Register(srv.Mux())
-	prov.auth.Register(srv.Mux())
+	for _, route := range prov.routes() {
+		srv.Handle(route)
+	}
 	// The provisioned rows are made to match the files before anything that
 	// refers to them is served.
 	if err := prov.apply(ctx, cfg); err != nil {
