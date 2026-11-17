@@ -45,7 +45,7 @@ Tooling:
 ├── internal/
 │   ├── alert/                # Alert model, state machine and timeline
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
-│   ├── config/               # Typed provisioned objects (sources, integrations) and the Secret type
+│   ├── config/               # Typed provisioned objects, the YAML loader and the Secret type
 │   ├── e2e/                  # End-to-end tests: the real binary, Postgres and a fake Slack
 │   ├── ingest/               # Webhook receiver: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
@@ -126,8 +126,10 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 ### Configuration and secrets
 
-- Provisioned objects are typed in `internal/config`, following `docs/configuration-and-data-model.md`. Configuration files do not exist yet: `bootstrapSettings` in `internal/cli/bootstrap.go` fills `config.Config` from a few temporary flags and environment variables. Do not add a second route into the features; extend `config.Config`, so the YAML loader can replace the bootstrap settings without touching them.
-- Hold every credential in a `config.Secret`. It prints, logs and encodes as a reference to where it came from, never as its value; call `Reveal` only at the point of use. Register a credential setting with `secretSetting`, and add it to `secretSettings` in `internal/cli/secrets_test.go`, which checks that no secret reaches help, errors or logs.
+- Provisioned objects are typed in `internal/config`, following `docs/configuration-and-data-model.md`. `config.Load` reads them from one YAML file or a directory. `beacon serve` does not use it yet: `bootstrapSettings` in `internal/cli/bootstrap.go` still fills `config.Config` from a few temporary flags and environment variables. Do not add a second route into the features; extend `config.Config`.
+- A new field needs a `yaml` tag and a `json` tag (the JSON form is what is stored in Postgres), and a case in `TestLoadReportsEveryStructuralError`. Unknown fields are rejected, so a field cannot be added by accident. A type with its own `UnmarshalYAML` reports problems with `typeError`, which lets the loader report every problem in a file and name the field.
+- Loader errors are `config.Errors`: each names the file, line, object and field. Never put a value from the file into a message; it may be a secret typed into the wrong field.
+- Hold every credential in a `config.Secret`. In a file it is a reference, `{env: NAME}` or `{file: /path}`, never the value. It prints, logs and encodes as that reference; call `Reveal` only at the point of use. A new secret field also goes into `resolveSecrets` in `internal/config/load.go`. Register a credential setting with `secretSetting`, and add it to `secretSettings` in `internal/cli/secrets_test.go`, which checks that no secret reaches help, errors or logs.
 - `provision.Ensure` gives a provisioned object its row, which runtime rows reference.
 
 ### Ingestion

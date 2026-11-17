@@ -25,8 +25,8 @@ The running process evaluates provisioned objects from the files it loaded. It a
 
 ### Layout
 
-- Beacon is given a path with `--config` (or `BEACON_CONFIG`). The path is one YAML file or a directory. A directory is read recursively, taking every `*.yaml` and `*.yml` file in lexical order.
-- Every file has the same shape: top-level keys named after the object kinds, each holding a list. A file may contain any subset of the keys. Lists from all files are concatenated, so a team can keep its schedule, policy and routing rules together in one file.
+- Beacon is given a path with `--config` (or `BEACON_CONFIG`). The path is one YAML file or a directory. A directory is read recursively, taking every `*.yaml` and `*.yml` file in lexical order. Files and directories whose names start with a dot are skipped, which also keeps the bookkeeping directories of a Kubernetes ConfigMap volume from being read as a second copy.
+- Every file is one YAML document with the same shape: top-level keys named after the object kinds, each holding a list. A file may contain any subset of the keys. Lists from all files are concatenated, so a team can keep its schedule, policy and routing rules together in one file.
 - `routing` is the exception. Its `rules` are ordered, so the whole `routing` block must be in a single file.
 - Unknown fields are an error. So is the same name used twice within a kind, in any file.
 
@@ -36,8 +36,9 @@ The running process evaluates provisioned objects from the files it loaded. It a
 |---|---|
 | Names | Every object has a `name`, unique within its kind. Lowercase letters, digits and hyphens, starting with a letter, at most 63 characters. The name is the identity: renaming an object removes the old one and creates a new one. |
 | References | Objects refer to each other by `name`. Users are referred to by email address. |
-| Durations | Prometheus style: `30s`, `5m`, `12h`, `1d`, `1w`. |
-| Secrets | Never inline. A secret field takes `{env: NAME}` or `{file: /path}`. A plain string in a secret field is an error. |
+| Durations | Prometheus style: `30s`, `5m`, `12h`, `1d`, `1w`. Units may be combined from largest to smallest, as in `1h30m`. |
+| Secrets | Never inline. A secret field takes `{env: NAME}` or `{file: /path}`. A plain string in a secret field is an error, and the error does not repeat it. A relative file path is taken from the directory of the configuration file that names it, and a trailing newline in the file is dropped. Values are read when the configuration is loaded and are never stored: the database copy keeps the reference. |
+| Dates and times | RFC 3339 with a zone, such as `2026-01-05T09:00:00Z`. |
 | Time zones | IANA names such as `Europe/London`. |
 
 ### Sources
@@ -69,7 +70,7 @@ An integration is a connection to a notification service. Other objects name it 
 | `slack` | `bot_token` (secret), `signing_secret` (secret) |
 | `discord` | `bot_token` (secret), `public_key`, `application_id` |
 | `email` | `host`, `port`, `username`, `password` (secret), `from`, `tls` (`starttls`, `implicit` or `none`) |
-| `webhook` | `url`, `headers` (map; values may be secrets) |
+| `webhook` | `url`, `headers` (map; each value is a plain string or a secret reference) |
 
 ### Teams
 
