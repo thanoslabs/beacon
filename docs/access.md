@@ -4,7 +4,7 @@ tags: [access, guide]
 date: 2026-11-17
 ---
 
-People sign in to Beacon through your organisation's identity provider, with OpenID Connect. Beacon keeps no passwords. A user is created in Beacon's database the first time they sign in, and updated on every later sign-in.
+People sign in to Beacon through your organisation's identity provider, with OpenID Connect. A user is created in Beacon's database the first time they sign in, and updated on every later sign-in. Automation authenticates with [API tokens](#api-tokens). An install that has no identity provider yet starts with the [bootstrap admin](#bootstrap-admin).
 
 > [!note] No web interface yet
 > Sign-in works over HTTP today and can be tried in a browser, but there are no pages. After signing in, the browser lands on `/api/v1/me`, which answers who you are as JSON.
@@ -59,14 +59,90 @@ Beacon is closed by default. Every route needs a session unless it is on the sho
 | `POST /auth/logout` | Member | Ends the session. Answers `204`. |
 | `GET /api/v1/me` | Member | Who is signed in: `id`, `email`, `display_name`, `role` and `session_expires_at` |
 | `POST /api/v1/config/reload` | Admin | Reloads the configuration; see [[configuration#Reload without a restart]] |
+| `GET /api/v1/tokens`, `POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | Admin | Lists, creates and revokes [API tokens](#api-tokens) |
+| `POST /auth/bootstrap` | Public | Signs the [bootstrap admin](#bootstrap-admin) in. The password is checked and the attempts are bounded; `404` unless the account is enabled. |
 | `POST /api/v1/ingest/<source>` | Public | Receives alerts. The source's own token is checked; see [[webhook]]. |
 | `POST /api/v1/integrations/<name>/interactions` | Public | Receives button presses from Slack. Slack's signature is checked; see [[slack]]. |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Public | Probes and metrics, for machines that have no session |
 
-"Member" means anyone who is signed in, with either role. "Admin" needs the admin role; a member gets `403`.
+"Member" means anyone who is signed in or presents an API token, with either role. "Admin" needs the admin role; a member gets `403`.
 
 > [!warning] Keep `/metrics` off the public internet
 > The probes and the metrics need no session, because the systems that call them have none. Metrics name your teams. If Beacon is reachable from outside, let your proxy expose only what outsiders need: `/api/v1/ingest/`, `/api/v1/integrations/` and `/auth/`.
+
+## API tokens
+
+A token lets a script or another system use the API. It carries a role of its own, `admin` or `member`, and is sent as a bearer token:
+
+```sh
+curl -H "Authorization: Bearer $BEACON_TOKEN" https://beacon.example.com/api/v1/me
+```
+
+Only an admin can manage tokens, because a token can be given any role.
+
+```sh
+# Create. The token is in the answer, and is shown this once.
+curl -X POST https://beacon.example.com/api/v1/tokens \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "deploy-pipeline", "role": "member", "expires_in": "90d"}'
+
+# List. Shows names, roles and times, never the tokens.
+curl -H "Authorization: Bearer $ADMIN_TOKEN" https://beacon.example.com/api/v1/tokens
+
+# Revoke. The token stops working at once.
+curl -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" https://beacon.example.com/api/v1/tokens/<id>
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | What the token is for, up to 100 characters |
+| `role` | yes | `admin` or `member` |
+| `expires_in` | no | How long the token is valid, such as `12h`, `30d` or `52w`, up to five years. Without it the token does not expire. |
+
+- A token starts with `bcn_`, so that one can be recognised if it ends up where it should not be.
+- Beacon stores only a hash of each token. A token that is lost cannot be read again; revoke it and create another.
+- A token is not tied to the person who created it. It keeps working when they leave, and when sign-in is reconfigured or removed. Review the list from time to time; it shows when each token was last used, to the minute.
+- A request that carries a token is judged by the token alone, even if the browser also has a session.
+
+The first token has to be created by an admin who is signed in: through the identity provider, or as the bootstrap admin.
+
+## Bootstrap admin
+
+A new install has no admin: nobody has signed in, and there may be no identity provider yet. The bootstrap admin is one built-in admin account with a password, for that time. **Turn it off once an admin can sign in through the identity provider.**
+
+1. Hash a password. It must be at least 12 characters; make it long and random. The command asks for it twice without showing it, or reads it from a pipe:
+
+   ```sh
+   beacon hash-password
+   docker run --rm -it ghcr.io/thanoslabs/beacon:X.Y.Z hash-password
+   ```
+
+2. Give Beacon the hash as a secret, and enable the account:
+
+   ```yaml
+   auth:
+     public_url: https://beacon.example.com
+     bootstrap_admin:
+       password_hash: {env: BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH}
+   ```
+
+   In a shell or a Compose file, mind the `$` signs in the hash: quote it with single quotes, and in `compose.yaml` write each `$` as `$$`. A file (`{file: ...}`) avoids the question.
+
+3. Sign in, and use the session cookie like any other:
+
+   ```sh
+   curl -c cookies.txt -X POST https://beacon.example.com/auth/bootstrap \
+     -H 'Content-Type: application/json' -d '{"password": "..."}'
+   curl -b cookies.txt https://beacon.example.com/api/v1/me
+   ```
+
+What to know about it:
+
+- Beacon is given only the bcrypt hash and never stores the password. The hash is treated as a secret all the same: it is never logged or printed.
+- Sign-in is bounded to five attempts a minute for each Beacon process, counting every attempt. Further attempts get `429` until the minute is over, including one with the right password. This slows guessing down; it also means that someone hammering the address can keep you out while they do, which is one more reason to turn the account off.
+- It has the admin role and no identity at any provider. It appears as the user `bootstrap-admin@beacon.invalid`.
+- **To turn it off**, remove `bootstrap_admin` from the configuration and reload. Its sessions end at once, on every replica, and `POST /auth/bootstrap` answers `404`. API tokens it created keep working.
+- It can be enabled together with an identity provider, for the hand-over: sign in as the bootstrap admin, set `roles.admin`, check that an admin can sign in through the provider, then remove the account. Beacon logs a warning at every start and reload while both are enabled.
 
 ## Users
 
@@ -126,7 +202,7 @@ Without a `roles` block everyone who can sign in is a member and nobody is an ad
 
 ## Sessions
 
-- A sign-in gives the browser a session cookie. It is `HttpOnly`, `SameSite=Lax` and, whenever `public_url` is `https`, `Secure` with the `__Host-` prefix.
+- A sign-in, through the provider or as the bootstrap admin, gives the browser a session cookie. It is `HttpOnly`, `SameSite=Lax` and, whenever `public_url` is `https`, `Secure` with the `__Host-` prefix.
 - A session ends at sign-out or after `session_lifetime`, whichever comes first. It is not extended by use. There is no refresh: when it ends, the person signs in again, which is also when their details are read from the provider again.
 - Sessions are stored in Postgres, as a hash of the cookie's value, so every replica accepts them and reading the database does not let anyone take one over.
 - Requests that change something are refused when another site made the browser send them (`Sec-Fetch-Site` and `Origin` are checked).

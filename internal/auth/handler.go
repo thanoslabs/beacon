@@ -33,6 +33,11 @@ type Handler struct {
 	// settings follow the configuration, and are replaced as a whole when it
 	// is reloaded. Nil means that nobody can sign in.
 	settings atomic.Pointer[settings]
+	// csrf refuses requests that another site made a browser send, on the
+	// one public route that changes something.
+	csrf *http.CrossOriginProtection
+	// attempts bounds the bootstrap admin's sign-in.
+	attempts attemptLimiter
 	// afterSignIn is called after each completed sign-in.
 	afterSignIn atomic.Pointer[func(context.Context)]
 }
@@ -62,7 +67,7 @@ type settings struct {
 // NewHandler returns a handler with which nobody can sign in until
 // Configure is called.
 func NewHandler(logger *slog.Logger, store *Store) *Handler {
-	return &Handler{logger: logger, store: store}
+	return &Handler{logger: logger, store: store, csrf: http.NewCrossOriginProtection()}
 }
 
 // Configure makes a the active sign-in settings; nil turns sign-in off.
@@ -70,13 +75,30 @@ func NewHandler(logger *slog.Logger, store *Store) *Handler {
 // being handled. Sessions that exist stay valid as long as sign-in stays on;
 // a changed mapping of groups applies to a person at their next sign-in.
 func (h *Handler) Configure(ctx context.Context, a *config.Auth, teams []config.Team) {
+	if a == nil || a.BootstrapAdmin == nil {
+		// Taking the bootstrap admin out of the configuration ends its
+		// sessions at once, on every replica: they are refused as soon as
+		// the user is turned off.
+		switch off, err := h.store.disableBootstrapAdmin(ctx); {
+		case err != nil:
+			h.logger.ErrorContext(ctx, "turn the bootstrap admin off", slog.Any("error", err))
+		case off:
+			h.logger.InfoContext(ctx, "the bootstrap admin is turned off, and its sessions are ended")
+		}
+	}
 	if a == nil {
 		h.settings.Store(nil)
-		h.logger.WarnContext(ctx, "sign-in is not configured, so nobody can sign in; add an auth block to the configuration")
+		h.logger.WarnContext(ctx, "sign-in is not configured, so nobody can sign in; API tokens that exist keep working. Add an auth block to the configuration")
 		return
 	}
 	s := &settings{auth: *a, teams: teams, secure: strings.HasPrefix(a.PublicURL, "https://")}
 	h.settings.Store(s)
+	switch {
+	case a.BootstrapAdmin != nil && a.OIDC != nil:
+		h.logger.WarnContext(ctx, "the bootstrap admin is enabled although an identity provider is configured; remove auth.bootstrap_admin once an admin can sign in through the provider")
+	case a.BootstrapAdmin != nil:
+		h.logger.InfoContext(ctx, "the bootstrap admin is enabled", slog.String("path", BootstrapPath))
+	}
 	if a.OIDC == nil {
 		return
 	}
@@ -128,18 +150,29 @@ func (s *settings) flowCookie() string {
 // completing a sign-in are public, as they must be: they are how a person
 // gets a session.
 func (h *Handler) Routes() []access.Route {
-	return []access.Route{
+	routes := []access.Route{
 		{Pattern: "GET " + LoginPath, Level: access.Public, Handler: http.HandlerFunc(h.handleLogin)},
 		{Pattern: "GET " + CallbackPath, Level: access.Public, Handler: http.HandlerFunc(h.handleCallback)},
 		{Pattern: "POST " + LogoutPath, Level: access.Member, Handler: http.HandlerFunc(h.handleLogout)},
 		{Pattern: "GET " + MePath, Level: access.Member, Handler: http.HandlerFunc(h.handleMe)},
+		// Checks the password itself, and bounds the attempts.
+		{Pattern: "POST " + BootstrapPath, Level: access.Public, Handler: http.HandlerFunc(h.handleBootstrap)},
 	}
+	return append(routes, h.tokenRoutes()...)
 }
 
-// Authenticate returns who is behind r, from its session cookie. It returns
-// ErrNoSession, which wraps access.ErrUnauthenticated, when there is no
-// valid session. It implements access.Authenticator.
+// Authenticate returns who is behind r: the API token in its Authorization
+// header, or else the session in its cookie. It returns an error that wraps
+// access.ErrUnauthenticated when there is neither. It implements
+// access.Authenticator.
+//
+// A request that presents a token is judged by the token alone. A token that
+// is not valid does not fall back to the cookie, so a client always knows
+// which of its credentials was used.
 func (h *Handler) Authenticate(r *http.Request) (access.Principal, error) {
+	if token, ok := bearer(r); ok {
+		return h.store.tokenPrincipal(r.Context(), token)
+	}
 	p, _, err := h.session(r)
 	return p, err
 }
@@ -331,8 +364,11 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // me is the body of MePath.
 type me struct {
-	ID          string      `json:"id"`
-	Email       string      `json:"email"`
+	// ID is the user's identifier. It is empty for an API token, which has
+	// TokenID instead.
+	ID          string      `json:"id,omitempty"`
+	TokenID     string      `json:"token_id,omitempty"`
+	Email       string      `json:"email,omitempty"`
 	DisplayName string      `json:"display_name"`
 	Role        access.Role `json:"role"`
 	// SessionExpiresAt is when the person has to sign in again.
@@ -342,9 +378,11 @@ type me struct {
 // handleMe answers who is signed in.
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	p, _ := access.FromContext(r.Context())
-	body := me{ID: p.UserID, Email: p.Email, DisplayName: p.Name, Role: p.Role}
-	if _, expires, err := h.session(r); err == nil {
-		body.SessionExpiresAt = &expires
+	body := me{ID: p.UserID, TokenID: p.TokenID, Email: p.Email, DisplayName: p.Name, Role: p.Role}
+	if p.TokenID == "" {
+		if _, expires, err := h.session(r); err == nil {
+			body.SessionExpiresAt = &expires
+		}
 	}
 	h.write(w, r, http.StatusOK, body)
 }

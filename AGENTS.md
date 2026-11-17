@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: provisioned objects are read from YAML files, alerts are received over a webhook, stored and posted to a Slack channel, where people can acknowledge, snooze and resolve them. Users, routing and escalation do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received over a webhook, stored and posted to a Slack channel, where people can acknowledge, snooze and resolve them. Routing, schedules, escalation and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -94,6 +94,7 @@ Run `mise install` first so that the pinned versions are used.
 | Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_TEST_OIDC_ISSUER='http://127.0.0.1:5556/dex' go test -race ./...` |
 | Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_SOURCE_TOKEN=local-development-token ./bin/beacon serve --config examples/quickstart` then `curl localhost:8080/readyz` |
 | Check configuration | `./bin/beacon validate --config examples/full` |
+| Hash a password for the bootstrap admin | `./bin/beacon hash-password` |
 | Apply migrations | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon migrate` |
 | End-to-end tests only | `BEACON_TEST_DATABASE_URL=... go test -race -count=1 ./internal/e2e/` |
 | Lint | `golangci-lint run ./...` |
@@ -157,6 +158,9 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Role and group-mapped team membership are decided in `grant` from the groups in the token, and applied by `Store.SignIn` at every sign-in as the whole truth: the role is overwritten and `team_members` rows of origin `group` are replaced. Never add to what an earlier sign-in gave.
 - `team_members` rows of origin `config` follow the `members` lists in the files. `provision.Reconcile` sets them for every team, skipping addresses that no user has (`Result.Skipped`: logged as errors and counted in `beacon_team_members_skipped`, never a failure). `Store.SignIn` sets them for the one user who signs in, from the loaded configuration, which is how a skipped person joins. Each origin's code must filter on its own origin in every statement.
 - A list that goes into `= ANY($n)` must never be a nil slice: pgx sends nil as `NULL`, and a comparison with `NULL` matches nothing, so a `NOT (... = ANY($n))` deletes nothing.
+- API tokens (`internal/auth/tokens.go`) are 256 random bits behind the prefix `bcn_`, stored as a SHA-256 hash and returned once, by the request that creates them. A request with an `Authorization: Bearer` header is judged by the token alone and never falls back to the cookie. Managing tokens is for admins only, because a token can carry any role.
+- The bootstrap admin (`internal/auth/bootstrap.go`) is the only password in Beacon. Beacon is given a bcrypt hash through a secret reference and compares with `bcrypt.CompareHashAndPassword`; do not add another way to set it, and do not log the password, a wrong guess or the hash. Its sign-in is public, so it does its own cross-site check and is bounded by `attemptLimiter`; keep both. Removing it from the configuration must end its sessions.
+- `golang.org/x/crypto/bcrypt` is the only password hashing, and only for the bootstrap admin. Random tokens (sessions, API tokens, states) are hashed with SHA-256, which is right for secrets that cannot be guessed and wrong for anything a person chose.
 - The identity provider is discovered lazily, so Beacon starts and handles alerts while it is down. Do not make the start depend on it.
 - Tests that need a real provider use `oidctest` against the Dex in `compose.yaml` (`dev/dex/config.yaml` holds its users). Without `BEACON_TEST_OIDC_ISSUER` they are skipped locally and fail in CI. Use the hand-written provider in `internal/auth/fake_test.go` only for what a real one will not do, such as a token that is wrong in one way. Beacon has no account at any hosted provider; say in the PR that those are unverified.
 

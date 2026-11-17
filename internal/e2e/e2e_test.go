@@ -20,6 +20,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/thanoslabs/beacon/internal/auth/oidctest"
 	"github.com/thanoslabs/beacon/internal/postgres"
@@ -152,6 +153,7 @@ func launch(t *testing.T, dbURL, dir string) *beacon {
 		"BEACON_SLACK_BOT_TOKEN=" + botToken,
 		"BEACON_SLACK_API_URL=" + b.slack.URL,
 		"BEACON_OIDC_CLIENT_SECRET=" + oidctest.ClientSecret,
+		"BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH=" + bootstrapHash(t),
 	}
 	stderr, err := b.cmd.StderrPipe()
 	if err != nil {
@@ -982,5 +984,178 @@ func TestRolesAreEnforced(t *testing.T) {
 	// The admin's session is still good, and a member still cannot reload.
 	if code, _ := do(t, admin, http.MethodGet, "/api/v1/me"); code != http.StatusOK {
 		t.Errorf("GET /api/v1/me as the admin = %d", code)
+	}
+}
+
+// bootstrapPassword is the password of the bootstrap admin in these tests.
+const bootstrapPassword = "e2e-bootstrap-password-marker-7f3c"
+
+var (
+	hashOnce     sync.Once
+	hashedSecret string
+)
+
+// bootstrapHash returns the bcrypt hash of bootstrapPassword, which is what
+// Beacon is given.
+func bootstrapHash(t *testing.T) string {
+	t.Helper()
+	hashOnce.Do(func() {
+		hash, err := bcrypt.GenerateFromPassword([]byte(bootstrapPassword), 10)
+		if err != nil {
+			t.Fatalf("hash the bootstrap password: %v", err)
+		}
+		hashedSecret = string(hash)
+	})
+	return hashedSecret
+}
+
+// api sends a request with a JSON body and an optional API token, and
+// returns the status and the decoded body.
+func (b *beacon) api(client *http.Client, method, path, token, body string) (int, map[string]any) {
+	b.t.Helper()
+	req, err := http.NewRequest(method, oidctest.PublicURL+path, strings.NewReader(body))
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		b.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		b.t.Fatalf("read %s: %v", path, err)
+	}
+	var decoded map[string]any
+	_ = json.Unmarshal(raw, &decoded)
+	return resp.StatusCode, decoded
+}
+
+// TestBootstrapAdminAndTokens is the path of a new install with no identity
+// provider: the bootstrap admin signs in, creates tokens for automation, and
+// is then turned off. A member token must not be able to do what only an
+// admin may.
+func TestBootstrapAdminAndTokens(t *testing.T) {
+	withBootstrap := configuration + `auth:
+  public_url: ` + oidctest.PublicURL + `
+  bootstrap_admin:
+    password_hash: {env: BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH}
+`
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, withBootstrap))
+	b.waitUntilServing()
+	addr := strings.TrimPrefix(b.url, "http://")
+	browser := oidctest.Browser(t, addr)
+	// A client with no cookies, for requests that carry only a token.
+	bare := oidctest.Browser(t, addr)
+	bare.Jar = nil
+
+	// There is no identity provider, and the wrong password gets nowhere.
+	if code, _ := b.api(browser, "GET", "/auth/login", "", ""); code != http.StatusNotFound {
+		t.Errorf("GET /auth/login without a provider = %d, want 404", code)
+	}
+	if code, _ := b.api(browser, "POST", "/auth/bootstrap", "", `{"password": "not-the-password"}`); code != http.StatusUnauthorized {
+		t.Errorf("bootstrap sign-in with a wrong password = %d, want 401", code)
+	}
+	code, who := b.api(browser, "POST", "/auth/bootstrap", "", `{"password": "`+bootstrapPassword+`"}`)
+	if code != http.StatusOK || who["role"] != "admin" {
+		t.Fatalf("bootstrap sign-in = %d %v", code, who)
+	}
+
+	// The admin creates a token of each role.
+	create := func(name, role string) string {
+		t.Helper()
+		code, created := b.api(browser, "POST", "/api/v1/tokens", "", `{"name": "`+name+`", "role": "`+role+`"}`)
+		token, _ := created["token"].(string)
+		if code != http.StatusCreated || token == "" {
+			t.Fatalf("create the %s token = %d %v", role, code, created)
+		}
+		return token
+	}
+	memberToken, adminToken := create("dashboard", "member"), create("deploy", "admin")
+
+	// The member token is good for what a member may do, and for nothing
+	// that needs an admin.
+	if code, who := b.api(bare, "GET", "/api/v1/me", memberToken, ""); code != http.StatusOK || who["role"] != "member" || who["display_name"] != "dashboard" {
+		t.Errorf("GET /api/v1/me with the member token = %d %v", code, who)
+	}
+	for _, denied := range [][3]string{
+		{"POST", "/api/v1/config/reload", ""},
+		{"GET", "/api/v1/tokens", ""},
+		{"POST", "/api/v1/tokens", `{"name": "more", "role": "admin"}`},
+	} {
+		if code, body := b.api(bare, denied[0], denied[1], memberToken, denied[2]); code != http.StatusForbidden {
+			t.Errorf("%s %s with the member token = %d %v, want 403", denied[0], denied[1], code, body)
+		}
+	}
+	// The admin token does all of it.
+	if code, body := b.api(bare, "POST", "/api/v1/config/reload", adminToken, ""); code != http.StatusOK {
+		t.Errorf("reload with the admin token = %d %v", code, body)
+	}
+	code, list := b.api(bare, "GET", "/api/v1/tokens", adminToken, "")
+	tokens, _ := list["tokens"].([]any)
+	if code != http.StatusOK || len(tokens) != 2 {
+		t.Fatalf("list with the admin token = %d %v", code, list)
+	}
+	// No credential at all, and one that was never issued.
+	for _, token := range []string{"", "bcn_never-issued"} {
+		if code, _ := b.api(bare, "POST", "/api/v1/config/reload", token, ""); code != http.StatusUnauthorized {
+			t.Errorf("reload with the token %q = %d, want 401", token, code)
+		}
+	}
+
+	// Revoking the member token ends its access.
+	var memberID string
+	for _, item := range tokens {
+		if tok := item.(map[string]any); tok["name"] == "dashboard" {
+			memberID, _ = tok["id"].(string)
+		}
+	}
+	if code, _ := b.api(bare, "DELETE", "/api/v1/tokens/"+memberID, adminToken, ""); code != http.StatusNoContent {
+		t.Errorf("revoke = %d, want 204", code)
+	}
+	if code, _ := b.api(bare, "GET", "/api/v1/me", memberToken, ""); code != http.StatusUnauthorized {
+		t.Errorf("GET /api/v1/me with the revoked token = %d, want 401", code)
+	}
+
+	// The bootstrap admin is taken out of the configuration, and the admin
+	// token reloads it. The account's session ends, signing in is gone, and
+	// the token keeps working: automation does not depend on the account.
+	if err := os.WriteFile(filepath.Join(b.dir, "beacon.yaml"), []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := b.api(bare, "POST", "/api/v1/config/reload", adminToken, ""); code != http.StatusOK {
+		t.Fatalf("reload without the bootstrap admin = %d %v", code, body)
+	}
+	if code, _ := b.api(browser, "GET", "/api/v1/me", "", ""); code != http.StatusUnauthorized {
+		t.Errorf("GET /api/v1/me with the bootstrap admin's session after it was turned off = %d, want 401", code)
+	}
+	if code, _ := b.api(browser, "POST", "/auth/bootstrap", "", `{"password": "`+bootstrapPassword+`"}`); code != http.StatusNotFound {
+		t.Errorf("bootstrap sign-in after it was turned off = %d, want 404", code)
+	}
+	if code, _ := b.api(bare, "GET", "/api/v1/me", adminToken, ""); code != http.StatusOK {
+		t.Errorf("GET /api/v1/me with the admin token after the reload = %d, want 200", code)
+	}
+
+	// The tokens are stored as hashes, and nothing secret was logged.
+	var stored int
+	if err := b.db.QueryRow(context.Background(), `SELECT count(*) FROM api_tokens WHERE token_hash IN ($1, $2)`, memberToken, adminToken).Scan(&stored); err != nil || stored != 0 {
+		t.Errorf("%d tokens are stored as they are, %v", stored, err)
+	}
+	if code := b.terminate(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+	logs := b.output()
+	for name, secret := range map[string]string{"the member token": memberToken, "the admin token": adminToken, "the bootstrap password": bootstrapPassword,
+		"the bootstrap password hash": bootstrapHash(t), "a wrong password": "not-the-password", "the source token": sourceToken} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("the logs contain %s", name)
+		}
 	}
 }

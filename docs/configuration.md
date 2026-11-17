@@ -162,7 +162,7 @@ The first three accept `via`, a list of integration names that narrows how the p
 
 ## Sign-in
 
-The `auth` block says how people sign in. It is one group of settings, not a list of objects, and must be in a single file. [[access]] describes it and what to set up at the identity provider.
+The `auth` block says how people sign in: through an identity provider (`oidc`), as the bootstrap admin (`bootstrap_admin`), or both. It is one group of settings, not a list of objects, and must be in a single file. [[access]] describes it and what to set up at the identity provider.
 
 ```yaml
 auth:
