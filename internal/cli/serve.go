@@ -4,15 +4,25 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/logging"
+	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/server"
+	"github.com/thanoslabs/beacon/internal/slack"
 	"github.com/thanoslabs/beacon/internal/version"
 )
+
+// snoozeExpiryInterval is how often the server looks for snoozes that have run
+// out, and so the longest a snoozed alert stays quiet past its time.
+const snoozeExpiryInterval = 5 * time.Second
 
 func runServe(ctx context.Context, e env, args []string) error {
 	var (
@@ -21,7 +31,12 @@ func runServe(ctx context.Context, e env, args []string) error {
 		logLevel  string
 		logFormat string
 		migrate   bool
-		envErrs   []error
+		boot      bootstrapSettings
+		notifyCfg notify.Config
+		// slackAPIURL is a process setting, not part of an integration: it
+		// exists so that tests can point Beacon at a fake Slack.
+		slackAPIURL string
+		envErrs     []error
 	)
 	fs := newFlagSet(e, "serve", "Run the Beacon server")
 	stringSetting(fs, e, &srvCfg.Addr, "listen-address", "BEACON_LISTEN_ADDRESS", server.DefaultAddr,
@@ -34,7 +49,12 @@ func runServe(ctx context.Context, e env, args []string) error {
 		"log level: debug, info, warn or error")
 	stringSetting(fs, e, &logFormat, "log-format", "BEACON_LOG_FORMAT", logging.FormatJSON,
 		"log format: json or text")
+	intSetting(fs, e, &notifyCfg.Workers, "notification-workers", "BEACON_NOTIFICATION_WORKERS", notify.DefaultWorkers,
+		"how many notifications this process delivers at a time", &envErrs)
+	stringSetting(fs, e, &slackAPIURL, "slack-api-url", "BEACON_SLACK_API_URL", slack.DefaultAPIURL,
+		"base URL of the Slack Web API; change it only to test against a fake Slack")
 	databaseSettings(fs, e, &dbCfg, &envErrs)
+	boot.register(fs, e)
 	if err := parseFlags(fs, args, envErrs...); err != nil {
 		return err
 	}
@@ -42,8 +62,18 @@ func runServe(ctx context.Context, e env, args []string) error {
 	if err := checkDatabaseSettings(dbCfg); err != nil {
 		return err
 	}
+	cfg, err := boot.config()
+	if err != nil {
+		return err
+	}
+	if _, err := url.ParseRequestURI(slackAPIURL); err != nil || !strings.HasPrefix(slackAPIURL, "http") {
+		return fmt.Errorf("--slack-api-url must be an http or https URL, got %q", slackAPIURL)
+	}
 	if srvCfg.ShutdownTimeout <= 0 {
 		return fmt.Errorf("--shutdown-timeout must be positive, got %s", srvCfg.ShutdownTimeout)
+	}
+	if notifyCfg.Workers < 1 || notifyCfg.Workers > 64 {
+		return fmt.Errorf("--notification-workers must be between 1 and 64, got %d", notifyCfg.Workers)
 	}
 	// Logs go to stderr, so stdout stays free for command output.
 	logger, err := logging.New(e.stderr, logLevel, logFormat)
@@ -75,7 +105,25 @@ func runServe(ctx context.Context, e env, args []string) error {
 	if err := srv.Listen(); err != nil {
 		return err
 	}
-	if err := srv.Serve(ctx); err != nil {
+
+	alerts := alert.NewStore(pool)
+	if err := attachIngest(ctx, logger, pool, cfg, alerts, srv.Mux()); err != nil {
+		return err
+	}
+
+	pipeline := notify.New(pool, alerts, logger, notifyCfg)
+	if err := attachNotifications(ctx, logger, pool, cfg, alerts, pipeline, srv.Mux(), slackAPIURL); err != nil {
+		return err
+	}
+
+	// Background work stops with the server: it watches the same context.
+	var background sync.WaitGroup
+	background.Go(func() { pipeline.Run(ctx) })
+	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
+
+	err = srv.Serve(ctx)
+	background.Wait()
+	if err != nil {
 		return err
 	}
 	logger.Info("beacon stopped")

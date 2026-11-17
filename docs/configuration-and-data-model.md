@@ -368,7 +368,12 @@ A removed object keeps its row. If an object with the same name returns, the sam
 
 A unique index on (`source_id`, `fingerprint`) for rows whose status is not `resolved` makes deduplication safe under concurrent deliveries, and lets a resolved alert that fires again open a new row.
 
+`acknowledged_by` references `users` and is set only when a Beacon user acknowledged. Someone who acts from chat before their account is linked is recorded on the timeline event instead.
+
 **`alert_groups`**: `id`, `group_key` (hash of the routing rule and the `group_by` label values), `routing_rule_id`, `team_id`, `escalation_policy_id`, `status` (`open` or `resolved`), `created_at`, `resolved_at`. Unique on `group_key` for open groups.
+
+> [!note] Built up over several migrations
+> The first migration for these tables leaves out the columns that reference tables which do not exist yet: `routing_rule_id`, `team_id` and `escalation_policy_id`. The migrations that create those tables add them. Until grouping is implemented, every alert gets a group of its own, keyed by a hash of its source and fingerprint.
 
 **`escalations`**: one row per open alert group. `alert_group_id`, `escalation_policy_id`, `step_index`, `pass` (which repeat), `next_step_at`, `status` (`active`, `acknowledged`, `exhausted` or `resolved`). Workers claim due rows with `SELECT ... FOR UPDATE SKIP LOCKED`, so a timer fires once when several replicas run.
 
@@ -379,9 +384,10 @@ A unique index on (`source_id`, `fingerprint`) for rows whose status is not `res
 | `id` | `bigint` | Identity |
 | `alert_id` | `uuid` | Nullable for events about a whole group |
 | `alert_group_id` | `uuid` | |
-| `type` | `text` | `fired`, `acknowledged`, `snoozed`, `resolved`, `escalated`, `notification_sent` and so on |
+| `type` | `text` | `fired`, `acknowledged`, `snoozed`, `snooze_ended`, `resolved`, `escalated`, `notification_sent`, `notification_failed` and so on |
 | `actor_type` | `text` | `user`, `api_token`, `source` or `system` |
 | `actor_id` | `uuid` | Nullable |
+| `actor_provider`, `actor_external_id` | `text` | Nullable, set together. The chat account of a person who acted from Slack or Discord, in the same form as `user_identities`. `actor_id` stays null until that account is linked to a user. |
 | `occurred_at` | `timestamptz` | |
 | `data` | `jsonb` | Details specific to the type |
 
@@ -404,6 +410,8 @@ A unique index on (`source_id`, `fingerprint`) for rows whose status is not `res
 | `next_attempt_at` | `timestamptz` | Workers claim due rows with `SKIP LOCKED` |
 | `external_ref` | `text` | Message identifier from the service, so the message can be updated later |
 | `created_at`, `sent_at` | `timestamptz` | |
+
+A worker claims a due row by moving its `next_attempt_at` into the future in the same statement that selects it with `SKIP LOCKED`. The row stays `pending` and hidden from other workers until the attempt is recorded. If the worker dies, the row becomes due again when that time passes. [[notifications]] describes the delivery rules.
 
 **`notification_attempts`** (append only): `id` (`bigint`), `notification_id`, `attempted_at`, `outcome` (`success`, `retryable_error` or `permanent_error`), `error`.
 
