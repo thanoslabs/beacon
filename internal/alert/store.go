@@ -259,17 +259,11 @@ func (s *Store) GroupAlerts(ctx context.Context, groupID string) ([]Alert, error
 	return collectAlerts(s.db.Query(ctx, `SELECT `+alertColumns+` FROM alerts WHERE group_id = $1 ORDER BY started_at, id`, groupID))
 }
 
-// Timeline returns the events of an alert in the order they happened,
-// including the events about its group, such as notifications.
-func (s *Store) Timeline(ctx context.Context, alertID string) ([]Event, error) {
-	rows, err := s.db.Query(ctx, `
-		SELECT e.id, COALESCE(e.alert_id::text, ''), e.alert_group_id::text, e.type, e.actor_type,
-			COALESCE(e.actor_id::text, ''), COALESCE(e.actor_provider, ''), COALESCE(e.actor_external_id, ''),
-			e.occurred_at, e.data
-		FROM alert_events e
-		JOIN alerts a ON a.id = $1
-		WHERE e.alert_id = a.id OR (e.alert_id IS NULL AND e.alert_group_id = a.group_id)
-		ORDER BY e.id`, alertID)
+const eventColumns = `e.id, COALESCE(e.alert_id::text, ''), e.alert_group_id::text, e.type, e.actor_type,
+	COALESCE(e.actor_id::text, ''), COALESCE(e.actor_provider, ''), COALESCE(e.actor_external_id, ''),
+	e.occurred_at, e.data`
+
+func collectEvents(rows pgx.Rows, err error) ([]Event, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +274,22 @@ func (s *Store) Timeline(ctx context.Context, alertID string) ([]Event, error) {
 		e.Actor.Name, _ = e.Data[dataActorName].(string)
 		return e, err
 	})
+}
+
+// Timeline returns the events of an alert in the order they happened,
+// including the events about its group, such as notifications.
+func (s *Store) Timeline(ctx context.Context, alertID string) ([]Event, error) {
+	return collectEvents(s.db.Query(ctx, `SELECT `+eventColumns+` FROM alert_events e
+		JOIN alerts a ON a.id = $1
+		WHERE e.alert_id = a.id OR (e.alert_id IS NULL AND e.alert_group_id = a.group_id)
+		ORDER BY e.id`, alertID))
+}
+
+// GroupTimeline returns every event of a group and of its alerts, in the
+// order they happened.
+func (s *Store) GroupTimeline(ctx context.Context, groupID string) ([]Event, error) {
+	return collectEvents(s.db.Query(ctx, `SELECT `+eventColumns+` FROM alert_events e
+		WHERE e.alert_group_id = $1 ORDER BY e.id`, groupID))
 }
 
 // dataActorName is the key in an event's data that holds the actor's display

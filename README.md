@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. The server starts, connects to Postgres and reports its health, but it does not handle alerts yet. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It receives alerts through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md) and posts them to one [Slack channel](docs/slack.md), where they can be acknowledged, snoozed and resolved. Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -42,6 +42,18 @@ curl http://localhost:8080/readyz
 ```
 
 Set `BEACON_PORT` to publish Beacon on a different host port, for example `BEACON_PORT=18080 docker compose up --build`.
+
+To receive alerts, give the webhook source a token before starting, then send an alert:
+
+```sh
+export BEACON_SOURCE_TOKEN="$(openssl rand -hex 32)"
+docker compose up --build -d --wait
+curl -X POST http://localhost:8080/api/v1/ingest/default \
+  -H "Authorization: Bearer $BEACON_SOURCE_TOKEN" \
+  -d '{"labels": {"alertname": "DiskFull", "severity": "critical"}, "annotations": {"summary": "Disk is full"}}'
+```
+
+The [webhook page](docs/webhook.md) describes the payload and the responses. To have alerts posted to Slack, also set `BEACON_SLACK_BOT_TOKEN`, `BEACON_SLACK_SIGNING_SECRET` and `BEACON_SLACK_CHANNEL` as the [Slack page](docs/slack.md) describes.
 
 Releases publish a container image for `linux/amd64` and `linux/arm64`, tagged with the bare version:
 
@@ -78,10 +90,12 @@ export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmo
 ./bin/beacon migrate --status   # list migrations and their state
 ```
 
-The server answers on three operational endpoints:
+The server answers on these endpoints:
 
 | Endpoint | Purpose |
 |---|---|
+| `POST /api/v1/ingest/<source>` | Receives alerts from a source. See the [webhook page](docs/webhook.md). |
+| `POST /api/v1/integrations/<name>/interactions` | Receives button presses from Slack. See the [Slack page](docs/slack.md). |
 | `GET /healthz` | Liveness: the process is running. It does not check the database. |
 | `GET /readyz` | Readiness: the database answers and the server is not shutting down. Returns `503` otherwise. |
 | `GET /metrics` | Prometheus metrics: Go runtime, process and build information. |
@@ -94,6 +108,8 @@ Tests that need a database are skipped unless `BEACON_TEST_DATABASE_URL` points 
 export BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable'
 go test -race ./...
 ```
+
+The tests in `internal/e2e` build the binary and run it as a process against Postgres and a fake Slack: an alert goes in by webhook, a message comes out to Slack, a button press acknowledges it and the source resolves it. They run with the rest of the tests.
 
 Every setting can be given as a flag or as an environment variable; run `beacon <command> -h` to list them.
 
