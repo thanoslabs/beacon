@@ -1,0 +1,35 @@
+# One webhook source, and every alert posted to one Slack channel.
+# docs/slack.md explains how to create the Slack app and where the values
+# come from. Copy this directory, put your channel ID in place of
+# C0123456789, and point Beacon at the copy:
+#
+#   BEACON_CONFIG_DIR=./my-config docker compose up --build
+#
+# The Slack credentials are read from the environment: BEACON_SLACK_BOT_TOKEN
+# and BEACON_SLACK_SIGNING_SECRET.
+
+sources:
+  - name: default
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}
+
+integrations:
+  - name: slack
+    type: slack
+    slack:
+      bot_token: {env: BEACON_SLACK_BOT_TOKEN}
+      signing_secret: {env: BEACON_SLACK_SIGNING_SECRET}
+
+# Until routing and escalation are implemented, Beacon posts every alert to
+# the channels named in the first step of the default escalation policy.
+escalation_policies:
+  - name: default
+    steps:
+      - notify:
+          - channel: C0123456789
+            integration: slack
+        timeout: 5m
+
+routing:
+  default:
+    escalation_policy: default

@@ -22,6 +22,30 @@ const validConfig = `sources:
     token: {env: BEACON_SOURCE_TOKEN}
 `
 
+// slackConfig is a webhook source named default and a Slack integration
+// whose channel C0ALERTS is told about every alert.
+const slackConfig = `sources:
+  - name: default
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}
+integrations:
+  - name: slack
+    type: slack
+    slack:
+      bot_token: {env: BEACON_SLACK_BOT_TOKEN}
+      signing_secret: {env: BEACON_SLACK_SIGNING_SECRET}
+escalation_policies:
+  - name: default
+    steps:
+      - notify:
+          - channel: C0ALERTS
+            integration: slack
+        timeout: 5m
+routing:
+  default:
+    escalation_policy: default
+`
+
 // TestValidateExamples keeps the shipped examples valid. No database and no
 // secrets are involved.
 func TestValidateExamples(t *testing.T) {

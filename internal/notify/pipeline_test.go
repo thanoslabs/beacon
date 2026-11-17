@@ -18,6 +18,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
 	"github.com/thanoslabs/beacon/internal/provision"
+	"github.com/thanoslabs/beacon/internal/provision/provisiontest"
 )
 
 // channelFunc adapts a function to notify.Channel.
@@ -49,13 +50,8 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	pool := postgrestest.NewMigrated(t)
 	f := &fixture{t: t, pool: pool, alerts: alert.NewStore(pool)}
-	var err error
-	if f.sourceID, err = provision.Ensure(context.Background(), pool, provision.Sources, "test", map[string]string{}); err != nil {
-		t.Fatalf("Ensure source: %v", err)
-	}
-	if f.integrationID, err = provision.Ensure(context.Background(), pool, provision.Integrations, "chat", map[string]string{}); err != nil {
-		t.Fatalf("Ensure integration: %v", err)
-	}
+	f.sourceID = provisiontest.Row(t, pool, provision.Sources, "test")
+	f.integrationID = provisiontest.Row(t, pool, provision.Integrations, "chat")
 	return f
 }
 

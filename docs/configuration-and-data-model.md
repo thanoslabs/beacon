@@ -319,12 +319,23 @@ Conventions:
 | `name` | `text` | Unique among rows that are not removed |
 | `spec` | `jsonb` | The object as loaded, with secret references left unresolved |
 | `spec_hash` | `text` | Lets reconciliation skip unchanged objects |
+| `provisioned` | `boolean` | True for a row that the configuration files own. The API and the UI treat such a row as read-only, and reconciliation manages only these rows. Every row is provisioned today; the column is there for the later option of editing objects in the UI. |
 | `created_at`, `updated_at` | `timestamptz` | |
 | `removed_at` | `timestamptz` | Set when the object leaves the files; the row is kept so history still resolves |
 
 `routing_rules` also has `position integer`. `schedules` also has `team_id`.
 
 A removed object keeps its row. If an object with the same name returns, the same row is revived, so history stays attached to it.
+
+### Reconciliation
+
+Applying a configuration makes these rows match the files, in one transaction, so the database never holds half a configuration:
+
+- An object that has no row is created. One whose definition changed is updated; an unchanged one is not written at all.
+- An object that left the files gets `removed_at`. Nothing is deleted, whether or not anything refers to the row, so an alert, a notification or a shift always resolves to the object it belonged to.
+- Kinds are applied in dependency order (sources, integrations, teams, schedules, escalation policies, routing rules), so a schedule's `team_id` always has a row to point at.
+- A transaction-level advisory lock serialises reconciliations. Replicas that start together take turns, and all but the first find nothing to do.
+- Replicas are expected to run the same configuration. If two run different files, each makes the rows match its own files in turn, and the last one wins; roll out a configuration change to every replica.
 
 ### Users and access
 

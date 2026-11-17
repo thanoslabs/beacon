@@ -45,7 +45,7 @@ func TestServeIngest(t *testing.T) {
 	dbURL := postgrestest.NewURL(t)
 	srv := startServe(t, map[string]string{
 		"BEACON_DATABASE_URL": dbURL,
-		"BEACON_SOURCE_NAME":  "prod",
+		"BEACON_CONFIG":       writeConfig(t, validConfig),
 		"BEACON_SOURCE_TOKEN": token,
 	})
 	url := srv.baseURL + "/api/v1/ingest/prod"

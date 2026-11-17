@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: alerts are received over a webhook, stored and posted to a Slack channel, where people can acknowledge, snooze and resolve them. Configuration files, users, routing and escalation do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: provisioned objects are read from YAML files, alerts are received over a webhook, stored and posted to a Slack channel, where people can acknowledge, snooze and resolve them. Users, routing and escalation do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -14,7 +14,7 @@ Per `docs/requirements.md`:
 
 - **Go** for the server, shipped as a single binary (`cmd/beacon`). The command line uses the standard library `flag` package; there is no CLI framework.
 - **Postgres** as the only required dependency, through [pgx](https://github.com/jackc/pgx) (`pgxpool`). Schema migrations are [goose](https://github.com/pressly/goose) SQL files embedded in the binary.
-- **Declarative configuration files** for provisioned objects (sources, integrations, routing, escalation policies, teams, schedule rotations); the database holds runtime state (planned)
+- **Declarative configuration files** in YAML for provisioned objects (sources, integrations, routing, escalation policies, teams, schedule rotations), read with [go.yaml.in/yaml/v3](https://github.com/yaml/go-yaml); the database holds runtime state
 
 - **HTTP**: the standard library `net/http` server and router, `log/slog` for structured logs, and [client_golang](https://github.com/prometheus/client_golang) for `/metrics`. There is no web framework.
 
@@ -54,7 +54,8 @@ Tooling:
 │   ├── postgres/             # Connection pool and migrator
 │   │   ├── migrations/       # Versioned SQL migrations, embedded in the binary
 │   │   └── postgrestest/     # Test helper: one empty database per test
-│   ├── provision/            # Copies provisioned objects into Postgres
+│   ├── provision/            # Reconciles provisioned objects into Postgres
+│   │   └── provisiontest/    # Test helper: a provisioned row to reference
 │   ├── server/               # HTTP server, middleware, health, readiness and metrics endpoints
 │   ├── slack/                # Slack channel: Web API client, message rendering and button presses
 │   │   └── slacktest/        # Fake Slack for tests
@@ -85,7 +86,7 @@ Run `mise install` first so that the pinned versions are used.
 | Run | `./bin/beacon version` (or `go run ./cmd/beacon version`) |
 | Start Postgres | `docker compose up -d --wait postgres` |
 | Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' go test -race ./...` |
-| Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon serve` then `curl localhost:8080/readyz` |
+| Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_SOURCE_TOKEN=local-development-token ./bin/beacon serve --config examples/quickstart` then `curl localhost:8080/readyz` |
 | Check configuration | `./bin/beacon validate --config examples/full` |
 | Apply migrations | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon migrate` |
 | End-to-end tests only | `BEACON_TEST_DATABASE_URL=... go test -race -count=1 ./internal/e2e/` |
@@ -95,7 +96,7 @@ Run `mise install` first so that the pinned versions are used.
 | Build the image | `docker build -t beacon:dev .` |
 | Run Beacon and Postgres | `docker compose up --build -d --wait`, then `curl localhost:8080/readyz` (set `BEACON_PORT` if 8080 is taken) |
 
-CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres from `compose.yaml`, so CI and development use the same Postgres version. The tests include the end-to-end tests in `internal/e2e`. A separate job builds the image, starts Beacon and Postgres with Compose, and checks the endpoints, that the webhook accepts an alert, the non-root user and a clean exit on termination.
+CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres from `compose.yaml`, so CI and development use the same Postgres version. The tests include the end-to-end tests in `internal/e2e`. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, the non-root user and a clean exit on termination.
 
 ### Container image
 
@@ -106,7 +107,7 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 ### Server
 
-- `beacon serve` applies pending migrations (unless `--migrate=false`), then serves `GET /healthz`, `GET /readyz` and `GET /metrics` on `--listen-address` (default `:8080`).
+- `beacon serve` reads and validates the configuration, applies pending migrations (unless `--migrate=false`), then serves `GET /healthz`, `GET /readyz` and `GET /metrics` on `--listen-address` (default `:8080`).
 - Attach routes to `Server.Mux()` in `internal/server`. Every route passes through the request identifier, access log and panic recovery middleware.
 - Log with the `slog` methods that take a context (`InfoContext` and so on) inside request handling, so the record carries `request_id`.
 - Register metrics on the registry from `server.NewRegistry()`, not the global default. Keep label values to bounded sets (see the cardinality warning in `docs/requirements.md`).
@@ -128,13 +129,16 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 ### Configuration and secrets
 
-- Provisioned objects are typed in `internal/config`, following `docs/configuration-and-data-model.md`. `config.Load` reads them from one YAML file or a directory. `beacon serve` does not use it yet: `bootstrapSettings` in `internal/cli/bootstrap.go` still fills `config.Config` from a few temporary flags and environment variables. Do not add a second route into the features; extend `config.Config`.
+- Provisioned objects are typed in `internal/config`, following `docs/configuration-and-data-model.md`. `config.Load` reads them from one YAML file or a directory, and `beacon serve` takes that path as `--config`. The files are the only route into the features: do not add a flag or an environment variable for something that is provisioned. Process settings, such as the listen address, stay flags.
+- A kind or type can be valid in the files before it does anything. `beacon serve` stores it and logs a warning that names it (see `internal/cli/app.go`); remove the warning when the behaviour lands.
+- `Config.EveryAlertTargets` is temporary, like `Pipeline.NotifyAll`: until routing and escalation exist, every alert notifies the channel targets in the first step of the default escalation policy.
 - A new field needs a `yaml` tag and a `json` tag (the JSON form is what is stored in Postgres), and a case in `TestLoadReportsEveryStructuralError`. Unknown fields are rejected, so a field cannot be added by accident. A type with its own `UnmarshalYAML` reports problems with `typeError`, which lets the loader report every problem in a file and name the field.
 - `config.Read` loads and validates in one call, and is what commands use. Every check of what a value means goes in `internal/config/validate.go`, reports through `object.errorf` with the path of the field, and gets a case in `testdata/invalid` (regenerate `testdata/invalid.golden` with `go test ./internal/config -run TestReadReportsEveryProblem -update`, and read the difference). Validation must never need a database.
 - Errors are `config.Errors`: each names the file, line, object and field. Never put the value of a secret field into a message, and never repeat a value that the decoder rejected; it may be a secret typed into the wrong field.
 - `docs/configuration.md` is the user's reference for the files, and `examples/` holds configurations that a test keeps valid. Update both with the schema.
-- Hold every credential in a `config.Secret`. In a file it is a reference, `{env: NAME}` or `{file: /path}`, never the value. It prints, logs and encodes as that reference; call `Reveal` only at the point of use. A new secret field also goes into `resolveSecrets` in `internal/config/load.go`. Register a credential setting with `secretSetting`, and add it to `secretSettings` in `internal/cli/secrets_test.go`, which checks that no secret reaches help, errors or logs.
-- `provision.Ensure` gives a provisioned object its row, which runtime rows reference.
+- Hold every credential in a `config.Secret`. In a file it is a reference, `{env: NAME}` or `{file: /path}`, never the value. It prints, logs and encodes as that reference; call `Reveal` only at the point of use. A new secret field also goes into `resolveSecrets` in `internal/config/load.go`. Add every new secret to `secretSettings` and `secretsConfig` in `internal/cli/secrets_test.go`, which checks that no secret reaches help, errors or logs. A credential that is a process setting, such as the database URL, is registered with `secretSetting`.
+- `provision.Reconcile` makes the provisioned rows match the configuration: it creates, updates and marks as removed, in one transaction under an advisory lock, and returns the row of every object. It never deletes; a removed object keeps its row for history and is revived if it returns. A new kind needs its table (with the common columns, including `provisioned`), a constant in `provision.Kinds` in dependency order, and a case in `objectsOf`.
+- Rows with `provisioned = true` belong to the files. Nothing but reconciliation may write them: an API route for a provisioned kind is read-only.
 
 ### Ingestion
 

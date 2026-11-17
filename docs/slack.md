@@ -38,7 +38,7 @@ You need permission to add apps to your workspace.
 2. **Install the app** to your workspace from the app's settings and approve the permissions it asks for.
 3. Copy the **Bot User OAuth Token** from the app's *OAuth & Permissions* page. It starts with `xoxb-`. This is `BEACON_SLACK_BOT_TOKEN`.
 4. Copy the **Signing Secret** from *App Credentials* on the app's *Basic Information* page. This is `BEACON_SLACK_SIGNING_SECRET`.
-5. Choose the channel for alerts and find its ID: open the channel's details in Slack, and the ID (like `C0123456789`) is at the bottom of the *About* tab. This is `BEACON_SLACK_CHANNEL`.
+5. Choose the channel for alerts and find its ID: open the channel's details in Slack, and the ID (like `C0123456789`) is at the bottom of the *About* tab. This is the `channel` in the configuration below.
 6. If the channel is private, invite the app to it: type `/invite @Beacon` in the channel.
 
 Slack renames the pages and buttons of its settings from time to time, so the names in steps 2 to 6 may differ from what you see.
@@ -54,25 +54,50 @@ Beacon asks for nothing else: it does not read messages, channels or users.
 
 ## Configure Beacon
 
-> [!warning] Temporary settings
-> Integrations will be defined in configuration files (see [[configuration-and-data-model]]). Until those exist, `beacon serve` takes one Slack integration and one channel from the settings below, and every alert is posted to that channel.
+A Slack integration is defined in the configuration files (see [[configuration]]). The two credentials are never written there: the file names the environment variables, or files, that hold them.
 
-| Setting | Environment variable | Meaning |
-|---|---|---|
-| `--slack-bot-token` | `BEACON_SLACK_BOT_TOKEN` | The bot token. Prefer the environment variable: a flag is visible in the process list. |
-| `--slack-signing-secret` | `BEACON_SLACK_SIGNING_SECRET` | The signing secret, with which Beacon checks that a button press really comes from Slack. Prefer the environment variable. |
-| `--slack-channel` | `BEACON_SLACK_CHANNEL` | The channel to post to. Use the channel ID. The name of a public channel also works, with or without `#`, but breaks when the channel is renamed. |
-| `--slack-api-url` | `BEACON_SLACK_API_URL` | Base URL of the Slack Web API. Leave it alone; it exists to test against a fake Slack. |
+```yaml
+integrations:
+  - name: slack
+    type: slack
+    slack:
+      bot_token: {env: BEACON_SLACK_BOT_TOKEN}
+      signing_secret: {env: BEACON_SLACK_SIGNING_SECRET}
 
-The token, the signing secret and the channel must be given together. Without them Beacon stores alerts and notifies nobody.
+escalation_policies:
+  - name: default
+    steps:
+      - notify:
+          - channel: C0123456789
+            integration: slack
+        timeout: 5m
+
+routing:
+  default:
+    escalation_policy: default
+```
+
+| Field | Meaning |
+|---|---|
+| `bot_token` | The bot token from step 3 |
+| `signing_secret` | The signing secret from step 4, with which Beacon checks that a button press really comes from Slack |
+| `channel` | The channel from step 5. Use the channel ID. The name of a public channel also works, with or without `#`, but breaks when the channel is renamed. |
+
+The name of the integration is part of the address that Slack sends button presses to: `/api/v1/integrations/<name>/interactions`.
+
+> [!warning] Which alerts go where
+> Routing and escalation are not implemented yet. Until they are, Beacon posts **every** alert to the channels named in the **first step** of the escalation policy that `routing.default` names, and ignores the rest: later steps, timeouts, people and routing rules. The configuration above keeps its meaning when they arrive.
+
+[`examples/slack`](https://github.com/thanoslabs/beacon/tree/main/examples/slack) holds this configuration with a webhook source. Copy it, put in your channel ID, and start Beacon:
 
 ```sh
 export BEACON_SOURCE_TOKEN="$(openssl rand -hex 32)"
 export BEACON_SLACK_BOT_TOKEN='xoxb-...'
 export BEACON_SLACK_SIGNING_SECRET='...'
-export BEACON_SLACK_CHANNEL='C0123456789'
-beacon serve
+beacon serve --config ./my-config
 ```
+
+`--slack-api-url` (`BEACON_SLACK_API_URL`) is a process setting, not part of the integration. Leave it alone; it exists to test against a fake Slack.
 
 Then send an alert as described in [[webhook]], and a message appears in the channel.
 

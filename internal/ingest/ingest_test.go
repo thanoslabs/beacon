@@ -42,14 +42,14 @@ func newFixture(t *testing.T) *fixture {
 		{Name: "staging", Type: config.SourceTypeWebhook, Token: config.NewSecret(config.SecretRef{}, stagingToken),
 			Severity: config.SeverityMapping{Label: "priority", Mapping: map[string]alert.Severity{"page": alert.SeverityCritical}, Default: alert.SeverityInfo}},
 	}
+	rows, err := provision.Reconcile(context.Background(), pool, config.Config{Sources: sources})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	f.ids = rows.IDs[provision.Sources]
 	var configured []ingest.Source
 	for _, s := range sources {
-		id, err := provision.Ensure(context.Background(), pool, provision.Sources, s.Name, s)
-		if err != nil {
-			t.Fatalf("Ensure: %v", err)
-		}
-		f.ids[s.Name] = id
-		configured = append(configured, ingest.Source{ID: id, Source: s})
+		configured = append(configured, ingest.Source{ID: f.ids[s.Name], Source: s})
 	}
 	ingest.New(slog.New(slog.NewJSONHandler(f.logs, nil)), f.store, configured).Register(f.mux)
 	return f

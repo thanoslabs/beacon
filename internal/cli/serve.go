@@ -15,6 +15,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/logging"
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres"
+	"github.com/thanoslabs/beacon/internal/provision"
 	"github.com/thanoslabs/beacon/internal/server"
 	"github.com/thanoslabs/beacon/internal/slack"
 	"github.com/thanoslabs/beacon/internal/version"
@@ -31,7 +32,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 		logLevel  string
 		logFormat string
 		migrate   bool
-		boot      bootstrapSettings
+		cfgPath   string
 		notifyCfg notify.Config
 		// slackAPIURL is a process setting, not part of an integration: it
 		// exists so that tests can point Beacon at a fake Slack.
@@ -54,16 +55,12 @@ func runServe(ctx context.Context, e env, args []string) error {
 	stringSetting(fs, e, &slackAPIURL, "slack-api-url", "BEACON_SLACK_API_URL", slack.DefaultAPIURL,
 		"base URL of the Slack Web API; change it only to test against a fake Slack")
 	databaseSettings(fs, e, &dbCfg, &envErrs)
-	boot.register(fs, e)
+	configSetting(fs, e, &cfgPath)
 	if err := parseFlags(fs, args, envErrs...); err != nil {
 		return err
 	}
 
 	if err := checkDatabaseSettings(dbCfg); err != nil {
-		return err
-	}
-	cfg, err := boot.config()
-	if err != nil {
 		return err
 	}
 	if _, err := url.ParseRequestURI(slackAPIURL); err != nil || !strings.HasPrefix(slackAPIURL, "http") {
@@ -79,6 +76,16 @@ func runServe(ctx context.Context, e env, args []string) error {
 	logger, err := logging.New(e.stderr, logLevel, logFormat)
 	if err != nil {
 		return err
+	}
+
+	// The configuration is read before anything is started, so that a mistake
+	// in it stops the start instead of leaving half a system running.
+	cfg, err := readConfig(e, cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfgPath == "" {
+		logger.WarnContext(ctx, "no configuration: there are no sources and nobody is notified; set --config or BEACON_CONFIG")
 	}
 
 	info := version.Get()
@@ -106,15 +113,18 @@ func runServe(ctx context.Context, e env, args []string) error {
 		return err
 	}
 
-	alerts := alert.NewStore(pool)
-	if err := attachIngest(ctx, logger, pool, cfg, alerts, srv.Mux()); err != nil {
+	// The provisioned rows are made to match the files before anything that
+	// refers to them is served.
+	rows, err := reconcile(ctx, logger, pool, cfg)
+	if err != nil {
 		return err
 	}
 
+	alerts := alert.NewStore(pool)
+	attachIngest(ctx, logger, cfg, rows.IDs[provision.Sources], alerts, srv.Mux())
+
 	pipeline := notify.New(pool, alerts, logger, notifyCfg)
-	if err := attachNotifications(ctx, logger, pool, cfg, alerts, pipeline, srv.Mux(), slackAPIURL); err != nil {
-		return err
-	}
+	attachNotifications(ctx, logger, cfg, rows.IDs[provision.Integrations], alerts, pipeline, srv.Mux(), slackAPIURL)
 
 	// Background work stops with the server: it watches the same context.
 	var background sync.WaitGroup

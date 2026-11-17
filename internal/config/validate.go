@@ -309,14 +309,6 @@ func (c Config) validate(v *validator) {
 			o.positive("group_interval", rule.GroupInterval)
 		}
 	}
-
-	for n, t := range c.Notify {
-		o := object{v: v, label: fmt.Sprintf("notify target %d", n+1)}
-		if t.Channel == "" {
-			o.errorf("channel", "is required")
-		}
-		o.ref("integration", kindIntegration, t.Integration, integrations)
-	}
 }
 
 // required reports a secret that is neither referenced nor set.

@@ -166,7 +166,7 @@ func testSlack() Integration {
 }
 
 func TestValidateIntegrations(t *testing.T) {
-	valid := Config{Integrations: []Integration{testSlack()}, Notify: []ChannelTarget{{Channel: "C0123456789", Integration: "slack"}}}
+	valid := Config{Integrations: []Integration{testSlack()}}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid config: %v", err)
 	}
@@ -182,12 +182,10 @@ func TestValidateIntegrations(t *testing.T) {
 		{name: "missing settings", change: func(c *Config) { c.Integrations[0].Slack = nil }, want: "slack: the settings are missing"},
 		{name: "missing bot token", change: func(c *Config) { c.Integrations[0].Slack.BotToken = Secret{} }, want: "slack.bot_token: is required"},
 		{name: "missing signing secret", change: func(c *Config) { c.Integrations[0].Slack.SigningSecret = Secret{} }, want: "slack.signing_secret: is required"},
-		{name: "target without channel", change: func(c *Config) { c.Notify[0].Channel = "" }, want: "notify target 1: channel: is required"},
-		{name: "target with unknown integration", change: func(c *Config) { c.Notify[0].Integration = "email" }, want: `notify target 1: integration: integration "email" does not exist`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{Integrations: []Integration{testSlack()}, Notify: []ChannelTarget{{Channel: "C0123456789", Integration: "slack"}}}
+			cfg := Config{Integrations: []Integration{testSlack()}}
 			tt.change(&cfg)
 			err := cfg.Validate()
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
@@ -221,5 +219,24 @@ func TestIntegrationSecretsAreNeverPrinted(t *testing.T) {
 	want := `{"name":"slack","type":"slack","slack":{"bot_token":{"env":"BEACON_SLACK_BOT_TOKEN"},"signing_secret":{"env":"BEACON_SLACK_SIGNING_SECRET"}}}`
 	if string(encoded) != want {
 		t.Errorf("stored form = %s, want %s", encoded, want)
+	}
+}
+
+func TestEveryAlertTargets(t *testing.T) {
+	cfg, err := Read("testdata/example", LoadOptions{})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	// Only the channel targets of the first step of the default policy.
+	got := cfg.EveryAlertTargets()
+	if len(got) != 1 || got[0] != (ChannelTarget{Channel: "#platform-alerts", Integration: "slack"}) {
+		t.Errorf("EveryAlertTargets = %+v", got)
+	}
+	if got := (Config{}).EveryAlertTargets(); got != nil {
+		t.Errorf("without routing: %+v", got)
+	}
+	cfg.Routing.Default.EscalationPolicy = "another"
+	if got := cfg.EveryAlertTargets(); got != nil {
+		t.Errorf("with another default policy: %+v", got)
 	}
 }
