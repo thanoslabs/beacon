@@ -7,14 +7,20 @@
 package slacktest
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Message is a message as the fake Slack holds it.
@@ -64,6 +70,8 @@ type Server struct {
 	calls    []Call
 	failures map[string][]Failure
 	seq      int
+
+	responses []map[string]any
 }
 
 // New starts a fake Slack that accepts the given bot token and has one
@@ -131,6 +139,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strings.HasPrefix(method, "response/") {
+		s.responses = append(s.responses, body)
+		reply(w, map[string]any{"ok": true})
+		return
+	}
 	s.calls = append(s.calls, Call{Method: method, Body: body})
 
 	if queue := s.failures[method]; len(queue) > 0 {
@@ -282,4 +295,102 @@ func validText(v any, maxLen int, types ...string) bool {
 func reply(w http.ResponseWriter, body map[string]any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// User is a person in the fake Slack workspace.
+type User struct {
+	ID       string
+	Username string
+}
+
+// Responses returns the messages Beacon sent through the response URL of an
+// interaction, which Slack shows to the person who pressed the button.
+func (s *Server) Responses() []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]map[string]any(nil), s.responses...)
+}
+
+// InteractionBody returns the body Slack sends when user presses the button
+// with the given action ID on m: a form with one field, payload, holding a
+// block_actions payload as JSON. The test fails if m has no such button.
+func (s *Server) InteractionBody(t testing.TB, m Message, actionID string, user User) []byte {
+	t.Helper()
+	value, found := "", false
+	for _, b := range m.Blocks {
+		elements, _ := b["elements"].([]any)
+		for _, e := range elements {
+			if btn, ok := e.(map[string]any); ok && btn["action_id"] == actionID {
+				value, _ = btn["value"].(string)
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the message has no button with action ID %q: %s", actionID, m.JSON())
+	}
+	s.mu.Lock()
+	s.seq++
+	n := s.seq
+	s.mu.Unlock()
+
+	payload, err := json.Marshal(map[string]any{
+		"type":       "block_actions",
+		"team":       map[string]any{"id": "T0FAKE", "domain": "fake"},
+		"user":       map[string]any{"id": user.ID, "username": user.Username, "team_id": "T0FAKE"},
+		"api_app_id": "A0FAKE",
+		"token":      "deprecated-verification-token",
+		"container":  map[string]any{"type": "message", "message_ts": m.TS, "channel_id": m.Channel, "is_ephemeral": false},
+		"trigger_id": fmt.Sprintf("%d.1.abc", n),
+		"channel":    map[string]any{"id": m.Channel, "name": "alerts"},
+		"message":    map[string]any{"type": "message", "ts": m.TS, "text": m.Text},
+		// A real response URL is on hooks.slack.com.
+		"response_url": fmt.Sprintf("%s/response/%d", s.URL, n),
+		"actions": []map[string]any{{
+			"action_id": actionID,
+			"block_id":  "b1",
+			"text":      map[string]any{"type": "plain_text", "text": "Button", "emoji": true},
+			"value":     value,
+			"type":      "button",
+			"action_ts": "1700000000.000000",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("encode payload: %v", err)
+	}
+	return []byte(url.Values{"payload": {string(payload)}}.Encode())
+}
+
+// Sign returns the values of the X-Slack-Request-Timestamp and
+// X-Slack-Signature headers for a body sent at the given time, computed the
+// way Slack documents.
+func Sign(signingSecret string, at time.Time, body []byte) (timestamp, signature string) {
+	timestamp = strconv.FormatInt(at.Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(signingSecret))
+	mac.Write([]byte("v0:" + timestamp + ":"))
+	mac.Write(body)
+	return timestamp, "v0=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// Click presses a button on m as user: it sends the signed interaction to
+// requestURL, the interactions endpoint of Beacon, and returns the status of
+// the answer.
+func (s *Server) Click(t testing.TB, requestURL, signingSecret string, m Message, actionID string, user User) int {
+	t.Helper()
+	body := s.InteractionBody(t, m, actionID, user)
+	req, err := http.NewRequest(http.MethodPost, requestURL, strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	timestamp, signature := Sign(signingSecret, time.Now(), body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Slack-Request-Timestamp", timestamp)
+	req.Header.Set("X-Slack-Signature", signature)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("send interaction: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test helper
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
 }

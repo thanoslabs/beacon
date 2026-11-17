@@ -181,6 +181,7 @@ func TestValidateIntegrations(t *testing.T) {
 		{name: "unknown type", change: func(c *Config) { c.Integrations[0].Type = "pager" }, want: `type "pager" is not supported`},
 		{name: "missing settings", change: func(c *Config) { c.Integrations[0].Slack = nil }, want: "slack: the settings are missing"},
 		{name: "missing bot token", change: func(c *Config) { c.Integrations[0].Slack.BotToken = Secret{} }, want: "slack.bot_token is required"},
+		{name: "missing signing secret", change: func(c *Config) { c.Integrations[0].Slack.SigningSecret = Secret{} }, want: "slack.signing_secret is required"},
 		{name: "target without channel", change: func(c *Config) { c.Notify[0].Channel = "" }, want: "notify target 1: channel is required"},
 		{name: "target with unknown integration", change: func(c *Config) { c.Notify[0].Integration = "email" }, want: `notify target 1: integration "email" does not exist`},
 	}

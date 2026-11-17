@@ -68,7 +68,7 @@ func TestRenderFiring(t *testing.T) {
 			t.Errorf("message does not contain %q:\n%s", want, out)
 		}
 	}
-	if len(msg.Blocks) != 3 || msg.Blocks[0].Type != "section" || msg.Blocks[1].Type != "section" || msg.Blocks[2].Type != "context" {
+	if len(msg.Blocks) != 4 || msg.Blocks[0].Type != "section" || msg.Blocks[1].Type != "section" || msg.Blocks[2].Type != "context" || msg.Blocks[3].Type != "actions" {
 		t.Errorf("blocks = %+v", msg.Blocks)
 	}
 }
@@ -161,7 +161,7 @@ func TestRenderWithoutOptionalParts(t *testing.T) {
 	}
 
 	a.Labels = nil
-	if msg, _ := rendered(t, notify.Message{Alerts: []alert.Alert{a}}); len(msg.Blocks) != 2 {
+	if msg, _ := rendered(t, notify.Message{Alerts: []alert.Alert{a}}); len(msg.Blocks) != 3 {
 		t.Errorf("an alert without labels has %d blocks, want no empty labels block", len(msg.Blocks))
 	}
 
@@ -258,5 +258,47 @@ func TestClip(t *testing.T) {
 		if got := clip(tt.in, tt.n); got != tt.want || len(got) > tt.n {
 			t.Errorf("clip(%q, %d) = %q (%d bytes), want %q", tt.in, tt.n, got, len(got), tt.want)
 		}
+	}
+}
+
+// TestButtonsFollowTheState checks that a message offers exactly the actions
+// its alert's state allows, each carrying the group to act on.
+func TestButtonsFollowTheState(t *testing.T) {
+	tests := []struct {
+		status alert.Status
+		want   []string
+	}{
+		{alert.StatusFiring, []string{"beacon_acknowledge", "beacon_snooze", "beacon_resolve"}},
+		{alert.StatusAcknowledged, []string{"beacon_snooze", "beacon_resolve"}},
+		{alert.StatusSnoozed, []string{"beacon_acknowledge", "beacon_resolve"}},
+		{alert.StatusResolved, nil},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			a := firingAlert()
+			a.Status, a.GroupID = tt.status, "0f8b1c1e-6a0e-4b0e-9a57-0d7f6d4f3c11"
+			msg, _ := rendered(t, notify.Message{Alerts: []alert.Alert{a}})
+			last := msg.Blocks[len(msg.Blocks)-1]
+			if tt.want == nil {
+				if last.Type == "actions" {
+					t.Fatalf("a %s alert has buttons: %+v", tt.status, last.Elements)
+				}
+				return
+			}
+			if last.Type != "actions" {
+				t.Fatalf("the last block is %q, want the buttons", last.Type)
+			}
+			var got []string
+			for _, e := range last.Elements {
+				b := e.(button)
+				got = append(got, b.ActionID)
+				if b.Type != "button" || b.Text.Type != "plain_text" || b.Text.Text == "" || b.Value != a.GroupID {
+					t.Errorf("button = %+v", b)
+				}
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tt.want) {
+				t.Errorf("buttons = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
