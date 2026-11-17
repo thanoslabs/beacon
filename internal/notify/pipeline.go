@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -53,12 +56,15 @@ const maxErrorLength = 500
 
 // Pipeline is the notification queue and the workers that deliver from it.
 type Pipeline struct {
-	db       *pgxpool.Pool
-	alerts   *alert.Store
-	logger   *slog.Logger
-	cfg      Config
-	now      func() time.Time
-	channels map[string]Channel
+	db     *pgxpool.Pool
+	alerts *alert.Store
+	logger *slog.Logger
+	cfg    Config
+	now    func() time.Time
+	// channels and targets follow the configuration, and are replaced as a
+	// whole when it is reloaded.
+	channels atomic.Pointer[map[string]Channel]
+	targets  atomic.Pointer[[]Target]
 }
 
 // New returns a pipeline. Register its channels before calling Run.
@@ -81,15 +87,40 @@ func New(db *pgxpool.Pool, alerts *alert.Store, logger *slog.Logger, cfg Config)
 	if cfg.BackoffMax <= 0 {
 		cfg.BackoffMax = DefaultBackoffMax
 	}
-	return &Pipeline{db: db, alerts: alerts, logger: logger, cfg: cfg, now: time.Now, channels: map[string]Channel{}}
+	p := &Pipeline{db: db, alerts: alerts, logger: logger, cfg: cfg, now: time.Now}
+	p.SetChannels(nil)
+	p.SetTargets(nil)
+	return p
 }
 
 // SetClock replaces the clock, so tests can move time.
 func (p *Pipeline) SetClock(now func() time.Time) { p.now = now }
 
 // Register makes ch the channel for the integration with this identifier.
+// Call it before Run; to change channels while the pipeline runs, use
+// SetChannels.
 func (p *Pipeline) Register(integrationID string, ch Channel) {
-	p.channels[integrationID] = ch
+	channels := maps.Clone(*p.channels.Load())
+	channels[integrationID] = ch
+	p.channels.Store(&channels)
+}
+
+// SetChannels replaces every channel, by integration identifier. It is safe
+// while the pipeline runs. A notification already queued for an integration
+// that no longer has a channel fails permanently when it is tried.
+func (p *Pipeline) SetChannels(channels map[string]Channel) {
+	channels = maps.Clone(channels)
+	if channels == nil {
+		channels = map[string]Channel{}
+	}
+	p.channels.Store(&channels)
+}
+
+// SetTargets replaces the targets that NotifyAll notifies. It is safe while
+// alerts change.
+func (p *Pipeline) SetTargets(targets []Target) {
+	targets = slices.Clone(targets)
+	p.targets.Store(&targets)
 }
 
 // Enqueue queues n for delivery through tx, so the notification exists if and
@@ -123,17 +154,19 @@ var reasons = map[alert.EventType]Reason{
 }
 
 // NotifyAll returns an alert observer that queues a notification to every
-// target whenever an alert changes state.
+// target whenever an alert changes state. SetTargets changes the targets
+// later.
 //
 // Temporary: it stands in for routing and escalation policies, which will
 // decide who is notified about what.
 func (p *Pipeline) NotifyAll(targets []Target) alert.Observer {
+	p.SetTargets(targets)
 	return func(ctx context.Context, tx pgx.Tx, ev alert.Event, _ alert.Alert) error {
 		reason, ok := reasons[ev.Type]
 		if !ok {
 			return nil
 		}
-		for _, t := range targets {
+		for _, t := range *p.targets.Load() {
 			err := p.Enqueue(ctx, tx, Notification{GroupID: ev.GroupID, IntegrationID: t.IntegrationID, Destination: t.Destination, Reason: reason})
 			if err != nil {
 				return err
@@ -228,7 +261,7 @@ func (p *Pipeline) deliver(ctx context.Context, n Notification) {
 }
 
 func (p *Pipeline) send(ctx context.Context, n Notification) (ref string, err error) {
-	ch, ok := p.channels[n.IntegrationID]
+	ch, ok := (*p.channels.Load())[n.IntegrationID]
 	if !ok {
 		return "", Permanent(errors.New("no channel is configured for the integration"))
 	}

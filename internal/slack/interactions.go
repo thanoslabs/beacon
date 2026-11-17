@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/thanoslabs/beacon/internal/alert"
@@ -42,9 +43,10 @@ type Alerts interface {
 // Interactions handles the button presses that Slack sends. Every request is
 // verified with the signing secret of the integration named in its path.
 type Interactions struct {
-	logger  *slog.Logger
-	alerts  Alerts
-	secrets map[string]config.Secret
+	logger *slog.Logger
+	alerts Alerts
+	// secrets is replaced as a whole when the configuration is reloaded.
+	secrets atomic.Pointer[map[string]config.Secret]
 	now     func() time.Time
 	http    *http.Client
 }
@@ -52,12 +54,20 @@ type Interactions struct {
 // NewInteractions returns a handler. secrets maps the name of each Slack
 // integration to its signing secret.
 func NewInteractions(logger *slog.Logger, alerts Alerts, secrets map[string]config.Secret) *Interactions {
-	return &Interactions{
-		logger: logger, alerts: alerts, secrets: secrets, now: time.Now,
+	h := &Interactions{
+		logger: logger, alerts: alerts, now: time.Now,
 		// Slack waits three seconds for the answer to a button press, so the
 		// reply to the person who pressed it must not take long.
 		http: &http.Client{Timeout: 2 * time.Second},
 	}
+	h.SetSecrets(secrets)
+	return h
+}
+
+// SetSecrets replaces the signing secrets, by integration name. It is safe
+// while requests are being handled.
+func (h *Interactions) SetSecrets(secrets map[string]config.Secret) {
+	h.secrets.Store(&secrets)
 }
 
 // SetClock replaces the clock, so tests can move time.
@@ -94,7 +104,7 @@ func (h *Interactions) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// The signature covers the raw body, so it is checked before anything in
 	// the body is parsed. An unknown integration has no secret and fails too.
-	secret := h.secrets[r.PathValue("name")]
+	secret := (*h.secrets.Load())[r.PathValue("name")]
 	if !verify(secret, r.Header.Get("X-Slack-Request-Timestamp"), r.Header.Get("X-Slack-Signature"), body, h.now()) {
 		h.logger.WarnContext(ctx, "slack request refused: the signature is missing, wrong or too old")
 		http.Error(w, "invalid signature", http.StatusUnauthorized)

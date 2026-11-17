@@ -157,7 +157,31 @@ The whole change is applied together or not at all. Applying the same files agai
 
 Provisioned objects are read-only everywhere else. Nothing but the files can change them.
 
-Beacon reads the files when it starts, so restart it to apply a change.
+## Reload without a restart
+
+Beacon reads the files when it starts, and again whenever it receives `SIGHUP`:
+
+```sh
+kill -HUP "$(pidof beacon)"
+docker compose kill --signal HUP beacon
+kubectl exec deploy/beacon -- kill -HUP 1
+```
+
+- The files are checked first, exactly as `beacon validate --check-secrets` checks them. If anything is wrong, **nothing** of the new configuration is applied and the previous one stays active. The log has one `configuration problem` record per problem, then `configuration reload failed; the previous configuration stays active`.
+- A valid configuration is applied as a whole, as at start: the database is brought in line, then sources, integrations and notification targets switch over together. Requests in progress finish with what they started with. The log says `configuration reloaded`.
+- Secrets kept in files are read again, so a reload also picks up a rotated secret. Secrets from environment variables cannot change while the process runs; rotating one needs a restart.
+- Each replica reloads on its own. Send the signal to every replica.
+- Process settings (flags and their environment variables) are not part of the configuration and need a restart.
+
+Three metrics on `/metrics` follow reloads:
+
+| Metric | Meaning |
+|---|---|
+| `beacon_config_reloads_total{result="success"}`, `{result="failure"}` | Reloads since the process started. Loading at start is not counted. |
+| `beacon_config_last_reload_successful` | `1` after a successful load, `0` after a rejected reload. While it is `0`, the process runs a configuration that differs from the files. |
+| `beacon_config_last_reload_success_timestamp_seconds` | When the active configuration was loaded |
+
+An alert on `beacon_config_last_reload_successful == 0` catches a broken configuration that was rolled out without `beacon validate`.
 
 ## Check the configuration
 

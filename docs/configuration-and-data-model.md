@@ -335,6 +335,7 @@ Applying a configuration makes these rows match the files, in one transaction, s
 - An object that left the files gets `removed_at`. Nothing is deleted, whether or not anything refers to the row, so an alert, a notification or a shift always resolves to the object it belonged to.
 - Kinds are applied in dependency order (sources, integrations, teams, schedules, escalation policies, routing rules), so a schedule's `team_id` always has a row to point at.
 - A transaction-level advisory lock serialises reconciliations. Replicas that start together take turns, and all but the first find nothing to do.
+- Reconciliation runs at start and at every reload. A reload validates the files first and reconciles before anything in the process is switched over, so a configuration that is invalid, or that cannot be stored, changes nothing.
 - Replicas are expected to run the same configuration. If two run different files, each makes the rows match its own files in turn, and the last one wins; roll out a configuration change to every replica.
 
 ### Users and access
