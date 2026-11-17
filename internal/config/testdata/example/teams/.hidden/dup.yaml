@@ -1,0 +1,4 @@
+sources:
+  - name: prod-alertmanager
+    type: webhook
+    token: {env: X}

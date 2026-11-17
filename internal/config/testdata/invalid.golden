@@ -1,0 +1,67 @@
+testdata/invalid/integrations.yaml:2: integration "slack": slack: the settings are missing: an integration of type slack needs a slack block
+testdata/invalid/integrations.yaml:6: integration "chat": slack.signing_secret: is required
+testdata/invalid/integrations.yaml:7: integration "chat": email: does not belong in an integration of type slack
+testdata/invalid/integrations.yaml:10: integration "discord": discord.application_id: is required: the application's numeric ID
+testdata/invalid/integrations.yaml:10: integration "discord": discord.bot_token: is required
+testdata/invalid/integrations.yaml:10: integration "discord": discord.public_key: is required: the application's public key, 64 hexadecimal characters
+testdata/invalid/integrations.yaml:13: integration "email": email.from: is required: an email address
+testdata/invalid/integrations.yaml:13: integration "email": email.host: is required
+testdata/invalid/integrations.yaml:13: integration "email": email.password: username and password go together: set both or neither
+testdata/invalid/integrations.yaml:13: integration "email": email.port: is required: a port between 1 and 65535
+testdata/invalid/integrations.yaml:13: integration "email": email.tls: is required: starttls, implicit or none
+testdata/invalid/integrations.yaml:17: integration "hook": webhook.url: is required: an http or https URL
+testdata/invalid/integrations.yaml:18: integration "hook": webhook.headers: "Bad Header" is not a header name
+testdata/invalid/integrations.yaml:20: integration "pager": type: "sms" is not slack, discord, email or webhook
+testdata/invalid/integrations.yaml:21: integration "untyped": type: is required: slack, discord, email or webhook
+testdata/invalid/sources.yaml:2: source "Prod": name: must be lowercase letters, digits and hyphens, start with a letter and be at most 63 characters
+testdata/invalid/sources.yaml:2: source "Prod": token: is required
+testdata/invalid/sources.yaml:3: source "Prod": type: "pager" is not alertmanager, grafana or webhook
+testdata/invalid/sources.yaml:6: source "ok": token: must be at least 16 characters
+testdata/invalid/sources.yaml:7: source "ok": labels: "bad-label" is not a label name
+testdata/invalid/sources.yaml:9: source "ok": severity.label: "the severity" is not a label name
+testdata/invalid/sources.yaml:10: source "ok": severity.mapping.page: "urgent" is not critical, warning or info
+testdata/invalid/sources.yaml:11: source "ok": severity.default: "loud" is not critical, warning or info
+testdata/invalid/sources.yaml:12: source "ok": name: the name is used twice; first at testdata/invalid/sources.yaml:4
+testdata/invalid/sources.yaml:12: source "ok": type: is required: alertmanager, grafana or webhook
+testdata/invalid/teams/platform.yaml:3: team "platform": members[1]: "Ada@Example.com" is listed twice
+testdata/invalid/teams/platform.yaml:3: team "platform": members[2]: "not-an-email" is not an email address
+testdata/invalid/teams/platform.yaml:3: team "platform": members[3]: "Grace <grace@example.com>" is not an email address
+testdata/invalid/teams/platform.yaml:4: team "platform": groups[1]: must not be empty
+testdata/invalid/teams/platform.yaml:4: team "platform": groups[2]: "engineers" is listed twice
+testdata/invalid/teams/platform.yaml:7: schedule "primary": team: team "plataform" does not exist
+testdata/invalid/teams/platform.yaml:8: schedule "primary": time_zone: "Europe/Londres" is not an IANA time zone such as Europe/London
+testdata/invalid/teams/platform.yaml:10: schedule "primary": rotation.members[1]: "ada@example.com" is listed twice
+testdata/invalid/teams/platform.yaml:11: schedule "primary": rotation.shift_length: is required: a whole number of days or weeks, such as 1d, 3d or 1w
+testdata/invalid/teams/platform.yaml:12: schedule "primary": rotation.handoff.time: is required: a time of day such as "09:00"
+testdata/invalid/teams/platform.yaml:13: schedule "weekly": team: is required
+testdata/invalid/teams/platform.yaml:15: schedule "weekly": rotation.members: at least one member is required
+testdata/invalid/teams/platform.yaml:17: schedule "weekly": rotation.handoff.day: is required when shifts are whole weeks: a weekday such as monday
+testdata/invalid/teams/platform.yaml:24: schedule "daily": rotation.handoff.day: applies only when shifts are whole weeks
+testdata/invalid/teams/platform.yaml:27: escalation policy "default": repeat: must be between 0 and 100
+testdata/invalid/teams/platform.yaml:29: escalation policy "default": steps[0].timeout: is required, and must be longer than zero
+testdata/invalid/teams/platform.yaml:30: escalation policy "default": steps[0].notify[0].schedule: schedule "secondary" does not exist
+testdata/invalid/teams/platform.yaml:31: escalation policy "default": steps[0].notify[1].team: team "nobody" does not exist
+testdata/invalid/teams/platform.yaml:32: escalation policy "default": steps[0].notify[1].via[0]: integration "pagerduty" does not exist
+testdata/invalid/teams/platform.yaml:33: escalation policy "default": steps[0].notify[2].user: "ada" is not an email address
+testdata/invalid/teams/platform.yaml:34: escalation policy "default": steps[0].notify[3].integration: is required with channel
+testdata/invalid/teams/platform.yaml:35: escalation policy "default": steps[0].notify[4].channel: is required with integration
+testdata/invalid/teams/platform.yaml:37: escalation policy "default": steps[0].notify[5].integration: integration "carrier-pigeon" does not exist
+testdata/invalid/teams/platform.yaml:38: escalation policy "default": steps[0].notify[5].via: applies to schedule, team and user targets, not to a channel
+testdata/invalid/teams/platform.yaml:39: escalation policy "default": steps[0].notify[6]: a target is exactly one of {schedule}, {team}, {user} and {channel, integration}
+testdata/invalid/teams/platform.yaml:41: escalation policy "default": steps[0].notify[7]: a target is exactly one of {schedule}, {team}, {user} and {channel, integration}
+testdata/invalid/teams/platform.yaml:42: escalation policy "default": steps[1].notify: at least one target is required
+testdata/invalid/teams/platform.yaml:43: escalation policy "default": steps[1].timeout: is required, and must be longer than zero
+testdata/invalid/teams/platform.yaml:44: escalation policy "empty": steps: at least one step is required
+testdata/invalid/teams/platform.yaml:46: routing: group_by[1]: "not a label" is not a label name
+testdata/invalid/teams/platform.yaml:47: routing: group_wait: must be longer than zero
+testdata/invalid/teams/platform.yaml:48: routing: default.escalation_policy: is required
+testdata/invalid/teams/platform.yaml:49: routing: default.team: team "nobody" does not exist
+testdata/invalid/teams/platform.yaml:51: routing rule "r1": match: a rule needs match, match_re or both
+testdata/invalid/teams/platform.yaml:52: routing rule "r1": escalation_policy: escalation policy "missing" does not exist
+testdata/invalid/teams/platform.yaml:53: routing rule "r1": team: team "nobody" does not exist
+testdata/invalid/teams/platform.yaml:54: routing rule "r1": escalation_policy: is required
+testdata/invalid/teams/platform.yaml:54: routing rule "r1": name: the name is used twice; first at testdata/invalid/teams/platform.yaml:51
+testdata/invalid/teams/platform.yaml:55: routing rule "r1": match: "bad-label" is not a label name
+testdata/invalid/teams/platform.yaml:56: routing rule "r1": match_re: "also bad" is not a label name
+testdata/invalid/teams/platform.yaml:56: routing rule "r1": match_re.severity: is not a regular expression: missing closing ): `^(?:(critical)$`
+testdata/invalid/teams/platform.yaml:57: routing rule "r1": group_interval: must be longer than zero

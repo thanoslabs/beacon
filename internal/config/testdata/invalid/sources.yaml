@@ -1,0 +1,13 @@
+sources:
+  - name: Prod
+    type: pager
+  - name: ok
+    type: webhook
+    token: {env: SHORT_TOKEN}
+    labels: {"bad-label": x}
+    severity:
+      label: "the severity"
+      mapping: {page: urgent}
+      default: loud
+  - name: ok
+    token: {env: GOOD_TOKEN}

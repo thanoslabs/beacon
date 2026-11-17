@@ -1,0 +1,120 @@
+# A complete Beacon configuration: every kind of object, in one file.
+#
+# Check it with:
+#
+#   beacon validate --config examples/full
+#
+# docs/configuration.md describes every field. The kinds may be split across
+# files in any way; only the routing block must stay in one file.
+#
+# Secrets are never written here. A secret field names an environment
+# variable, {env: NAME}, or a file, {file: /path}.
+
+sources:
+  - name: prod-alertmanager
+    type: alertmanager
+    token: {env: BEACON_SOURCE_PROD_ALERTMANAGER_TOKEN}
+    labels:
+      environment: production
+    severity:
+      label: severity
+      mapping:
+        page: critical
+        critical: critical
+        warning: warning
+      default: warning
+
+  - name: grafana
+    type: grafana
+    token: {file: /run/secrets/grafana-source-token}
+
+integrations:
+  - name: slack
+    type: slack
+    slack:
+      bot_token: {env: BEACON_SLACK_BOT_TOKEN}
+      signing_secret: {env: BEACON_SLACK_SIGNING_SECRET}
+
+  - name: email
+    type: email
+    email:
+      host: smtp.example.com
+      port: 587
+      username: beacon
+      password: {env: BEACON_SMTP_PASSWORD}
+      from: beacon@example.com
+      tls: starttls
+
+  - name: discord
+    type: discord
+    discord:
+      bot_token: {env: BEACON_DISCORD_BOT_TOKEN}
+      public_key: 5f1c0c8e7a9b4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e
+      application_id: "1234567890123456789"
+
+  - name: ticketing
+    type: webhook
+    webhook:
+      url: https://tickets.example.com/hooks/beacon
+      headers:
+        X-Team: platform
+        Authorization: {env: BEACON_TICKETING_AUTHORIZATION}
+
+teams:
+  - name: platform
+    display_name: Platform
+    members:
+      - ada@example.com
+      - grace@example.com
+      - linus@example.com
+    groups:
+      - platform-engineers
+
+schedules:
+  - name: platform-primary
+    team: platform
+    time_zone: Europe/London
+    rotation:
+      members:
+        - ada@example.com
+        - grace@example.com
+        - linus@example.com
+      shift_length: 1w
+      handoff:
+        day: monday
+        time: "09:00"
+    effective_from: 2026-12-07T09:00:00Z
+
+escalation_policies:
+  - name: platform-default
+    repeat: 2
+    steps:
+      - notify:
+          - schedule: platform-primary
+          - channel: "#platform-alerts"
+            integration: slack
+        timeout: 5m
+      - notify:
+          - team: platform
+        timeout: 10m
+      - notify:
+          - user: ada@example.com
+            via: [email]
+        timeout: 15m
+
+routing:
+  group_by: [alertname, cluster]
+  group_wait: 30s
+  group_interval: 5m
+  default:
+    team: platform
+    escalation_policy: platform-default
+  rules:
+    - name: platform-critical
+      match:
+        team: platform
+      match_re:
+        severity: critical|page
+      team: platform
+      escalation_policy: platform-default
+      group_wait: 10s

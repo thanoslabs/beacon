@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. It receives alerts through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md) and posts them to one [Slack channel](docs/slack.md), where they can be acknowledged, snoozed and resolved. Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, receives alerts through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md) and posts them to a [Slack channel](docs/slack.md), where they can be acknowledged, snoozed and resolved. Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -43,7 +43,7 @@ curl http://localhost:8080/readyz
 
 Set `BEACON_PORT` to publish Beacon on a different host port, for example `BEACON_PORT=18080 docker compose up --build`.
 
-To receive alerts, give the webhook source a token before starting, then send an alert:
+Compose gives Beacon the configuration in [`examples/quickstart`](examples/quickstart/beacon.yaml): one webhook source named `default`. Set its token before starting, then send an alert:
 
 ```sh
 export BEACON_SOURCE_TOKEN="$(openssl rand -hex 32)"
@@ -53,13 +53,16 @@ curl -X POST http://localhost:8080/api/v1/ingest/default \
   -d '{"labels": {"alertname": "DiskFull", "severity": "critical"}, "annotations": {"summary": "Disk is full"}}'
 ```
 
-The [webhook page](docs/webhook.md) describes the payload and the responses. To have alerts posted to Slack, also set `BEACON_SLACK_BOT_TOKEN`, `BEACON_SLACK_SIGNING_SECRET` and `BEACON_SLACK_CHANNEL` as the [Slack page](docs/slack.md) describes.
+Without `BEACON_SOURCE_TOKEN`, Compose uses a fixed token that is only fit for a local try-out.
+
+The [webhook page](docs/webhook.md) describes the payload and the responses. Sources, integrations and everything else that is provisioned are defined in YAML files; the [configuration page](docs/configuration.md) is the reference. To use your own, point Compose at a directory of them with `BEACON_CONFIG_DIR`. To have alerts posted to Slack, start from [`examples/slack`](examples/slack/beacon.yaml) as the [Slack page](docs/slack.md) describes.
 
 Releases publish a container image for `linux/amd64` and `linux/arm64`, tagged with the bare version:
 
 ```sh
 docker run --rm -p 8080:8080 \
   -e BEACON_DATABASE_URL='postgres://user:password@host:5432/beacon' \
+  -e BEACON_CONFIG=/etc/beacon -v "$PWD/my-config:/etc/beacon:ro" \
   ghcr.io/thanoslabs/beacon:X.Y.Z
 ```
 
@@ -85,9 +88,10 @@ To run the binary outside Docker, start only Postgres from `compose.yaml`, which
 ```sh
 docker compose up -d --wait postgres
 export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable'
-./bin/beacon serve              # apply pending migrations, then serve on :8080
+./bin/beacon serve --config examples/quickstart   # apply pending migrations, then serve on :8080
 ./bin/beacon migrate            # apply schema migrations without serving
 ./bin/beacon migrate --status   # list migrations and their state
+./bin/beacon validate --config examples/full   # check configuration files; needs no database
 ```
 
 The server answers on these endpoints:
@@ -111,7 +115,7 @@ go test -race ./...
 
 The tests in `internal/e2e` build the binary and run it as a process against Postgres and a fake Slack: an alert goes in by webhook, a message comes out to Slack, a button press acknowledges it and the source resolves it. They run with the rest of the tests.
 
-Every setting can be given as a flag or as an environment variable; run `beacon <command> -h` to list them.
+Every process setting can be given as a flag or as an environment variable; run `beacon <command> -h` to list them. Provisioned objects come from the files named by `--config` (or `BEACON_CONFIG`); without it Beacon starts with no sources and notifies nobody.
 
 - **Releases**: merging a PR to `main` cuts a [SemVer](https://semver.org/) release with a bare `X.Y.Z` tag and publishes the container image `ghcr.io/thanoslabs/beacon:X.Y.Z`. The bump comes from the PR's `major`, `minor` or `patch` label, and defaults to `patch`.
 - **Dependencies**: [Renovate](https://docs.renovatebot.com/) opens update PRs, configured in `renovate.json`.

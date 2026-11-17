@@ -2,57 +2,83 @@
 // sources, integrations and so on that docs/configuration-and-data-model.md
 // describes.
 //
-// Nothing here reads files. Until the YAML loader exists, beacon serve fills
-// these types from a few flags and environment variables; the loader will fill
-// the same types.
+// Load reads the objects from YAML files, Validate checks them, and Read does
+// both.
 package config
 
 import (
-	"errors"
-	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/thanoslabs/beacon/internal/alert"
 )
 
 // Config is everything provisioned.
 type Config struct {
-	Sources      []Source
-	Integrations []Integration
-
-	// Notify lists the shared channels that are told about every alert.
-	//
-	// Temporary: it stands in for routing and escalation policies, whose
-	// steps will name their targets. It is not part of the file schema.
-	Notify []ChannelTarget
+	Sources            []Source
+	Integrations       []Integration
+	Teams              []Team
+	Schedules          []Schedule
+	EscalationPolicies []EscalationPolicy
+	// Routing is nil when no file has a routing block.
+	Routing *Routing
 }
 
-// SourceTypeWebhook is the generic JSON webhook source type.
-const SourceTypeWebhook = "webhook"
+// Origin says where an object was defined. It is empty for objects that did
+// not come from a file.
+type Origin struct {
+	File string
+	Line int
+	// fields maps the path of each field that the file sets, such as
+	// severity.default, to its line.
+	fields map[string]int
+}
+
+// lineOf returns the line of a field, or of the nearest field around it that
+// the file sets, or of the object.
+func (o Origin) lineOf(field string) int {
+	for field != "" {
+		if line, ok := o.fields[field]; ok {
+			return line
+		}
+		field = field[:max(strings.LastIndexAny(field, ".["), 0)]
+	}
+	return o.Line
+}
+
+// The source types.
+const (
+	SourceTypeAlertmanager = "alertmanager"
+	SourceTypeGrafana      = "grafana"
+	// SourceTypeWebhook is the generic JSON webhook.
+	SourceTypeWebhook = "webhook"
+)
 
 // Source is an authenticated endpoint that receives alerts.
 type Source struct {
 	// Name is the identity, and the last segment of the ingest URL.
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name string `yaml:"name" json:"name"`
+	Type string `yaml:"type" json:"type"`
 	// Token is what the sender presents as a bearer token.
-	Token Secret `json:"token"`
+	Token Secret `yaml:"token" json:"token"`
 	// Labels are added to every alert from this source. They do not replace
 	// a label the alert already has.
-	Labels   map[string]string `json:"labels,omitempty"`
-	Severity SeverityMapping   `json:"severity"`
+	Labels   map[string]string `yaml:"labels" json:"labels,omitempty"`
+	Severity SeverityMapping   `yaml:"severity" json:"severity"`
+
+	Origin Origin `yaml:"-" json:"-"`
 }
 
 // SeverityMapping says how a source's alerts get their severity.
 type SeverityMapping struct {
 	// Label names the label that carries severity. Empty means "severity".
-	Label string `json:"label,omitempty"`
+	Label string `yaml:"label" json:"label,omitempty"`
 	// Mapping maps label values to Beacon's levels. When empty, the names of
 	// the levels map to themselves.
-	Mapping map[string]alert.Severity `json:"mapping,omitempty"`
+	Mapping map[string]alert.Severity `yaml:"mapping" json:"mapping,omitempty"`
 	// Default applies when the label is missing or unmapped. Empty means
 	// warning.
-	Default alert.Severity `json:"default,omitempty"`
+	Default alert.Severity `yaml:"default" json:"default,omitempty"`
 }
 
 // Resolve returns the severity of an alert with these labels.
@@ -75,30 +101,209 @@ func (m SeverityMapping) Resolve(labels map[string]string) alert.Severity {
 	return alert.SeverityWarning
 }
 
-// IntegrationTypeSlack is the Slack integration type.
-const IntegrationTypeSlack = "slack"
+// The integration types.
+const (
+	IntegrationTypeSlack   = "slack"
+	IntegrationTypeDiscord = "discord"
+	IntegrationTypeEmail   = "email"
+	IntegrationTypeWebhook = "webhook"
+)
 
-// Integration is a connection to a notification service.
+// Integration is a connection to a notification service. Exactly the block
+// matching Type is set.
 type Integration struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
-	// Slack holds the settings when Type is IntegrationTypeSlack.
-	Slack *SlackIntegration `json:"slack,omitempty"`
+	Name    string              `yaml:"name" json:"name"`
+	Type    string              `yaml:"type" json:"type"`
+	Slack   *SlackIntegration   `yaml:"slack" json:"slack,omitempty"`
+	Discord *DiscordIntegration `yaml:"discord" json:"discord,omitempty"`
+	Email   *EmailIntegration   `yaml:"email" json:"email,omitempty"`
+	Webhook *WebhookIntegration `yaml:"webhook" json:"webhook,omitempty"`
+
+	Origin Origin `yaml:"-" json:"-"`
 }
 
 // SlackIntegration holds the credentials of a Slack app.
 type SlackIntegration struct {
 	// BotToken is the app's bot user OAuth token.
-	BotToken Secret `json:"bot_token"`
+	BotToken Secret `yaml:"bot_token" json:"bot_token"`
 	// SigningSecret verifies that requests come from Slack.
-	SigningSecret Secret `json:"signing_secret"`
+	SigningSecret Secret `yaml:"signing_secret" json:"signing_secret"`
 }
 
-// ChannelTarget is a shared channel reached through an integration, in the
-// form escalation steps use: {channel: <channel>, integration: <name>}.
+// DiscordIntegration holds the settings of a Discord application.
+type DiscordIntegration struct {
+	BotToken Secret `yaml:"bot_token" json:"bot_token"`
+	// PublicKey verifies that interactions come from Discord. It is not a
+	// secret.
+	PublicKey     string `yaml:"public_key" json:"public_key"`
+	ApplicationID string `yaml:"application_id" json:"application_id"`
+}
+
+// The ways an email integration secures its connection.
+const (
+	EmailTLSStartTLS = "starttls"
+	EmailTLSImplicit = "implicit"
+	EmailTLSNone     = "none"
+)
+
+// EmailIntegration holds the settings of an SMTP server.
+type EmailIntegration struct {
+	Host     string `yaml:"host" json:"host"`
+	Port     int    `yaml:"port" json:"port"`
+	Username string `yaml:"username" json:"username,omitempty"`
+	Password Secret `yaml:"password" json:"password"`
+	From     string `yaml:"from" json:"from"`
+	// TLS is starttls, implicit or none.
+	TLS string `yaml:"tls" json:"tls"`
+}
+
+// WebhookIntegration is an outbound webhook.
+type WebhookIntegration struct {
+	URL string `yaml:"url" json:"url"`
+	// Headers are sent with every request. A value is a plain string or a
+	// secret reference.
+	Headers map[string]HeaderValue `yaml:"headers" json:"headers,omitempty"`
+}
+
+// Team is a group of users.
+type Team struct {
+	Name        string `yaml:"name" json:"name"`
+	DisplayName string `yaml:"display_name" json:"display_name,omitempty"`
+	// Members are user email addresses.
+	Members []string `yaml:"members" json:"members,omitempty"`
+	// Groups are identity provider group names whose members belong to the
+	// team.
+	Groups []string `yaml:"groups" json:"groups,omitempty"`
+
+	Origin Origin `yaml:"-" json:"-"`
+}
+
+// Schedule is one on-call rotation.
+type Schedule struct {
+	Name string `yaml:"name" json:"name"`
+	// Team is the name of the owning team.
+	Team string `yaml:"team" json:"team"`
+	// TimeZone is the IANA zone in which the handoff time is read.
+	TimeZone string   `yaml:"time_zone" json:"time_zone"`
+	Rotation Rotation `yaml:"rotation" json:"rotation"`
+	// EffectiveFrom is when a changed definition takes over. Without it the
+	// change applies at the next handoff.
+	EffectiveFrom *Timestamp `yaml:"effective_from" json:"effective_from,omitempty"`
+
+	Origin Origin `yaml:"-" json:"-"`
+}
+
+// Rotation says who takes turns, for how long, and when they hand over.
+type Rotation struct {
+	// Members are user email addresses, in rotation order.
+	Members []string `yaml:"members" json:"members"`
+	// ShiftLength is a whole number of days or weeks.
+	ShiftLength Duration `yaml:"shift_length" json:"shift_length"`
+	Handoff     Handoff  `yaml:"handoff" json:"handoff"`
+}
+
+// Handoff is the local time, and for shifts in weeks the weekday, at which
+// one shift ends and the next begins.
+type Handoff struct {
+	Day  string `yaml:"day" json:"day,omitempty"`
+	Time string `yaml:"time" json:"time"`
+}
+
+// EscalationPolicy says who is notified about an alert, in which order.
+type EscalationPolicy struct {
+	Name string `yaml:"name" json:"name"`
+	// Repeat is how many more times all steps run after the first pass.
+	Repeat int              `yaml:"repeat" json:"repeat,omitempty"`
+	Steps  []EscalationStep `yaml:"steps" json:"steps"`
+
+	Origin Origin `yaml:"-" json:"-"`
+}
+
+// EscalationStep notifies its targets, then waits Timeout for an
+// acknowledgement before the next step runs.
+type EscalationStep struct {
+	Notify  []Target `yaml:"notify" json:"notify"`
+	Timeout Duration `yaml:"timeout" json:"timeout"`
+}
+
+// Target is who an escalation step notifies. It has exactly one of four
+// forms: a schedule, a team, a user, or a channel with its integration.
+type Target struct {
+	Schedule string `yaml:"schedule" json:"schedule,omitempty"`
+	Team     string `yaml:"team" json:"team,omitempty"`
+	// User is an email address.
+	User        string `yaml:"user" json:"user,omitempty"`
+	Channel     string `yaml:"channel" json:"channel,omitempty"`
+	Integration string `yaml:"integration" json:"integration,omitempty"`
+	// Via narrows the integrations a person is reached through. It applies
+	// to schedule, team and user targets.
+	Via []string `yaml:"via" json:"via,omitempty"`
+}
+
+// Routing decides which team and escalation policy an alert gets.
+type Routing struct {
+	GroupBy       []string     `yaml:"group_by" json:"group_by,omitempty"`
+	GroupWait     *Duration    `yaml:"group_wait" json:"group_wait,omitempty"`
+	GroupInterval *Duration    `yaml:"group_interval" json:"group_interval,omitempty"`
+	Default       RouteDefault `yaml:"default" json:"default"`
+	// Rules are tried in order; the first match wins.
+	Rules []RoutingRule `yaml:"rules" json:"rules,omitempty"`
+
+	Origin Origin `yaml:"-" json:"-"`
+}
+
+// RouteDefault applies to alerts that match no rule.
+type RouteDefault struct {
+	Team             string `yaml:"team" json:"team,omitempty"`
+	EscalationPolicy string `yaml:"escalation_policy" json:"escalation_policy"`
+}
+
+// RoutingRule matches alerts by label.
+type RoutingRule struct {
+	Name string `yaml:"name" json:"name"`
+	// Match maps a label to the exact value it must have.
+	Match map[string]string `yaml:"match" json:"match,omitempty"`
+	// MatchRE maps a label to a regular expression, anchored at both ends.
+	MatchRE          map[string]string `yaml:"match_re" json:"match_re,omitempty"`
+	Team             string            `yaml:"team" json:"team,omitempty"`
+	Service          string            `yaml:"service" json:"service,omitempty"`
+	EscalationPolicy string            `yaml:"escalation_policy" json:"escalation_policy"`
+	GroupBy          []string          `yaml:"group_by" json:"group_by,omitempty"`
+	GroupWait        *Duration         `yaml:"group_wait" json:"group_wait,omitempty"`
+	GroupInterval    *Duration         `yaml:"group_interval" json:"group_interval,omitempty"`
+
+	Origin Origin `yaml:"-" json:"-"`
+}
+
+// ChannelTarget is a shared channel reached through an integration.
 type ChannelTarget struct {
-	Channel     string `json:"channel"`
-	Integration string `json:"integration"`
+	Channel     string
+	Integration string
+}
+
+// EveryAlertTargets returns the shared channels that are told about every
+// alert: the channel targets in the first step of the escalation policy that
+// routing names as its default.
+//
+// Temporary: it stands in for routing and escalation, which will decide who
+// is notified about what, and when. It reads only what the files already
+// say, so a configuration written for it keeps its meaning when they arrive.
+func (c Config) EveryAlertTargets() []ChannelTarget {
+	if c.Routing == nil {
+		return nil
+	}
+	var targets []ChannelTarget
+	for _, p := range c.EscalationPolicies {
+		if p.Name != c.Routing.Default.EscalationPolicy || len(p.Steps) == 0 {
+			continue
+		}
+		for _, t := range p.Steps[0].Notify {
+			if t.Channel != "" {
+				targets = append(targets, ChannelTarget{Channel: t.Channel, Integration: t.Integration})
+			}
+		}
+	}
+	return targets
 }
 
 var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
@@ -107,71 +312,4 @@ var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 // letters, digits and hyphens, starting with a letter, at most 63 characters.
 func ValidName(name string) bool {
 	return nameRE.MatchString(name)
-}
-
-// minTokenLength is the shortest source token accepted. A token is the only
-// thing that stops anyone who can reach Beacon from sending alerts.
-const minTokenLength = 16
-
-// Validate checks the configuration. Its errors name the object and field at
-// fault, and never contain a secret.
-func (c Config) Validate() error {
-	var errs []error
-	seen := map[string]bool{}
-	for _, s := range c.Sources {
-		at := fmt.Sprintf("source %q", s.Name)
-		switch {
-		case !ValidName(s.Name):
-			errs = append(errs, fmt.Errorf("%s: name must be lowercase letters, digits and hyphens, start with a letter and be at most 63 characters", at))
-		case seen[s.Name]:
-			errs = append(errs, fmt.Errorf("%s: name is used twice", at))
-		}
-		seen[s.Name] = true
-		if s.Type != SourceTypeWebhook {
-			errs = append(errs, fmt.Errorf("%s: type %q is not supported; use %q", at, s.Type, SourceTypeWebhook))
-		}
-		if len(s.Token.Reveal()) < minTokenLength {
-			errs = append(errs, fmt.Errorf("%s: token must be at least %d characters", at, minTokenLength))
-		}
-		for value, level := range s.Severity.Mapping {
-			if !level.Valid() {
-				errs = append(errs, fmt.Errorf("%s: severity.mapping.%s: %q is not critical, warning or info", at, value, level))
-			}
-		}
-		if d := s.Severity.Default; d != "" && !d.Valid() {
-			errs = append(errs, fmt.Errorf("%s: severity.default: %q is not critical, warning or info", at, d))
-		}
-	}
-
-	integrations := map[string]bool{}
-	for _, i := range c.Integrations {
-		at := fmt.Sprintf("integration %q", i.Name)
-		switch {
-		case !ValidName(i.Name):
-			errs = append(errs, fmt.Errorf("%s: name must be lowercase letters, digits and hyphens, start with a letter and be at most 63 characters", at))
-		case integrations[i.Name]:
-			errs = append(errs, fmt.Errorf("%s: name is used twice", at))
-		}
-		integrations[i.Name] = true
-		switch {
-		case i.Type != IntegrationTypeSlack:
-			errs = append(errs, fmt.Errorf("%s: type %q is not supported; use %q", at, i.Type, IntegrationTypeSlack))
-		case i.Slack == nil:
-			errs = append(errs, fmt.Errorf("%s: slack: the settings are missing", at))
-		case !i.Slack.BotToken.IsSet():
-			errs = append(errs, fmt.Errorf("%s: slack.bot_token is required", at))
-		case !i.Slack.SigningSecret.IsSet():
-			errs = append(errs, fmt.Errorf("%s: slack.signing_secret is required", at))
-		}
-	}
-	for n, t := range c.Notify {
-		at := fmt.Sprintf("notify target %d", n+1)
-		if t.Channel == "" {
-			errs = append(errs, fmt.Errorf("%s: channel is required", at))
-		}
-		if !integrations[t.Integration] {
-			errs = append(errs, fmt.Errorf("%s: integration %q does not exist", at, t.Integration))
-		}
-	}
-	return errors.Join(errs...)
 }
