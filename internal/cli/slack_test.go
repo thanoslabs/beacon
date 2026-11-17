@@ -84,12 +84,17 @@ func TestServeNotifiesSlack(t *testing.T) {
 	defer pool.Close()
 	var spec string
 	var sent, events int
-	err = pool.QueryRow(context.Background(), `SELECT
-		(SELECT spec::text FROM integrations WHERE name = 'slack'),
-		(SELECT count(*) FROM notifications WHERE status = 'sent' AND destination = 'C0ALERTS'),
-		(SELECT count(*) FROM alert_events WHERE type = 'notification_sent')`).Scan(&spec, &sent, &events)
-	if err != nil || sent != 3 || events != 3 {
-		t.Errorf("sent notifications = %d, timeline events = %d, %v; want 3 of each", sent, events, err)
+	// Slack has the last update a moment before Beacon has recorded that it
+	// was delivered, so the records are waited for.
+	waitFor(t, "three recorded deliveries", func() bool {
+		err = pool.QueryRow(context.Background(), `SELECT
+			(SELECT spec::text FROM integrations WHERE name = 'slack'),
+			(SELECT count(*) FROM notifications WHERE status = 'sent' AND destination = 'C0ALERTS'),
+			(SELECT count(*) FROM alert_events WHERE type = 'notification_sent')`).Scan(&spec, &sent, &events)
+		return err != nil || (sent == 3 && events == 3)
+	})
+	if err != nil {
+		t.Errorf("read the recorded deliveries: %v", err)
 	}
 	assertNoSecrets(t, "the stored integration", spec, botToken, signingSecret)
 	if !strings.Contains(spec, "BEACON_SLACK_BOT_TOKEN") {
