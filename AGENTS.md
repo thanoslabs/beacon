@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: alerts can be received over a webhook and stored, and the first path from a webhook to Slack is being built. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: alerts are received over a webhook, stored and posted to a Slack channel, where people can acknowledge, snooze and resolve them. Configuration files, users, routing and escalation do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -45,14 +45,18 @@ Tooling:
 ├── internal/
 │   ├── alert/                # Alert model, state machine and timeline
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
-│   ├── config/               # Typed provisioned objects (sources) and the Secret type
+│   ├── config/               # Typed provisioned objects (sources, integrations) and the Secret type
+│   ├── e2e/                  # End-to-end tests: the real binary, Postgres and a fake Slack
 │   ├── ingest/               # Webhook receiver: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
+│   ├── notify/               # Notification queue, workers, retries and the Channel interface
 │   ├── postgres/             # Connection pool and migrator
 │   │   ├── migrations/       # Versioned SQL migrations, embedded in the binary
 │   │   └── postgrestest/     # Test helper: one empty database per test
 │   ├── provision/            # Copies provisioned objects into Postgres
 │   ├── server/               # HTTP server, middleware, health, readiness and metrics endpoints
+│   ├── slack/                # Slack channel: Web API client, message rendering and button presses
+│   │   └── slacktest/        # Fake Slack for tests
 │   └── version/              # Build version reporting
 ├── .dockerignore             # Build context allow-list; add new source directories here
 ├── .golangci.yml             # golangci-lint configuration
@@ -82,13 +86,14 @@ Run `mise install` first so that the pinned versions are used.
 | Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' go test -race ./...` |
 | Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon serve` then `curl localhost:8080/readyz` |
 | Apply migrations | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon migrate` |
+| End-to-end tests only | `BEACON_TEST_DATABASE_URL=... go test -race -count=1 ./internal/e2e/` |
 | Lint | `golangci-lint run ./...` |
 | Fix formatting | `golangci-lint fmt ./...` |
 | Check module files | `go mod tidy -diff` |
 | Build the image | `docker build -t beacon:dev .` |
 | Run Beacon and Postgres | `docker compose up --build -d --wait`, then `curl localhost:8080/readyz` (set `BEACON_PORT` if 8080 is taken) |
 
-CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres from `compose.yaml`, so CI and development use the same Postgres version. A separate job builds the image, starts Beacon and Postgres with Compose, and checks the endpoints, the non-root user and a clean exit on termination.
+CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres from `compose.yaml`, so CI and development use the same Postgres version. The tests include the end-to-end tests in `internal/e2e`. A separate job builds the image, starts Beacon and Postgres with Compose, and checks the endpoints, that the webhook accepts an alert, the non-root user and a clean exit on termination.
 
 ### Container image
 
@@ -129,6 +134,29 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 - `internal/ingest` serves `POST /api/v1/ingest/<source>`; `docs/webhook.md` is the contract for the generic JSON payload. Every payload error must name the field at fault.
 - Receivers change alerts only through `alert.Store`.
+
+### Notifications
+
+- `internal/notify` owns the `notifications` and `notification_attempts` tables. `docs/notifications.md` describes the delivery rules; keep it true.
+- Queue a notification with `Pipeline.Enqueue` inside the transaction of the change that causes it, never after the commit and never by sending directly.
+- A new notification service is a type that implements `notify.Channel`, registered with `Pipeline.Register`. The pipeline must not learn anything specific to a service. A channel returns `notify.Permanent` for failures that retrying cannot fix and `notify.RetryAfter` when the service says how long to wait; anything else is retried with backoff. Channel errors are stored and shown on the timeline, so they must never contain a credential.
+- Delivery is at least once. A channel should make a repeated `Send` harmless where the service allows it.
+- `Pipeline.NotifyAll` is temporary: it notifies fixed targets on every state change until routing and escalation exist.
+
+### Slack
+
+- `internal/slack` is the Slack channel. It calls two Web API methods, `chat.postMessage` and `chat.update`, with the standard library; there is no Slack SDK.
+- Beacon has no Slack credentials for testing. Test against `slacktest`, the fake Slack, which checks requests against the documented shapes and limits. When you change what is sent, read Slack's current documentation rather than trusting memory, teach the fake the same rule, and say in the PR that real delivery is unverified.
+- Everything that comes from an alert passes through `escape` before it goes into message text, and each part is clipped so a message stays within Block Kit's limits.
+- Button presses arrive at `POST /api/v1/integrations/<name>/interactions`. The handler verifies the Slack signature over the raw body before it parses anything; keep it that way. It answers within Slack's three seconds, and changes alerts only through `alert.Store.ApplyToGroup` with `alert.ChatUser`, so the timeline records the Slack user in the form that identity linking will use.
+- The buttons a message offers are derived from the state machine (`alert.Next`), so they cannot drift from what is allowed.
+- `docs/slack.md` is the setup guide. Update it when scopes or settings change.
+
+### End-to-end tests
+
+- `internal/e2e` builds the binary, runs it as a process against a real Postgres and the fake Slack, and uses it only from outside: the webhook as a source would, the interactions endpoint as Slack would. It reads the database to check what was stored and never writes to it. The tests run with `go test ./...`, so CI runs them against the Postgres from `compose.yaml`.
+- `TestFirstPath` is the path the product exists for: webhook in, Slack message out, acknowledgement from Slack, resolve from the source. A change that breaks it is not ready. Extend these tests when a feature changes that path, for example when routing decides where the message goes.
+- Prefer a package test for a single behaviour; add an end-to-end test for a path that crosses packages.
 
 To add a subcommand, add a file under `internal/cli/` and register it in `commands()` in `internal/cli/cli.go`. Commands take their environment, output streams and arguments as parameters, so tests can run them in-process.
 

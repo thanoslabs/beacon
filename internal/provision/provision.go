@@ -22,7 +22,8 @@ type Kind string
 
 // The kinds that have tables.
 const (
-	Sources Kind = "sources"
+	Sources      Kind = "sources"
+	Integrations Kind = "integrations"
 )
 
 // Ensure makes sure the object of this kind and name has a row holding spec,

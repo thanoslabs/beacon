@@ -45,6 +45,7 @@ func TestServeSettingsErrors(t *testing.T) {
 		{name: "unknown log format", environ: map[string]string{"BEACON_LOG_FORMAT": "xml"}, args: []string{"serve", "--database-url", dbURL}, wantStderr: `unknown log format "xml"`},
 		{name: "bad duration in environment", environ: map[string]string{"BEACON_SHUTDOWN_TIMEOUT": "soon"}, args: []string{"serve", "--database-url", dbURL}, wantStderr: `BEACON_SHUTDOWN_TIMEOUT: "soon" is not a duration`},
 		{name: "bad bool in environment", environ: map[string]string{"BEACON_MIGRATE": "maybe"}, args: []string{"serve", "--database-url", dbURL}, wantStderr: `BEACON_MIGRATE: "maybe" is not true or false`},
+		{name: "zero notification workers", args: []string{"serve", "--database-url", dbURL, "--notification-workers", "0"}, wantStderr: "--notification-workers must be between 1 and 64"},
 		{name: "zero shutdown timeout", args: []string{"serve", "--database-url", dbURL, "--shutdown-timeout", "0s"}, wantStderr: "--shutdown-timeout must be positive"},
 	}
 	for _, tt := range tests {
