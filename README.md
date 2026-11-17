@@ -109,6 +109,8 @@ export BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?
 go test -race ./...
 ```
 
+The tests in `internal/e2e` build the binary and run it as a process against Postgres and a fake Slack: an alert goes in by webhook, a message comes out to Slack, a button press acknowledges it and the source resolves it. They run with the rest of the tests.
+
 Every setting can be given as a flag or as an environment variable; run `beacon <command> -h` to list them.
 
 - **Releases**: merging a PR to `main` cuts a [SemVer](https://semver.org/) release with a bare `X.Y.Z` tag and publishes the container image `ghcr.io/thanoslabs/beacon:X.Y.Z`. The bump comes from the PR's `major`, `minor` or `patch` label, and defaults to `patch`.
