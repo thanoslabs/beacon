@@ -37,7 +37,7 @@ func TestServeNotifiesSlack(t *testing.T) {
 		"BEACON_SOURCE_TOKEN":         sourceToken,
 		"BEACON_SLACK_BOT_TOKEN":      botToken,
 		"BEACON_SLACK_SIGNING_SECRET": signingSecret,
-		"BEACON_SLACK_CHANNEL":        "C0ALERTS",
+		"BEACON_CONFIG":               writeConfig(t, slackConfig),
 		"BEACON_SLACK_API_URL":        fake.URL,
 	})
 	url := srv.baseURL + "/api/v1/ingest/default"
@@ -117,7 +117,7 @@ func TestSlackFailureDoesNotLeakTheToken(t *testing.T) {
 		"BEACON_SOURCE_TOKEN":         sourceToken,
 		"BEACON_SLACK_BOT_TOKEN":      botToken,
 		"BEACON_SLACK_SIGNING_SECRET": signingSecret,
-		"BEACON_SLACK_CHANNEL":        "C0ALERTS",
+		"BEACON_CONFIG":               writeConfig(t, slackConfig),
 		"BEACON_SLACK_API_URL":        fake.URL,
 		"BEACON_LOG_LEVEL":            "debug",
 	})
@@ -144,26 +144,45 @@ func TestSlackFailureDoesNotLeakTheToken(t *testing.T) {
 	assertNoSecrets(t, "the logs", srv.logs.String(), botToken, sourceToken, signingSecret)
 }
 
-func TestServeSlackSettingsErrors(t *testing.T) {
-	const dbURL = "postgres://localhost/beacon"
-	tests := []struct {
-		name string
-		args []string
-		want string
-	}{
-		{"token alone", []string{"--slack-bot-token", "xoxb-some-token"}, "the Slack settings go together"},
-		{"channel alone", []string{"--slack-channel", "C0ALERTS"}, "the Slack settings go together"},
-		{"no signing secret", []string{"--slack-bot-token", "xoxb-some-token", "--slack-channel", "C0ALERTS"}, "the Slack settings go together"},
-		{"no channel", []string{"--slack-bot-token", "xoxb-some-token", "--slack-signing-secret", "some-signing-secret"}, "the Slack settings go together"},
-		{"bad API URL", []string{"--slack-api-url", "slack.com/api"}, "--slack-api-url must be an http or https URL"},
+func TestServeRejectsABadSlackAPIURL(t *testing.T) {
+	code, _, stderr := runCLIEnv(t, nil, "serve", "--database-url", "postgres://localhost/beacon", "--slack-api-url", "slack.com/api")
+	if code != exitError || !strings.Contains(stderr, "--slack-api-url must be an http or https URL") {
+		t.Errorf("exit %d, stderr = %q", code, stderr)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			code, _, stderr := runCLIEnv(t, nil, append([]string{"serve", "--database-url", dbURL}, tt.args...)...)
-			if code != exitError || !strings.Contains(stderr, tt.want) {
-				t.Errorf("exit %d, stderr = %q; want an error containing %q", code, stderr, tt.want)
-			}
-			assertNoSecrets(t, "stderr", stderr, "xoxb-some-token", "some-signing-secret")
-		})
+}
+
+// TestServeWarnsAboutWhatIsNotImplemented starts with source and integration
+// types that are valid in the files but have no behaviour yet. They are
+// stored, and the log says that they do nothing.
+func TestServeWarnsAboutWhatIsNotImplemented(t *testing.T) {
+	const token = "source-token-marker-7c2e41d0"
+	srv := startServe(t, map[string]string{
+		"BEACON_DATABASE_URL": postgrestest.NewURL(t),
+		"BEACON_SOURCE_TOKEN": token,
+		"BEACON_CONFIG": writeConfig(t, `sources:
+  - name: am
+    type: alertmanager
+    token: {env: BEACON_SOURCE_TOKEN}
+integrations:
+  - name: tickets
+    type: webhook
+    webhook: {url: "https://tickets.example.com/hook"}
+escalation_policies:
+  - name: default
+    steps:
+      - notify: [{channel: tickets, integration: tickets}]
+        timeout: 5m
+routing:
+  default: {escalation_policy: default}
+`),
+	})
+	if code, _ := postJSON(t, srv.baseURL+"/api/v1/ingest/am", token, `{"labels": {"alertname": "A"}}`); code != http.StatusUnauthorized {
+		t.Errorf("POST to an alertmanager source = %d, want 401", code)
+	}
+	logs := srv.logs.String()
+	for _, want := range []string{"this type of source does not receive alerts yet", "this type of integration does not deliver yet", "alerts are stored but nobody is notified"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("logs do not contain %q:\n%s", want, logs)
+		}
 	}
 }

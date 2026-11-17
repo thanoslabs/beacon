@@ -67,6 +67,45 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// configuration is what the tests provision: one webhook source, one Slack
+// integration, and a default escalation policy whose first step names the
+// channel that is told about every alert. Secrets are references, as they
+// must be; the values are in the process environment.
+const configuration = `sources:
+  - name: e2e
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}
+integrations:
+  - name: slack
+    type: slack
+    slack:
+      bot_token: {env: BEACON_SLACK_BOT_TOKEN}
+      signing_secret: {file: signing-secret}
+escalation_policies:
+  - name: default
+    steps:
+      - notify:
+          - channel: C0ALERTS
+            integration: slack
+        timeout: 5m
+routing:
+  default:
+    escalation_policy: default
+`
+
+// writeConfig writes the configuration, and the secret it reads from a file,
+// into a new directory and returns the directory.
+func writeConfig(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, content := range map[string]string{"beacon.yaml": configuration, "signing-secret": signingSecret + "\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return dir
+}
+
 // beacon is a running beacon serve process and the things around it.
 type beacon struct {
 	t     *testing.T
@@ -94,11 +133,9 @@ func start(t *testing.T) *beacon {
 	b.cmd.Env = []string{
 		"BEACON_DATABASE_URL=" + dbURL,
 		"BEACON_LISTEN_ADDRESS=127.0.0.1:0",
-		"BEACON_SOURCE_NAME=e2e",
+		"BEACON_CONFIG=" + writeConfig(t),
 		"BEACON_SOURCE_TOKEN=" + sourceToken,
 		"BEACON_SLACK_BOT_TOKEN=" + botToken,
-		"BEACON_SLACK_SIGNING_SECRET=" + signingSecret,
-		"BEACON_SLACK_CHANNEL=C0ALERTS",
 		"BEACON_SLACK_API_URL=" + b.slack.URL,
 	}
 	stderr, err := b.cmd.StderrPipe()

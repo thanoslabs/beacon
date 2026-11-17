@@ -25,13 +25,18 @@ func attachIngest(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, 
 		if err != nil {
 			return err
 		}
+		if s.Type != config.SourceTypeWebhook {
+			logger.WarnContext(ctx, "this type of source does not receive alerts yet, so its endpoint refuses every request",
+				slog.String("source", s.Name), slog.String("type", s.Type))
+			continue
+		}
 		sources = append(sources, ingest.Source{ID: id, Source: s})
 		logger.InfoContext(ctx, "source configured",
 			slog.String("source", s.Name), slog.String("type", s.Type),
 			slog.String("path", strings.Replace(ingest.Path, "{source}", s.Name, 1)))
 	}
 	if len(sources) == 0 {
-		logger.WarnContext(ctx, "no source is configured, so every request to the ingest endpoint is refused; set --source-token or "+envSourceToken)
+		logger.WarnContext(ctx, "no source is configured, so every request to the ingest endpoint is refused; add a source of type webhook to the configuration")
 	}
 	ingest.New(logger, alerts, sources).Register(mux)
 	return nil
@@ -48,6 +53,11 @@ func attachNotifications(ctx context.Context, logger *slog.Logger, pool *pgxpool
 		if err != nil {
 			return err
 		}
+		if i.Type != config.IntegrationTypeSlack {
+			logger.WarnContext(ctx, "this type of integration does not deliver yet, so nothing is sent through it",
+				slog.String("integration", i.Name), slog.String("type", i.Type))
+			continue
+		}
 		ids[i.Name] = id
 		pipeline.Register(id, slack.NewChannel(slack.NewClient(slackAPIURL, i.Slack.BotToken)))
 		signingSecrets[i.Name] = i.Slack.SigningSecret
@@ -56,13 +66,17 @@ func attachNotifications(ctx context.Context, logger *slog.Logger, pool *pgxpool
 	}
 	slack.NewInteractions(logger, alerts, signingSecrets).Register(mux)
 
-	targets := make([]notify.Target, 0, len(cfg.Notify))
-	for _, t := range cfg.Notify {
-		targets = append(targets, notify.Target{IntegrationID: ids[t.Integration], Destination: t.Channel})
+	var targets []notify.Target
+	for _, t := range cfg.EveryAlertTargets() {
+		id, ok := ids[t.Integration]
+		if !ok {
+			continue // warned about above
+		}
+		targets = append(targets, notify.Target{IntegrationID: id, Destination: t.Channel})
 		logger.InfoContext(ctx, "every alert notifies", slog.String("integration", t.Integration), slog.String("channel", t.Channel))
 	}
 	if len(targets) == 0 {
-		logger.WarnContext(ctx, "Slack is not configured, so alerts are stored but nobody is notified; set --slack-bot-token, --slack-signing-secret and --slack-channel")
+		logger.WarnContext(ctx, "alerts are stored but nobody is notified: the first step of the default escalation policy names no channel of a Slack integration")
 		return nil
 	}
 	alerts.Observe(pipeline.NotifyAll(targets))

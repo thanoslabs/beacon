@@ -17,6 +17,31 @@ func configSetting(fs interface {
 	fs.StringVar(p, "config", def, "path of the configuration: a YAML file, or a directory read recursively (env BEACON_CONFIG)")
 }
 
+// readConfig loads and validates the configuration at path for a command
+// that will use it, reading every secret. An empty path gives an empty
+// configuration. Problems are written to stderr, one per line.
+func readConfig(e env, path string) (config.Config, error) {
+	if path == "" {
+		return config.Config{}, nil
+	}
+	return checkConfig(e, path, config.LoadOptions{Getenv: e.getenv})
+}
+
+// checkConfig loads and validates the configuration at path.
+func checkConfig(e env, path string, opts config.LoadOptions) (config.Config, error) {
+	cfg, err := config.Read(path, opts)
+	var errs config.Errors
+	if errors.As(err, &errs) {
+		// One problem per line, in the file:line form that editors and CI
+		// annotations understand.
+		for _, problem := range errs {
+			fmt.Fprintln(e.stderr, problem.Error())
+		}
+		return cfg, fmt.Errorf("the configuration at %s is not valid: %s", path, plural(len(errs), "problem"))
+	}
+	return cfg, err
+}
+
 func runValidate(_ context.Context, e env, args []string) error {
 	var (
 		path         string
@@ -37,18 +62,9 @@ func runValidate(_ context.Context, e env, args []string) error {
 	if checkSecrets {
 		opts.Getenv = e.getenv
 	}
-	cfg, err := config.Read(path, opts)
+	cfg, err := checkConfig(e, path, opts)
 	if err != nil {
-		var errs config.Errors
-		if !errors.As(err, &errs) {
-			return err
-		}
-		// One problem per line, in the file:line form that editors and CI
-		// annotations understand.
-		for _, problem := range errs {
-			fmt.Fprintln(e.stderr, problem.Error())
-		}
-		return fmt.Errorf("the configuration at %s is not valid: %s", path, plural(len(errs), "problem"))
+		return err
 	}
 	fmt.Fprintf(e.stdout, "the configuration at %s is valid: %s\n", path, summary(cfg))
 	return nil

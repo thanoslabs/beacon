@@ -1,0 +1,11 @@
+# The smallest useful configuration: one webhook source. compose.yaml mounts
+# this directory, so `docker compose up` receives alerts at
+# /api/v1/ingest/default.
+#
+# The token is read from the environment; secrets are never written in files.
+# docs/configuration.md describes every field, and examples/full shows them.
+
+sources:
+  - name: default
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}

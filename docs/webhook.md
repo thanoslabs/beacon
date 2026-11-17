@@ -8,21 +8,22 @@ Any system that can send JSON over HTTP can send alerts to Beacon through a webh
 
 ## Set up a source
 
-A source has a name and a token. Choose a long random token, for example:
+A source has a name and a token, and is defined in the configuration files (see [[configuration]]):
 
-```sh
-openssl rand -hex 32
+```yaml
+sources:
+  - name: default
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}
 ```
 
-> [!warning] Temporary settings
-> Sources will be defined in configuration files (see [[configuration-and-data-model]]). Until those exist, `beacon serve` takes exactly one webhook source from two settings. They will be removed when configuration files arrive.
+The token is never written in the file. The file names an environment variable, or a file, that holds it. Choose a long random token, at least 16 characters, for example:
 
-| Setting | Environment variable | Meaning |
-|---|---|---|
-| `--source-token` | `BEACON_SOURCE_TOKEN` | The token senders must present, at least 16 characters. Without it there is no source, and the endpoint refuses every request. |
-| `--source-name` | `BEACON_SOURCE_NAME` | The name of the source (default `default`): lowercase letters, digits and hyphens, starting with a letter. |
+```sh
+export BEACON_SOURCE_TOKEN="$(openssl rand -hex 32)"
+```
 
-Prefer the environment variable for the token: a flag is visible to other users of the machine in the process list.
+A configuration may define as many sources as you like, each with its own token. A source can also add labels to its alerts and say how severity is derived; see [[configuration#Sources]].
 
 ## Endpoint
 
@@ -104,7 +105,7 @@ A successful response also holds the `alert_id` and its `status`:
 
 ```sh
 export BEACON_SOURCE_TOKEN="$(openssl rand -hex 32)"
-beacon serve &
+beacon serve --config examples/quickstart &
 
 # Fire
 curl -X POST http://localhost:8080/api/v1/ingest/default \

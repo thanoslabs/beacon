@@ -2,8 +2,8 @@
 // sources, integrations and so on that docs/configuration-and-data-model.md
 // describes.
 //
-// Load reads the objects from YAML files. Until beacon serve takes --config,
-// it still fills these types from a few flags and environment variables.
+// Load reads the objects from YAML files, Validate checks them, and Read does
+// both.
 package config
 
 import (
@@ -22,12 +22,6 @@ type Config struct {
 	EscalationPolicies []EscalationPolicy
 	// Routing is nil when no file has a routing block.
 	Routing *Routing
-
-	// Notify lists the shared channels that are told about every alert.
-	//
-	// Temporary: it stands in for routing and escalation policies, whose
-	// steps will name their targets. It is not part of the file schema.
-	Notify []ChannelTarget
 }
 
 // Origin says where an object was defined. It is empty for objects that did
@@ -281,11 +275,35 @@ type RoutingRule struct {
 	Origin Origin `yaml:"-" json:"-"`
 }
 
-// ChannelTarget is a shared channel reached through an integration, in the
-// form escalation steps use: {channel: <channel>, integration: <name>}.
+// ChannelTarget is a shared channel reached through an integration.
 type ChannelTarget struct {
-	Channel     string `json:"channel"`
-	Integration string `json:"integration"`
+	Channel     string
+	Integration string
+}
+
+// EveryAlertTargets returns the shared channels that are told about every
+// alert: the channel targets in the first step of the escalation policy that
+// routing names as its default.
+//
+// Temporary: it stands in for routing and escalation, which will decide who
+// is notified about what, and when. It reads only what the files already
+// say, so a configuration written for it keeps its meaning when they arrive.
+func (c Config) EveryAlertTargets() []ChannelTarget {
+	if c.Routing == nil {
+		return nil
+	}
+	var targets []ChannelTarget
+	for _, p := range c.EscalationPolicies {
+		if p.Name != c.Routing.Default.EscalationPolicy || len(p.Steps) == 0 {
+			continue
+		}
+		for _, t := range p.Steps[0].Notify {
+			if t.Channel != "" {
+				targets = append(targets, ChannelTarget{Channel: t.Channel, Integration: t.Integration})
+			}
+		}
+	}
+	return targets
 }
 
 var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
