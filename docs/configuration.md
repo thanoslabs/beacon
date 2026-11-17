@@ -141,6 +141,24 @@ The first three accept `via`, a list of integration names that narrows how the p
 | `escalation_policy` | yes | Policy to run |
 | `group_by`, `group_wait`, `group_interval` | no | Override the routing settings for this rule |
 
+## How changes are applied
+
+When Beacon starts, it makes its database match the files. Each provisioned object has a row there, so that alerts and other history have something to refer to.
+
+| Change in the files | What happens |
+|---|---|
+| A new object | It is created. |
+| An edited object | It is updated. Objects that did not change are left untouched. |
+| A removed object | It stops working at once: a removed source refuses alerts. Its row is kept and marked as removed, so everything that referred to it still shows what it was. |
+| A renamed object | The name is the identity, so this is a removal and a creation. History stays with the old name. |
+| A removed object that returns under the same name | It is the same object again, with its history. |
+
+The whole change is applied together or not at all. Applying the same files again changes nothing, and several replicas that start together do not get in each other's way. Run every replica with the same files: if two disagree, each applies its own and the last one wins.
+
+Provisioned objects are read-only everywhere else. Nothing but the files can change them.
+
+Beacon reads the files when it starts, so restart it to apply a change.
+
 ## Check the configuration
 
 `beacon validate` checks the files without applying them. It needs no database and no secrets, so it can run in CI on every change:

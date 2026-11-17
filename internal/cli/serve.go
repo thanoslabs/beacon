@@ -15,6 +15,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/logging"
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres"
+	"github.com/thanoslabs/beacon/internal/provision"
 	"github.com/thanoslabs/beacon/internal/server"
 	"github.com/thanoslabs/beacon/internal/slack"
 	"github.com/thanoslabs/beacon/internal/version"
@@ -112,15 +113,18 @@ func runServe(ctx context.Context, e env, args []string) error {
 		return err
 	}
 
-	alerts := alert.NewStore(pool)
-	if err := attachIngest(ctx, logger, pool, cfg, alerts, srv.Mux()); err != nil {
+	// The provisioned rows are made to match the files before anything that
+	// refers to them is served.
+	rows, err := reconcile(ctx, logger, pool, cfg)
+	if err != nil {
 		return err
 	}
 
+	alerts := alert.NewStore(pool)
+	attachIngest(ctx, logger, cfg, rows.IDs[provision.Sources], alerts, srv.Mux())
+
 	pipeline := notify.New(pool, alerts, logger, notifyCfg)
-	if err := attachNotifications(ctx, logger, pool, cfg, alerts, pipeline, srv.Mux(), slackAPIURL); err != nil {
-		return err
-	}
+	attachNotifications(ctx, logger, cfg, rows.IDs[provision.Integrations], alerts, pipeline, srv.Mux(), slackAPIURL)
 
 	// Background work stops with the server: it watches the same context.
 	var background sync.WaitGroup

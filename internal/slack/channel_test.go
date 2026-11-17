@@ -18,6 +18,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
 	"github.com/thanoslabs/beacon/internal/provision"
+	"github.com/thanoslabs/beacon/internal/provision/provisiontest"
 	"github.com/thanoslabs/beacon/internal/slack"
 	"github.com/thanoslabs/beacon/internal/slack/slacktest"
 )
@@ -186,14 +187,8 @@ func newPipelineFixture(t *testing.T) *pipelineFixture {
 	pool := postgrestest.NewMigrated(t)
 	ctx := context.Background()
 	f := &pipelineFixture{pool: pool, alerts: alert.NewStore(pool), fake: slacktest.New(t, botToken)}
-	var err error
-	if f.source, err = provision.Ensure(ctx, pool, provision.Sources, "test", map[string]string{}); err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
-	integration, err := provision.Ensure(ctx, pool, provision.Integrations, "slack", map[string]string{})
-	if err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
+	f.source = provisiontest.Row(t, pool, provision.Sources, "test")
+	integration := provisiontest.Row(t, pool, provision.Integrations, "slack")
 
 	p := notify.New(pool, f.alerts, slog.New(slog.DiscardHandler), notify.Config{
 		PollInterval: 10 * time.Millisecond, MaxAttempts: 3, BackoffBase: 20 * time.Millisecond, BackoffMax: 40 * time.Millisecond,

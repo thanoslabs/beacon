@@ -93,12 +93,12 @@ routing:
     escalation_policy: default
 `
 
-// writeConfig writes the configuration, and the secret it reads from a file,
+// writeConfig writes a configuration, and the secret it reads from a file,
 // into a new directory and returns the directory.
-func writeConfig(t *testing.T) string {
+func writeConfig(t *testing.T, yaml string) string {
 	t.Helper()
 	dir := t.TempDir()
-	for name, content := range map[string]string{"beacon.yaml": configuration, "signing-secret": signingSecret + "\n"} {
+	for name, content := range map[string]string{"beacon.yaml": yaml, "signing-secret": signingSecret + "\n"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
@@ -117,6 +117,7 @@ type beacon struct {
 	mu   sync.Mutex
 	logs strings.Builder
 	done chan struct{}
+	addr chan string
 }
 
 // start runs the binary against a new database and a new fake Slack, and
@@ -126,14 +127,23 @@ func start(t *testing.T) *beacon {
 	// First, so that the test is skipped before anything is built when there
 	// is no database.
 	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, configuration))
+	b.waitUntilServing()
+	return b
+}
+
+// launch starts the binary against the database at dbURL with the
+// configuration in dir, and returns without waiting for it to serve.
+func launch(t *testing.T, dbURL, dir string) *beacon {
+	t.Helper()
 	bin := build(t)
 
-	b := &beacon{t: t, slack: slacktest.New(t, botToken), done: make(chan struct{})}
+	b := &beacon{t: t, slack: slacktest.New(t, botToken), done: make(chan struct{}), addr: make(chan string, 1)}
 	b.cmd = exec.Command(bin, "serve")
 	b.cmd.Env = []string{
 		"BEACON_DATABASE_URL=" + dbURL,
 		"BEACON_LISTEN_ADDRESS=127.0.0.1:0",
-		"BEACON_CONFIG=" + writeConfig(t),
+		"BEACON_CONFIG=" + dir,
 		"BEACON_SOURCE_TOKEN=" + sourceToken,
 		"BEACON_SLACK_BOT_TOKEN=" + botToken,
 		"BEACON_SLACK_API_URL=" + b.slack.URL,
@@ -157,7 +167,6 @@ func start(t *testing.T) *beacon {
 	})
 
 	// The address is in the "http server listening" log record.
-	addr := make(chan string, 1)
 	go func() {
 		defer close(b.done)
 		scanner := bufio.NewScanner(stderr)
@@ -172,18 +181,10 @@ func start(t *testing.T) *beacon {
 				Addr string `json:"addr"`
 			}
 			if json.Unmarshal([]byte(line), &rec) == nil && rec.Msg == "http server listening" {
-				addr <- rec.Addr
+				b.addr <- rec.Addr
 			}
 		}
 	}()
-	select {
-	case a := <-addr:
-		b.url = "http://" + a
-	case <-b.done:
-		t.Fatalf("beacon exited before it listened:\n%s", b.output())
-	case <-time.After(30 * time.Second):
-		t.Fatalf("beacon did not start listening:\n%s", b.output())
-	}
 
 	// The database is read to check what Beacon stored; nothing is written.
 	b.db, err = postgres.Open(context.Background(), postgres.Config{URL: dbURL})
@@ -192,6 +193,19 @@ func start(t *testing.T) *beacon {
 	}
 	t.Cleanup(b.db.Close)
 	return b
+}
+
+// waitUntilServing waits until the process listens.
+func (b *beacon) waitUntilServing() {
+	b.t.Helper()
+	select {
+	case a := <-b.addr:
+		b.url = "http://" + a
+	case <-b.done:
+		b.t.Fatalf("beacon exited before it listened:\n%s", b.output())
+	case <-time.After(30 * time.Second):
+		b.t.Fatalf("beacon did not start listening:\n%s", b.output())
+	}
 }
 
 func (b *beacon) output() string {
@@ -472,5 +486,107 @@ func TestSourceResolvesAnAlertNobodyTook(t *testing.T) {
 			t.Fatalf("Slack has %d messages, want a second one for the new alert", len(b.slack.Messages()))
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// rows lists the rows of a provisioned table as "name" or "name (removed)".
+func (b *beacon) rows(table string) string {
+	b.t.Helper()
+	rows, err := b.db.Query(context.Background(), `SELECT name || CASE WHEN removed_at IS NULL THEN '' ELSE ' (removed)' END FROM `+table+` ORDER BY name`)
+	if err != nil {
+		b.t.Fatalf("read %s: %v", table, err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		b.t.Fatalf("read %s: %v", table, err)
+	}
+	return strings.Join(names, ", ")
+}
+
+// TestReplicasStartTogether starts several processes at once against one
+// empty database, as a deployment with replicas does. They all migrate and
+// reconcile the same configuration; every object must end up with one row,
+// created by exactly one of them, and every process must serve.
+func TestReplicasStartTogether(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	dir := writeConfig(t, configuration)
+	const replicas = 5
+
+	var all []*beacon
+	for range replicas {
+		all = append(all, launch(t, dbURL, dir))
+	}
+	created := 0
+	for _, b := range all {
+		b.waitUntilServing()
+		created += strings.Count(b.output(), `"msg":"provisioned object created"`)
+	}
+	if created != 3 {
+		t.Errorf("the replicas created %d objects between them, want 3: each object once", created)
+	}
+	b := all[0]
+	for table, want := range map[string]string{"sources": "e2e", "integrations": "slack", "escalation_policies": "default", "teams": ""} {
+		if got := b.rows(table); got != want {
+			t.Errorf("%s = %q, want %q", table, got, want)
+		}
+	}
+	// Every replica serves the source, and they agree on its row: an alert
+	// sent to one is updated, not duplicated, by the next.
+	for i, replica := range all {
+		code, res := replica.webhook(diskFull)
+		if want := map[bool]int{true: http.StatusCreated, false: http.StatusOK}[i == 0]; code != want {
+			t.Errorf("replica %d: webhook = %d %v, want %d", i, code, res, want)
+		}
+	}
+}
+
+// TestConfigurationChangesBetweenStarts edits the files between two runs:
+// one object is changed, one removed and one added. The second run must
+// bring the rows in line, and keep the removed source for the alert that
+// came from it.
+func TestConfigurationChangesBetweenStarts(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	first := launch(t, dbURL, writeConfig(t, configuration))
+	first.waitUntilServing()
+	code, res := first.webhook(diskFull)
+	if code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	alertID := res["alert_id"]
+	if code := first.terminate(); code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+
+	edited := strings.NewReplacer("name: e2e", "name: renamed", "timeout: 5m", "timeout: 10m").Replace(configuration) +
+		"teams:\n  - name: platform\n"
+	second := launch(t, dbURL, writeConfig(t, edited))
+	second.waitUntilServing()
+
+	for table, want := range map[string]string{"sources": "e2e (removed), renamed", "integrations": "slack", "escalation_policies": "default", "teams": "platform"} {
+		if got := second.rows(table); got != want {
+			t.Errorf("%s = %q, want %q", table, got, want)
+		}
+	}
+	logs := second.output()
+	for _, want := range []string{
+		`"msg":"provisioned object removed","kind":"sources","name":"e2e"`,
+		`"msg":"provisioned object created","kind":"sources","name":"renamed"`,
+		`"msg":"provisioned object updated","kind":"escalation_policies","name":"default"`,
+		`"msg":"provisioned object created","kind":"teams","name":"platform"`,
+		`"msg":"configuration reconciled","changes":4`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("the logs do not contain %s", want)
+		}
+	}
+	// The alert still points at the source it came from.
+	var source string
+	err := second.db.QueryRow(context.Background(), `SELECT s.name FROM alerts a JOIN sources s ON s.id = a.source_id WHERE a.id = $1`, alertID).Scan(&source)
+	if err != nil || source != "e2e" {
+		t.Errorf("the alert's source = %q, %v; want e2e", source, err)
+	}
+	// The removed source no longer accepts alerts.
+	if code, _ := second.webhook(diskFull); code != http.StatusUnauthorized {
+		t.Errorf("webhook to the removed source = %d, want 401", code)
 	}
 }
