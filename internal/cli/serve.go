@@ -136,6 +136,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 		auth:         auth.NewHandler(logger, sessions),
 	}
 	prov.registerMetrics(registry)
+	prov.auth.AfterSignIn(prov.refreshSkipped)
 	prov.ingest.Register(srv.Mux())
 	prov.interactions.Register(srv.Mux())
 	prov.auth.Register(srv.Mux())

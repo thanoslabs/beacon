@@ -271,3 +271,139 @@ func TestReconcileLeavesOtherRowsAlone(t *testing.T) {
 		t.Errorf("taking over a row that is not provisioned: %v", err)
 	}
 }
+
+// members lists the memberships as "team/email/origin".
+func members(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	var out string
+	err := pool.QueryRow(context.Background(), `
+		SELECT coalesce(string_agg(t.name || '/' || u.email || '/' || m.origin, ' ' ORDER BY t.name, u.email, m.origin), '')
+		FROM team_members m JOIN teams t ON t.id = m.team_id JOIN users u ON u.id = m.user_id`).Scan(&out)
+	if err != nil {
+		t.Fatalf("read team members: %v", err)
+	}
+	return out
+}
+
+func addUser(t *testing.T, pool *pgxpool.Pool, email string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `INSERT INTO users (email) VALUES ($1)`, email); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+}
+
+func skipped(res provision.Result) string {
+	var out []string
+	for _, s := range res.Skipped {
+		out = append(out, s.Team+"/"+s.Email)
+	}
+	return strings.Join(out, " ")
+}
+
+// TestReconcileTeamMembers follows a team's members list through the life of
+// a configuration: unknown users are skipped without stopping anything, and
+// join once they exist.
+func TestReconcileTeamMembers(t *testing.T) {
+	pool := postgrestest.NewMigrated(t)
+	addUser(t, pool, "ada@example.com")
+	cfg := config.Config{
+		Sources: []config.Source{{Name: "prod", Type: config.SourceTypeWebhook}},
+		Teams: []config.Team{
+			// Addresses are compared as users store them: lowercase.
+			{Name: "platform", Members: []string{"Ada@Example.com", "grace@example.com", "linus@example.com"}},
+			{Name: "data", Members: []string{"grace@example.com"}},
+			{Name: "empty"},
+		},
+	}
+
+	// Unknown users are skipped and reported, and the rest is applied: the
+	// known member, the other teams and the other kinds.
+	res := reconcile(t, pool, cfg)
+	if got := members(t, pool); got != "platform/ada@example.com/config" {
+		t.Errorf("members = %q", got)
+	}
+	if got, want := skipped(res), "platform/grace@example.com platform/linus@example.com data/grace@example.com"; got != want {
+		t.Errorf("skipped = %q, want %q", got, want)
+	}
+	if res.MembersAdded != 1 || res.MembersRemoved != 0 || len(res.IDs[provision.Sources]) != 1 || len(res.IDs[provision.Teams]) != 3 {
+		t.Errorf("result = %+v", res)
+	}
+
+	// Repeating changes nothing.
+	if res := reconcile(t, pool, cfg); res.MembersAdded != 0 || res.MembersRemoved != 0 || len(res.Skipped) != 3 {
+		t.Errorf("second reconciliation = %+v", res)
+	}
+
+	// Once the user exists, the next reconciliation adds them everywhere
+	// they are listed.
+	addUser(t, pool, "grace@example.com")
+	res = reconcile(t, pool, cfg)
+	if got := members(t, pool); got != "data/grace@example.com/config platform/ada@example.com/config platform/grace@example.com/config" {
+		t.Errorf("members = %q", got)
+	}
+	if res.MembersAdded != 2 || skipped(res) != "platform/linus@example.com" {
+		t.Errorf("after the user appeared: added %d, skipped %q", res.MembersAdded, skipped(res))
+	}
+	if got, err := provision.SkippedMembers(context.Background(), pool, cfg.Teams); err != nil || len(got) != 1 || got[0].Email != "linus@example.com" {
+		t.Errorf("SkippedMembers = %+v, %v", got, err)
+	}
+
+	// A membership that came from the identity provider belongs to sign-in,
+	// and must survive whatever the members list says.
+	if _, err := pool.Exec(context.Background(), `INSERT INTO team_members (team_id, user_id, origin)
+		SELECT t.id, u.id, 'group' FROM teams t, users u WHERE t.name IN ('platform', 'empty') AND u.email = 'ada@example.com'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Removed from one list, and a whole list emptied.
+	cfg.Teams[0].Members = []string{"grace@example.com"}
+	cfg.Teams[1].Members = nil
+	res = reconcile(t, pool, cfg)
+	if got := members(t, pool); got != "empty/ada@example.com/group platform/ada@example.com/group platform/grace@example.com/config" {
+		t.Errorf("members after the lists changed = %q", got)
+	}
+	if res.MembersRemoved != 2 || len(res.Skipped) != 0 {
+		t.Errorf("after the lists changed: removed %d, skipped %q", res.MembersRemoved, skipped(res))
+	}
+
+	// A team that leaves the files loses its configured members, and its
+	// row stays.
+	cfg.Teams = cfg.Teams[1:]
+	res = reconcile(t, pool, cfg)
+	if got := members(t, pool); got != "empty/ada@example.com/group platform/ada@example.com/group" {
+		t.Errorf("members after the team was removed = %q", got)
+	}
+	if res.MembersRemoved != 1 || !read(t, pool, provision.Teams, "platform").removed {
+		t.Errorf("after the team was removed: %+v", res)
+	}
+}
+
+// TestReconcileTeamMembersConcurrently reconciles the same members from many
+// replicas at once.
+func TestReconcileTeamMembersConcurrently(t *testing.T) {
+	pool := postgrestest.NewMigrated(t)
+	addUser(t, pool, "ada@example.com")
+	addUser(t, pool, "grace@example.com")
+	cfg := config.Config{Teams: []config.Team{{Name: "platform", Members: []string{"ada@example.com", "grace@example.com", "nobody@example.com"}}}}
+
+	var wg sync.WaitGroup
+	results := make([]provision.Result, 8)
+	errs := make([]error, 8)
+	for i := range results {
+		wg.Go(func() { results[i], errs[i] = provision.Reconcile(context.Background(), pool, cfg) })
+	}
+	wg.Wait()
+	added := 0
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d: %v", i, err)
+		}
+		added += results[i].MembersAdded
+		if skipped(results[i]) != "platform/nobody@example.com" {
+			t.Errorf("worker %d skipped %q", i, skipped(results[i]))
+		}
+	}
+	if added != 2 || members(t, pool) != "platform/ada@example.com/config platform/grace@example.com/config" {
+		t.Errorf("added %d in total, members %q", added, members(t, pool))
+	}
+}

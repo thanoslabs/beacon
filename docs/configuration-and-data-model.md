@@ -474,7 +474,7 @@ A worker claims a due row by moving its `next_attempt_at` into the future in the
 
 Membership is the union of two origins, and each origin manages only its own rows in `team_members`:
 
-- **`config`**: applying configuration makes the `config` rows of a team equal its `members` list. An email with no user is skipped and logged as an error. When a user is created at first sign-in, Beacon checks the loaded configuration and adds the rows that were skipped.
+- **`config`**: applying configuration makes the `config` rows of a team equal its `members` list. An email with no user is skipped, logged as an error and counted in the metric `beacon_team_members_skipped`; the rest of the configuration is applied. At every sign-in, Beacon makes that user's `config` rows equal the teams whose loaded `members` list names their address: that adds the rows that were skipped when the user did not exist yet, and moves them when the provider changed the address. A team that leaves the files loses its `config` rows.
 - **`group`**: at every sign-in, the user's `group` rows are replaced with the teams whose `groups` match the groups in the user's token. Leaving a group in the identity provider removes that membership at the next sign-in. A sign-in that is refused because the person is in no group with a role removes all their `group` rows and ends their sessions.
 
 A user is a member if either row exists. Removing someone from `members` does not remove them while their identity provider group still maps to the team, and the reverse.

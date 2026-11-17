@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,6 +44,10 @@ type provisioner struct {
 	reloads    *prometheus.CounterVec
 	successful prometheus.Gauge
 	lastOK     prometheus.Gauge
+	skipped    *prometheus.GaugeVec
+
+	// teams are the teams of the active configuration.
+	teams atomic.Pointer[[]config.Team]
 }
 
 // Values of the result label of the reload counter.
@@ -65,7 +70,11 @@ func (p *provisioner) registerMetrics(reg prometheus.Registerer) {
 		Name: "beacon_config_last_reload_success_timestamp_seconds",
 		Help: "Unix time at which the active configuration was loaded.",
 	})
-	reg.MustRegister(p.reloads, p.successful, p.lastOK)
+	p.skipped = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "beacon_team_members_skipped",
+		Help: "Email addresses in a team's members list that belong to no user, by team, as of the last time this process applied the configuration or completed a sign-in. Such a person joins the team when they first sign in.",
+	}, []string{"team"})
+	reg.MustRegister(p.reloads, p.successful, p.lastOK, p.skipped)
 	// Both results exist from the start, so a rate over them is never empty.
 	p.reloads.WithLabelValues(resultSuccess)
 	p.reloads.WithLabelValues(resultFailure)
@@ -85,7 +94,16 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 	for _, c := range rows.Changes {
 		p.logger.InfoContext(ctx, "provisioned object "+string(c.Action), slog.String("kind", string(c.Kind)), slog.String("name", c.Name))
 	}
-	p.logger.InfoContext(ctx, "configuration reconciled", slog.Int("changes", len(rows.Changes)))
+	p.logger.InfoContext(ctx, "configuration reconciled", slog.Int("changes", len(rows.Changes)),
+		slog.Int("team_members_added", rows.MembersAdded), slog.Int("team_members_removed", rows.MembersRemoved))
+	// A listed person who has never signed in is an error in the log, as
+	// the requirements ask, but not a failure: everything else is applied.
+	for _, s := range rows.Skipped {
+		p.logger.ErrorContext(ctx, "team member skipped: no user has this email address; they join the team when they first sign in",
+			slog.String("team", s.Team), slog.String("email", s.Email))
+	}
+	p.teams.Store(&cfg.Teams)
+	p.countSkipped(cfg.Teams, rows.Skipped)
 
 	p.applySources(ctx, cfg, rows.IDs[provision.Sources])
 	p.applyNotifications(ctx, cfg, rows.IDs[provision.Integrations])
@@ -93,6 +111,37 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 	p.successful.Set(1)
 	p.lastOK.SetToCurrentTime()
 	return nil
+}
+
+// countSkipped sets the metric of skipped team members.
+func (p *provisioner) countSkipped(teams []config.Team, skipped []provision.SkippedMember) {
+	// Reset first, so that a team that left the configuration leaves the
+	// metric too.
+	p.skipped.Reset()
+	for _, t := range teams {
+		p.skipped.WithLabelValues(t.Name).Set(0)
+	}
+	for _, s := range skipped {
+		p.skipped.WithLabelValues(s.Team).Inc()
+	}
+}
+
+// refreshSkipped counts the skipped team members again. It runs after each
+// sign-in, which is when a skipped person may have become a user.
+func (p *provisioner) refreshSkipped(ctx context.Context) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	loaded := p.teams.Load()
+	if loaded == nil {
+		return
+	}
+	teams := *loaded
+	skipped, err := provision.SkippedMembers(ctx, p.pool, teams)
+	if err != nil {
+		p.logger.ErrorContext(ctx, "count skipped team members", slog.Any("error", err))
+		return
+	}
+	p.countSkipped(teams, skipped)
 }
 
 // reload reads the configuration again and applies it. A configuration that

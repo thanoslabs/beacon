@@ -35,6 +35,14 @@ type Handler struct {
 	settings atomic.Pointer[settings]
 	// csrf refuses requests that another site made a browser send.
 	csrf *http.CrossOriginProtection
+	// afterSignIn is called after each completed sign-in.
+	afterSignIn atomic.Pointer[func(context.Context)]
+}
+
+// AfterSignIn makes the handler call hook after every completed sign-in, by
+// when the user exists and has their memberships.
+func (h *Handler) AfterSignIn(hook func(context.Context)) {
+	h.afterSignIn.Store(&hook)
 }
 
 // settings is the auth block of the configuration, prepared for use.
@@ -281,6 +289,10 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The teams that list this person by email address. Someone who was
+	// listed before they had ever signed in becomes a member now.
+	g.Listed = listed(s.teams, id.Email)
+
 	u, created, err := h.store.SignIn(ctx, id, g)
 	switch {
 	case errors.Is(err, ErrEmailTaken), errors.Is(err, ErrUserDisabled):
@@ -306,6 +318,9 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Name: s.sessionCookie(), Value: token, Path: "/", Expires: expires, MaxAge: int(s.auth.Lifetime().Seconds()),
 		HttpOnly: true, Secure: s.secure, SameSite: http.SameSiteLaxMode,
 	})
+	if hook := h.afterSignIn.Load(); hook != nil {
+		(*hook)(ctx)
+	}
 	h.logger.InfoContext(ctx, "user signed in", slog.String("user_id", u.ID), slog.String("email", u.Email),
 		slog.String("role", string(u.Role)), slog.Any("teams", g.Teams), slog.Int("groups", len(groups)), slog.Bool("first_sign_in", created))
 	w.Header().Set("Cache-Control", "no-store")

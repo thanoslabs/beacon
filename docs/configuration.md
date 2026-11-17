@@ -86,7 +86,22 @@ An integration is a connection to a notification service.
 
 ### Team membership
 
-A person belongs to a team when they are in its `members` list **or** in one of its `groups` at the identity provider. The two are kept apart: removing someone from `members` does not remove them while their group still maps to the team, and the reverse.
+A person belongs to a team when they are in its `members` list **or** in one of its `groups` at the identity provider. Membership is the union of the two, and each is kept apart from the other:
+
+| | From `members` | From `groups` |
+|---|---|---|
+| Set by | The list in the files | The groups in the person's ID token |
+| Applied | When the configuration is applied (start and reload), and when the person signs in | When the person signs in |
+| Removed by | Taking the address off the list | The person leaving the group at the provider, at their next sign-in |
+
+Removing someone from `members` does not remove them while their group still maps to the team, and the reverse.
+
+`members` are email addresses, compared without regard to case. **A listed address that belongs to no user is skipped**: people become users when they first sign in, so a team can list someone who has not arrived yet.
+
+- Each skipped address is logged as an error, `team member skipped`, with the team and the address, every time the configuration is applied. Nothing else is held up: the rest of the team, and the rest of the configuration, is applied.
+- The metric `beacon_team_members_skipped{team="..."}` counts them per team. A value that stays above zero usually means a misspelt address, or someone who has left.
+- The person joins the team by themselves at their first sign-in. No reload is needed.
+- If the identity provider changes someone's email address, the list must be changed too. Until then the old address is skipped, and the person drops out of the team at their next sign-in.
 
 ## Schedules
 

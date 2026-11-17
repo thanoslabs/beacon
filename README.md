@@ -104,7 +104,7 @@ The server answers on these endpoints:
 | `GET /api/v1/me` | Who is signed in. Needs a session. |
 | `GET /healthz` | Liveness: the process is running. It does not check the database. |
 | `GET /readyz` | Readiness: the database answers and the server is not shutting down. Returns `503` otherwise. |
-| `GET /metrics` | Prometheus metrics: Go runtime, process and build information, and configuration reloads. |
+| `GET /metrics` | Prometheus metrics: Go runtime, process and build information, configuration reloads, and team members that are not users yet. |
 
 Logs are JSON on standard error (`--log-format text` for reading by eye). Every request gets an identifier, returned in the `X-Request-Id` header and written on each log record for that request. On `SIGTERM` or `SIGINT` the server stops accepting connections and lets in-flight requests finish, for up to `--shutdown-timeout`. On `SIGHUP` it [reloads its configuration](docs/configuration.md#reload-without-a-restart).
 

@@ -15,6 +15,20 @@ type Grant struct {
 	Role access.Role
 	// Teams are the names of the teams whose groups the person is in.
 	Teams []string
+	// Listed are the names of the teams whose members list in the
+	// configuration holds the person's email address.
+	Listed []string
+}
+
+// listed returns the teams whose members list holds this email address.
+func listed(teams []config.Team, email string) []string {
+	var names []string
+	for _, t := range teams {
+		if slices.ContainsFunc(t.Members, func(m string) bool { return config.NormalizeEmail(m) == email }) {
+			names = append(names, t.Name)
+		}
+	}
+	return names
 }
 
 // groupsOf returns the roles or groups that the claim of this name carries.

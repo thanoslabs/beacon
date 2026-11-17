@@ -871,3 +871,59 @@ func TestSignIn(t *testing.T) {
 		}
 	}
 }
+
+// TestTeamMembersFromConfiguration lists people in a team before they have
+// ever signed in. They are skipped, logged and counted, and nothing else is
+// held up; each joins the team at their first sign-in.
+func TestTeamMembersFromConfiguration(t *testing.T) {
+	withMembers := strings.Replace(signInConfiguration(t), "  - name: platform\n", "  - name: platform\n    members: [grace@example.com, nobody@example.com]\n", 1)
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, withMembers))
+	b.waitUntilServing()
+
+	// Both are unknown at the start. That is logged as an error for each,
+	// and the rest of the configuration works.
+	logs := b.output()
+	for _, email := range []string{"grace@example.com", "nobody@example.com"} {
+		if want := `"level":"ERROR","msg":"team member skipped: no user has this email address; they join the team when they first sign in","team":"platform","email":"` + email + `"`; !strings.Contains(logs, want) {
+			t.Errorf("the logs do not contain %s", want)
+		}
+	}
+	if got := b.metrics("beacon_team_members_skipped"); got != `beacon_team_members_skipped{team="platform"} 2` {
+		t.Errorf("metric at start: %s", got)
+	}
+	if code, res := b.webhook(diskFull); code != http.StatusCreated {
+		t.Errorf("webhook = %d %v", code, res)
+	}
+
+	// Grace signs in for the first time, and is a member at once.
+	browser := oidctest.Browser(t, strings.TrimPrefix(b.url, "http://"))
+	if code, body := oidctest.SignIn(t, browser, oidctest.Grace, oidctest.Password); code != http.StatusOK {
+		t.Fatalf("sign-in = %d %s", code, body)
+	}
+	members := func() string {
+		t.Helper()
+		var out string
+		err := b.db.QueryRow(context.Background(), `
+			SELECT coalesce(string_agg(u.email || ' ' || m.origin, ', ' ORDER BY u.email, m.origin), '')
+			FROM team_members m JOIN teams t ON t.id = m.team_id JOIN users u ON u.id = m.user_id WHERE t.name = 'platform'`).Scan(&out)
+		if err != nil {
+			t.Fatalf("read members: %v", err)
+		}
+		return out
+	}
+	// From the list, and from her identity provider group as well.
+	if got := members(); got != "grace@example.com config, grace@example.com group" {
+		t.Errorf("members after Grace signed in = %q", got)
+	}
+	if got := b.metrics("beacon_team_members_skipped"); got != `beacon_team_members_skipped{team="platform"} 1` {
+		t.Errorf("metric after Grace signed in: %s", got)
+	}
+
+	// Taking her off the list removes that membership at the next reload,
+	// and leaves the one from her group.
+	b.reload(strings.Replace(withMembers, "grace@example.com, ", "", 1), 1)
+	if got := members(); got != "grace@example.com group" {
+		t.Errorf("members after the list changed = %q", got)
+	}
+}

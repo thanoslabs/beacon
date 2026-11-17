@@ -92,6 +92,9 @@ func hashToken(token string) string {
 // The grant is applied as it stands: the user's role becomes g.Role, and
 // their team memberships of origin "group" become exactly g.Teams. A group
 // that the person has left therefore takes its role and its teams with it.
+// Their memberships of origin "config" become exactly g.Listed, which is how
+// someone listed in a team before they ever signed in joins it now, and how
+// memberships follow a changed email address.
 func (s *Store) SignIn(ctx context.Context, id Identity, g Grant) (u User, created bool, err error) {
 	now := s.now()
 	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
@@ -134,9 +137,29 @@ func (s *Store) SignIn(ctx context.Context, id Identity, g Grant) (u User, creat
 			u.ID, teams); err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO team_members (team_id, user_id, origin, created_at)
 			SELECT t.id, $1, 'group', $3 FROM teams t WHERE t.name = ANY($2) AND t.removed_at IS NULL
+			ON CONFLICT DO NOTHING`, u.ID, teams, now); err != nil {
+			return err
+		}
+		// The same for the teams that list the person by email address.
+		// Reconciliation writes these rows for users who exist; this covers
+		// the person who did not exist, or had another address, when the
+		// configuration was last applied.
+		teams = g.Listed
+		if teams == nil {
+			teams = []string{}
+		}
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM team_members m USING teams t
+			WHERE m.team_id = t.id AND m.user_id = $1 AND m.origin = 'config' AND NOT (t.name = ANY($2) AND t.removed_at IS NULL)`,
+			u.ID, teams); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO team_members (team_id, user_id, origin, created_at)
+			SELECT t.id, $1, 'config', $3 FROM teams t WHERE t.name = ANY($2) AND t.removed_at IS NULL
 			ON CONFLICT DO NOTHING`, u.ID, teams, now)
 		return err
 	})
