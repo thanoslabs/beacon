@@ -310,6 +310,11 @@ func TestFirstPath(t *testing.T) {
 		}
 	}
 
+	// Slack has the message a moment before Beacon has recorded that it was
+	// delivered. The press must come after that, as a person's would, or
+	// the two events can reach the timeline in either order.
+	b.timeline(alertID, 2)
+
 	// 3. Someone acknowledges it from Slack.
 	if code := b.click(msg, "beacon_acknowledge", alice); code != http.StatusOK {
 		t.Fatalf("acknowledge from Slack = %d, want 200", code)
@@ -333,7 +338,9 @@ func TestFirstPath(t *testing.T) {
 		t.Errorf("answer to the second acknowledge = %v", notes)
 	}
 
-	// 4. The source reports that the problem is over.
+	// 4. The source reports that the problem is over, once the delivery of
+	// the acknowledgement is on record too.
+	b.timeline(alertID, 4)
 	code, res = b.webhook(diskFullResolved)
 	if code != http.StatusOK || res["result"] != "resolved" || res["alert_id"] != alertID {
 		t.Fatalf("resolve webhook = %d %v, want the alert resolved", code, res)
