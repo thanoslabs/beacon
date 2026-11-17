@@ -35,9 +35,10 @@ type command struct {
 // commands lists every subcommand by name.
 func commands() map[string]command {
 	return map[string]command{
-		"migrate": {summary: "Apply database schema migrations", run: runMigrate},
-		"serve":   {summary: "Run the Beacon server", run: runServe},
-		"version": {summary: "Print the version and exit", run: runVersion},
+		"migrate":  {summary: "Apply database schema migrations", run: runMigrate},
+		"serve":    {summary: "Run the Beacon server", run: runServe},
+		"validate": {summary: "Check the configuration without applying it", run: runValidate},
+		"version":  {summary: "Print the version and exit", run: runVersion},
 	}
 }
 

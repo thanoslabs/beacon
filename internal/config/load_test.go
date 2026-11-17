@@ -45,8 +45,8 @@ func TestLoadDirectory(t *testing.T) {
 	if got := src.Token.Reveal(); got != exampleEnv["BEACON_SOURCE_PROD_ALERTMANAGER_TOKEN"] {
 		t.Errorf("token from the environment was not read")
 	}
-	if want := (Origin{File: filepath.Join("testdata", "example", "base.yaml"), Line: 4}); src.Origin != want {
-		t.Errorf("origin = %+v, want %+v", src.Origin, want)
+	if o := src.Origin; o.File != filepath.Join("testdata", "example", "base.yaml") || o.Line != 4 || o.lineOf("severity.default") != 15 {
+		t.Errorf("origin = %+v", o)
 	}
 	// A secret file is read relative to the file that names it, without the
 	// trailing newline.
@@ -259,9 +259,9 @@ func TestLoadSecretErrors(t *testing.T) {
 	})
 	got := loadErrors(t, dir, LoadOptions{Getenv: getenv(nil)})
 	want := []string{
-		`a.yaml:2: source "prod": token: the environment variable BEACON_MISSING is not set`,
-		`a.yaml:5: source "filed": token: read the secret file: open ` + filepath.Join(dir, "missing-token") + `: no such file or directory`,
-		`a.yaml:8: source "empty": token: the secret file ` + filepath.Join(dir, "empty-token") + ` is empty`,
+		`a.yaml:4: source "prod": token: the environment variable BEACON_MISSING is not set`,
+		`a.yaml:7: source "filed": token: read the secret file: open ` + filepath.Join(dir, "missing-token") + `: no such file or directory`,
+		`a.yaml:10: source "empty": token: the secret file ` + filepath.Join(dir, "empty-token") + ` is empty`,
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("errors:\n%s\n\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

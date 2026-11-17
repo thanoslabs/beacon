@@ -209,7 +209,9 @@ func parseFile(file string, raw []byte) (document, Errors) {
 			if len(of) != n {
 				return Origin{File: file}
 			}
-			return Origin{File: file, Line: of[i].node.Line}
+			fields := map[string]int{}
+			fieldLines(of[i].node, "", fields)
+			return Origin{File: file, Line: of[i].node.Line, fields: fields}
 		}
 	}
 	at := origin(kindSource, len(doc.Sources))
@@ -275,6 +277,27 @@ func indexObjects(top *yaml.Node) []objectRef {
 		}
 	}
 	return refs
+}
+
+// fieldLines records the line of every field under n, by path.
+func fieldLines(n *yaml.Node, prefix string, into map[string]int) {
+	switch n.Kind {
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			path := joinPath(prefix, n.Content[i].Value)
+			if prefix == "" {
+				path = n.Content[i].Value
+			}
+			into[path] = n.Content[i].Line
+			fieldLines(n.Content[i+1], path, into)
+		}
+	case yaml.SequenceNode:
+		for i, item := range n.Content {
+			path := fmt.Sprintf("%s[%d]", prefix, i)
+			into[path] = item.Line
+			fieldLines(item, path, into)
+		}
+	}
 }
 
 // lastLine returns the last line that n reaches.
@@ -441,7 +464,7 @@ func resolveSecrets(doc *document, r secretReader, dir string) Errors {
 	var errs Errors
 	resolve := func(s *Secret, o Origin, object, field string) {
 		if err := r.resolve(s, dir); err != nil {
-			errs = append(errs, Error{File: o.File, Line: o.Line, Object: object, Field: field, Msg: err.Error()})
+			errs = append(errs, Error{File: o.File, Line: o.lineOf(field), Object: object, Field: field, Msg: err.Error()})
 		}
 	}
 	for i := range doc.Sources {

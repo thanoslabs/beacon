@@ -2,14 +2,13 @@
 // sources, integrations and so on that docs/configuration-and-data-model.md
 // describes.
 //
-// Load reads the objects from YAML files. Until beacon serve takes --config,
-// it still fills these types from a few flags and environment variables.
+// Load reads the objects from YAML files, Validate checks them, and Read does
+// both.
 package config
 
 import (
-	"errors"
-	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/thanoslabs/beacon/internal/alert"
 )
@@ -23,12 +22,6 @@ type Config struct {
 	EscalationPolicies []EscalationPolicy
 	// Routing is nil when no file has a routing block.
 	Routing *Routing
-
-	// Notify lists the shared channels that are told about every alert.
-	//
-	// Temporary: it stands in for routing and escalation policies, whose
-	// steps will name their targets. It is not part of the file schema.
-	Notify []ChannelTarget
 }
 
 // Origin says where an object was defined. It is empty for objects that did
@@ -36,6 +29,21 @@ type Config struct {
 type Origin struct {
 	File string
 	Line int
+	// fields maps the path of each field that the file sets, such as
+	// severity.default, to its line.
+	fields map[string]int
+}
+
+// lineOf returns the line of a field, or of the nearest field around it that
+// the file sets, or of the object.
+func (o Origin) lineOf(field string) int {
+	for field != "" {
+		if line, ok := o.fields[field]; ok {
+			return line
+		}
+		field = field[:max(strings.LastIndexAny(field, ".["), 0)]
+	}
+	return o.Line
 }
 
 // The source types.
@@ -267,11 +275,35 @@ type RoutingRule struct {
 	Origin Origin `yaml:"-" json:"-"`
 }
 
-// ChannelTarget is a shared channel reached through an integration, in the
-// form escalation steps use: {channel: <channel>, integration: <name>}.
+// ChannelTarget is a shared channel reached through an integration.
 type ChannelTarget struct {
-	Channel     string `json:"channel"`
-	Integration string `json:"integration"`
+	Channel     string
+	Integration string
+}
+
+// EveryAlertTargets returns the shared channels that are told about every
+// alert: the channel targets in the first step of the escalation policy that
+// routing names as its default.
+//
+// Temporary: it stands in for routing and escalation, which will decide who
+// is notified about what, and when. It reads only what the files already
+// say, so a configuration written for it keeps its meaning when they arrive.
+func (c Config) EveryAlertTargets() []ChannelTarget {
+	if c.Routing == nil {
+		return nil
+	}
+	var targets []ChannelTarget
+	for _, p := range c.EscalationPolicies {
+		if p.Name != c.Routing.Default.EscalationPolicy || len(p.Steps) == 0 {
+			continue
+		}
+		for _, t := range p.Steps[0].Notify {
+			if t.Channel != "" {
+				targets = append(targets, ChannelTarget{Channel: t.Channel, Integration: t.Integration})
+			}
+		}
+	}
+	return targets
 }
 
 var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
@@ -280,71 +312,4 @@ var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 // letters, digits and hyphens, starting with a letter, at most 63 characters.
 func ValidName(name string) bool {
 	return nameRE.MatchString(name)
-}
-
-// minTokenLength is the shortest source token accepted. A token is the only
-// thing that stops anyone who can reach Beacon from sending alerts.
-const minTokenLength = 16
-
-// Validate checks the configuration. Its errors name the object and field at
-// fault, and never contain a secret.
-func (c Config) Validate() error {
-	var errs []error
-	seen := map[string]bool{}
-	for _, s := range c.Sources {
-		at := fmt.Sprintf("source %q", s.Name)
-		switch {
-		case !ValidName(s.Name):
-			errs = append(errs, fmt.Errorf("%s: name must be lowercase letters, digits and hyphens, start with a letter and be at most 63 characters", at))
-		case seen[s.Name]:
-			errs = append(errs, fmt.Errorf("%s: name is used twice", at))
-		}
-		seen[s.Name] = true
-		if s.Type != SourceTypeWebhook {
-			errs = append(errs, fmt.Errorf("%s: type %q is not supported; use %q", at, s.Type, SourceTypeWebhook))
-		}
-		if len(s.Token.Reveal()) < minTokenLength {
-			errs = append(errs, fmt.Errorf("%s: token must be at least %d characters", at, minTokenLength))
-		}
-		for value, level := range s.Severity.Mapping {
-			if !level.Valid() {
-				errs = append(errs, fmt.Errorf("%s: severity.mapping.%s: %q is not critical, warning or info", at, value, level))
-			}
-		}
-		if d := s.Severity.Default; d != "" && !d.Valid() {
-			errs = append(errs, fmt.Errorf("%s: severity.default: %q is not critical, warning or info", at, d))
-		}
-	}
-
-	integrations := map[string]bool{}
-	for _, i := range c.Integrations {
-		at := fmt.Sprintf("integration %q", i.Name)
-		switch {
-		case !ValidName(i.Name):
-			errs = append(errs, fmt.Errorf("%s: name must be lowercase letters, digits and hyphens, start with a letter and be at most 63 characters", at))
-		case integrations[i.Name]:
-			errs = append(errs, fmt.Errorf("%s: name is used twice", at))
-		}
-		integrations[i.Name] = true
-		switch {
-		case i.Type != IntegrationTypeSlack:
-			errs = append(errs, fmt.Errorf("%s: type %q is not supported; use %q", at, i.Type, IntegrationTypeSlack))
-		case i.Slack == nil:
-			errs = append(errs, fmt.Errorf("%s: slack: the settings are missing", at))
-		case !i.Slack.BotToken.IsSet():
-			errs = append(errs, fmt.Errorf("%s: slack.bot_token is required", at))
-		case !i.Slack.SigningSecret.IsSet():
-			errs = append(errs, fmt.Errorf("%s: slack.signing_secret is required", at))
-		}
-	}
-	for n, t := range c.Notify {
-		at := fmt.Sprintf("notify target %d", n+1)
-		if t.Channel == "" {
-			errs = append(errs, fmt.Errorf("%s: channel is required", at))
-		}
-		if !integrations[t.Integration] {
-			errs = append(errs, fmt.Errorf("%s: integration %q does not exist", at, t.Integration))
-		}
-	}
-	return errors.Join(errs...)
 }
