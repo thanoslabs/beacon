@@ -54,7 +54,7 @@ func newBeacon(t *testing.T, a *config.Auth) *beacon {
 	b := &beacon{t: t, pool: postgrestest.NewMigrated(t), logs: &logBuffer{}}
 	b.store = auth.NewStore(b.pool)
 	b.handler = auth.NewHandler(slog.New(slog.NewJSONHandler(b.logs, nil)), b.store)
-	b.handler.Configure(context.Background(), a)
+	b.handler.Configure(context.Background(), a, nil)
 	mux := http.NewServeMux()
 	b.handler.Register(mux)
 	b.server = httptest.NewServer(mux)

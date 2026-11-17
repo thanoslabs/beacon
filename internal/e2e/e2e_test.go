@@ -764,6 +764,13 @@ func signInConfiguration(t *testing.T) string {
     issuer: ` + oidctest.Issuer(t) + `
     client_id: ` + oidctest.ClientID + `
     client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+    scopes: [openid, profile, email, groups]
+  roles:
+    admin: [beacon-admins]
+    member: [platform-engineers]
+teams:
+  - name: platform
+    groups: [platform-engineers]
 `
 }
 
@@ -807,6 +814,23 @@ func TestSignIn(t *testing.T) {
 	err := b.db.QueryRow(context.Background(), `SELECT oidc_issuer FROM users WHERE email = 'grace@example.com' AND last_sign_in_at IS NOT NULL`).Scan(&stored)
 	if err != nil || stored != issuer {
 		t.Errorf("the stored user has issuer %q, %v; want %q", stored, err, issuer)
+	}
+
+	// Roles and teams follow the groups that Dex puts in the token: Ada is
+	// in beacon-admins and platform-engineers, Grace in platform-engineers,
+	// and Linus in neither, so he has no access.
+	if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), oidctest.Ada, oidctest.Password); code != http.StatusOK || !strings.Contains(body, `"role":"admin"`) {
+		t.Errorf("Ada after sign-in = %d %s, want an admin", code, body)
+	}
+	if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), oidctest.Linus, oidctest.Password); code != http.StatusForbidden {
+		t.Errorf("Linus after sign-in = %d %s, want 403", code, body)
+	}
+	var members string
+	err = b.db.QueryRow(context.Background(), `
+		SELECT coalesce(string_agg(u.email || ' ' || m.origin, ', ' ORDER BY u.email), '')
+		FROM team_members m JOIN teams t ON t.id = m.team_id JOIN users u ON u.id = m.user_id WHERE t.name = 'platform'`).Scan(&members)
+	if err != nil || members != "ada@example.com group, grace@example.com group" {
+		t.Errorf("members of the team = %q, %v", members, err)
 	}
 
 	// The session survives a reload of the same configuration, and the

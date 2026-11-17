@@ -290,6 +290,10 @@ type Auth struct {
 	SessionLifetime *Duration `yaml:"session_lifetime" json:"session_lifetime,omitempty"`
 	// OIDC is the identity provider. Nil means there is none.
 	OIDC *OIDC `yaml:"oidc" json:"oidc,omitempty"`
+	// Roles maps the provider's roles or groups to Beacon's roles. Nil
+	// means that everyone who can sign in is a member and nobody is an
+	// admin.
+	Roles *RoleMapping `yaml:"roles" json:"roles,omitempty"`
 
 	Origin Origin `yaml:"-" json:"-"`
 }
@@ -316,6 +320,31 @@ type OIDC struct {
 	ClientSecret Secret `yaml:"client_secret" json:"client_secret"`
 	// Scopes are requested at sign-in. Empty means DefaultScopes.
 	Scopes []string `yaml:"scopes" json:"scopes,omitempty"`
+	// GroupsClaim names the claim of the ID token that carries the person's
+	// roles or groups. Empty means DefaultGroupsClaim.
+	GroupsClaim string `yaml:"groups_claim" json:"groups_claim,omitempty"`
+}
+
+// Claim returns the name of the claim that carries roles or groups.
+func (o OIDC) Claim() string {
+	if o.GroupsClaim != "" {
+		return o.GroupsClaim
+	}
+	return DefaultGroupsClaim
+}
+
+// DefaultGroupsClaim is the claim that carries a person's roles or groups
+// unless the configuration says otherwise.
+const DefaultGroupsClaim = "groups"
+
+// RoleMapping maps the identity provider's roles or groups to Beacon's two
+// roles. The names are compared with the values of the groups claim.
+type RoleMapping struct {
+	// Admin lists the groups whose members are admins.
+	Admin []string `yaml:"admin" json:"admin,omitempty"`
+	// Member lists the groups whose members are members. When it is empty,
+	// everyone who can sign in is a member.
+	Member []string `yaml:"member" json:"member,omitempty"`
 }
 
 // DefaultScopes are the scopes requested at sign-in unless the configuration

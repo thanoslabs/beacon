@@ -29,6 +29,8 @@ testdata/invalid/sources.yaml:17: auth: oidc.client_id: is required
 testdata/invalid/sources.yaml:17: auth: oidc.client_secret: is required
 testdata/invalid/sources.yaml:18: auth: oidc.issuer: must use https; plain http is accepted only for a provider on localhost
 testdata/invalid/sources.yaml:19: auth: oidc.scopes: must include openid
+testdata/invalid/sources.yaml:21: auth: roles.admin[1]: must not be empty
+testdata/invalid/sources.yaml:21: auth: roles.admin[2]: "admins" is listed twice
 testdata/invalid/teams/platform.yaml:3: team "platform": members[1]: "Ada@Example.com" is listed twice
 testdata/invalid/teams/platform.yaml:3: team "platform": members[2]: "not-an-email" is not an email address
 testdata/invalid/teams/platform.yaml:3: team "platform": members[3]: "Grace <grace@example.com>" is not an email address

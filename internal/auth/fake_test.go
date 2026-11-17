@@ -446,7 +446,7 @@ func TestSignInIsOffWithoutConfiguration(t *testing.T) {
 	// A provider that cannot be reached does not stop Beacon; signing in
 	// says so and tries again next time.
 	b.handler.Configure(context.Background(), &config.Auth{PublicURL: "http://127.0.0.1:18080", OIDC: &config.OIDC{
-		Issuer: "http://127.0.0.1:1/nothing", ClientID: "beacon", ClientSecret: config.NewSecret(config.SecretRef{}, fakeClientSecret)}})
+		Issuer: "http://127.0.0.1:1/nothing", ClientID: "beacon", ClientSecret: config.NewSecret(config.SecretRef{}, fakeClientSecret)}}, nil)
 	resp, err := noRedirect.Get(b.server.URL + auth.LoginPath)
 	if err != nil {
 		t.Fatal(err)

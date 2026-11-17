@@ -89,7 +89,7 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 
 	p.applySources(ctx, cfg, rows.IDs[provision.Sources])
 	p.applyNotifications(ctx, cfg, rows.IDs[provision.Integrations])
-	p.auth.Configure(ctx, cfg.Auth)
+	p.auth.Configure(ctx, cfg.Auth, cfg.Teams)
 	p.successful.Set(1)
 	p.lastOK.SetToCurrentTime()
 	return nil

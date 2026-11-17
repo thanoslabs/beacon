@@ -82,7 +82,11 @@ An integration is a connection to a notification service.
 | `name` | yes | Identity |
 | `display_name` | no | Shown to people; defaults to `name` |
 | `members` | no | User email addresses |
-| `groups` | no | Identity provider group names whose members belong to the team |
+| `groups` | no | Identity provider group names whose members belong to the team. Applied when a person signs in; see [[access#Roles and teams]]. |
+
+### Team membership
+
+A person belongs to a team when they are in its `members` list **or** in one of its `groups` at the identity provider. The two are kept apart: removing someone from `members` does not remove them while their group still maps to the team, and the reverse.
 
 ## Schedules
 
@@ -153,6 +157,10 @@ auth:
     issuer: https://idp.example.com
     client_id: beacon
     client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+    groups_claim: groups
+  roles:
+    admin: [beacon-admins]
+    member: [beacon-users]
 ```
 
 ## How changes are applied

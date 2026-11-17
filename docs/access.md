@@ -16,7 +16,7 @@ Register Beacon with your provider as a **web application** (a confidential clie
 | Setting at the provider | Value |
 |---|---|
 | Redirect URI | Beacon's public address followed by `/auth/callback`, for example `https://beacon.example.com/auth/callback` |
-| Scopes | `openid`, `profile`, `email` |
+| Scopes | `openid`, `profile`, `email`, and whatever scope makes the provider put groups or roles into the ID token (often `groups`) |
 | Grant type | Authorisation code. Beacon uses PKCE (`S256`) as well as the client secret. |
 
 Note the **issuer URL**, the **client ID** and the **client secret** that the provider gives you. The issuer URL is the one under which `/.well-known/openid-configuration` is served.
@@ -63,7 +63,55 @@ Beacon reads the provider's discovery document when it starts. If the provider c
 - Beacon needs the `email` claim. If the provider says the address is not verified (`email_verified: false`), the sign-in is refused: configuration refers to users by email address, so an address that anyone could claim must not be trusted.
 - If a person's email address changes at the provider, they keep their Beacon account and its history, and the address is updated at their next sign-in. Configuration files that list the old address must be changed to the new one.
 - A sign-in is refused when its email address already belongs to another Beacon user, for example after moving to a different provider. The log names the address. Nothing is merged automatically.
-- New users have the role `member`.
+
+## Roles and teams
+
+Beacon has two roles. An `admin` may do everything; a `member` may view and act on alerts and other runtime state. Both come from the identity provider: Beacon reads the person's roles or groups from one claim of the ID token and maps them.
+
+```yaml
+auth:
+  oidc:
+    # ...
+    scopes: [openid, profile, email, groups]
+    groups_claim: groups
+  roles:
+    admin: [beacon-admins]
+    member: [beacon-users]
+
+teams:
+  - name: platform
+    groups: [platform-engineers]
+```
+
+| Field | Meaning |
+|---|---|
+| `oidc.groups_claim` | The claim that carries the person's roles or groups (default `groups`) |
+| `roles.admin` | Values of that claim whose holders are admins |
+| `roles.member` | Values whose holders are members. When the list is empty or left out, everyone who can sign in is a member. |
+| `teams[].groups` | Values whose holders belong to the team. See [[configuration#Teams]]. |
+
+How a person's role is decided, at every sign-in:
+
+1. In any `roles.admin` group: **admin**.
+2. Otherwise, in any `roles.member` group, or `roles.member` is empty: **member**.
+3. Otherwise: **no access**. The sign-in is refused with `403`.
+
+Without a `roles` block everyone who can sign in is a member and nobody is an admin.
+
+**The mapping is applied again at every sign-in**, from the groups in that sign-in's token:
+
+- The role is set to what the groups give now. An admin who left the admin group is a member from their next sign-in.
+- Team memberships that came from groups are replaced with the teams whose `groups` match now. Memberships from a team's `members` list are not touched; see [[configuration#Team membership]].
+- A person who is no longer in any mapped group is refused, and what earlier sign-ins gave them is taken back at that moment: their sessions end and their group memberships are removed. Their user stays, for the history that refers to it.
+
+> [!warning] Changes at the provider take effect at the next sign-in
+> Beacon learns about groups only when a person signs in. Someone removed from a group at the provider keeps their role and teams until their session ends, at most `session_lifetime` (12 hours by default). Shorten `session_lifetime` to tighten this. SCIM provisioning, which would remove the delay, is a later requirement.
+
+### The claim
+
+- The claim's value may be a list of strings or a single string. Names are compared exactly, including case.
+- A claim inside an object is named by its path, with dots: Keycloak's realm roles are `realm_access.roles`. A claim whose own name contains dots, such as a URL, is found by its whole name first.
+- The claim must be **in the ID token**. Many providers add it only when a scope is requested (Dex and Okta: `groups`) or when a mapper or an optional claim is configured (Keycloak, Entra ID). If nobody can sign in after you add `roles`, check that the claim is in the token: Beacon logs `sign-in refused` with the number of groups it found.
 
 ## Sessions
 
@@ -103,6 +151,8 @@ Open <http://127.0.0.1:18080/auth/login>, sign in as `ada@example.com` with `pas
 
 ## Tested with
 
-Sign-in is tested in CI against Dex 2.46, a real provider, with its password connector: a first and a later sign-in, sign-out, an expired session, a wrong password and an unverified address. A hand-written provider in the tests covers what a real one will not do, such as ID tokens with a wrong issuer, audience, signature, expiry or nonce.
+Sign-in is tested in CI against Dex 2.46, a real provider, with its password connector: a first and a later sign-in, sign-out, an expired session, a wrong password and an unverified address. Roles and teams are tested with the groups Dex puts in its ID token: a `groups` claim holding a list of names, sent when the `groups` scope is requested. A hand-written provider in the tests covers what a real one will not do, such as ID tokens with a wrong issuer, audience, signature, expiry or nonce.
 
-Not tested: any hosted provider (Okta, Entra ID, Google, Auth0, Keycloak). Beacon uses only standard discovery, the authorisation code flow and the ID token, so they are expected to work, but nobody has tried. Providers that do not publish a discovery document, or that return the email address only from the UserInfo endpoint and not in the ID token, will not work yet. If yours does not work, please open an issue.
+Not tested: any hosted provider (Okta, Entra ID, Google, Auth0, Keycloak). Beacon uses only standard discovery, the authorisation code flow and the ID token, so they are expected to work, but nobody has tried. Providers that do not publish a discovery document, or that return the email address only from the UserInfo endpoint and not in the ID token, will not work yet.
+
+Group shapes that are covered only by tests with hand-written tokens, not by a real provider: a single string instead of a list, a nested claim such as `realm_access.roles`, and a claim named by a URL. Not supported: groups that are not in the ID token and need a separate call (the UserInfo endpoint, or Entra ID's "groups overage" for people in more than 200 groups, which points to Microsoft Graph); groups sent as objects or as one comma-separated string; and Entra ID's group object IDs work only if you write the IDs, not the names, in the configuration. If yours does not work, please open an issue.

@@ -156,6 +156,10 @@ auth:
     issuer: https://idp.example.com
     client_id: beacon
     client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+    groups_claim: groups
+  roles:
+    admin: [beacon-admins]
+    member: [beacon-users]
 ```
 
 The first version of this design listed the identity provider client under process settings. It moved into the files because issue 19 asks for it there, and because it then follows the same review, validation and reload as everything else.
@@ -471,7 +475,7 @@ A worker claims a due row by moving its `next_attempt_at` into the future in the
 Membership is the union of two origins, and each origin manages only its own rows in `team_members`:
 
 - **`config`**: applying configuration makes the `config` rows of a team equal its `members` list. An email with no user is skipped and logged as an error. When a user is created at first sign-in, Beacon checks the loaded configuration and adds the rows that were skipped.
-- **`group`**: at every sign-in, the user's `group` rows are replaced with the teams whose `groups` match the groups in the user's token. Leaving a group in the identity provider removes that membership at the next sign-in.
+- **`group`**: at every sign-in, the user's `group` rows are replaced with the teams whose `groups` match the groups in the user's token. Leaving a group in the identity provider removes that membership at the next sign-in. A sign-in that is refused because the person is in no group with a role removes all their `group` rows and ends their sessions.
 
 A user is a member if either row exists. Removing someone from `members` does not remove them while their identity provider group still maps to the team, and the reverse.
 
@@ -507,7 +511,7 @@ These are judgement calls made in this proposal. Each can be changed before the 
 
 ## Open questions
 
-1. **Roles from the identity provider.** *Partly resolved (issue 19):* the identity provider's settings live in an `auth` block in YAML, not in process settings. The role mapping and the claim that carries it follow in issue 20.
+1. **Roles from the identity provider.** *Resolved (issues 19 and 20), for the project owner to confirm:* the identity provider's settings, the role mapping (`auth.roles.admin`, `auth.roles.member`) and the name of the claim (`auth.oidc.groups_claim`) live in the `auth` block in YAML. The alternative was process settings beside the client identifier; the files won because the mapping names groups just as `teams[].groups` does, and belongs in the same review. A person in no mapped group has no access; with no mapping at all, everyone is a member and nobody an admin.
 2. **A user's email address changes.** *Resolved for now (issue 19), for the project owner to confirm:* a user is identified by the provider's issuer and subject, so the account and its history survive a change of address, and the stored address is updated at the next sign-in. The files must then be changed to the new address; until they are, the old address in a team or rotation is an unknown user and is skipped. The alternative is to let the files name a stable identifier, which nobody could write by hand.
 3. **Unknown users in a rotation.** The requirements say an unknown user in a team is skipped and logged. This proposal applies the same rule to rotation members. The alternative is to treat it as an error that blocks applying the schedule, since a skipped member changes who is on call.
 4. **Must rotation members belong to the owning team?** The proposal does not require it, so someone from another team can cover. Requiring it would catch mistakes.

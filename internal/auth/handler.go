@@ -40,6 +40,9 @@ type Handler struct {
 // settings is the auth block of the configuration, prepared for use.
 type settings struct {
 	auth config.Auth
+	// teams are the teams of the configuration, whose groups decide which
+	// teams a person belongs to.
+	teams []config.Team
 	// secure is whether Beacon is reached over https, and so whether
 	// cookies are marked Secure.
 	secure bool
@@ -56,22 +59,24 @@ func NewHandler(logger *slog.Logger, store *Store) *Handler {
 	return &Handler{logger: logger, store: store, csrf: http.NewCrossOriginProtection()}
 }
 
-// Configure makes a the active sign-in settings; nil turns sign-in off. It
-// is safe while requests are being handled. Sessions that exist stay valid
-// as long as sign-in stays on.
-func (h *Handler) Configure(ctx context.Context, a *config.Auth) {
+// Configure makes a the active sign-in settings; nil turns sign-in off.
+// teams are the teams of the configuration. It is safe while requests are
+// being handled. Sessions that exist stay valid as long as sign-in stays on;
+// a changed mapping of groups applies to a person at their next sign-in.
+func (h *Handler) Configure(ctx context.Context, a *config.Auth, teams []config.Team) {
 	if a == nil {
 		h.settings.Store(nil)
 		h.logger.WarnContext(ctx, "sign-in is not configured, so nobody can sign in; add an auth block to the configuration")
 		return
 	}
-	s := &settings{auth: *a, secure: strings.HasPrefix(a.PublicURL, "https://")}
+	s := &settings{auth: *a, teams: teams, secure: strings.HasPrefix(a.PublicURL, "https://")}
 	h.settings.Store(s)
 	if a.OIDC == nil {
 		return
 	}
 	h.logger.InfoContext(ctx, "sign-in configured", slog.String("issuer", a.OIDC.Issuer), slog.String("client_id", a.OIDC.ClientID),
-		slog.String("redirect_uri", s.redirectURL()), slog.Duration("session_lifetime", a.Lifetime()))
+		slog.String("redirect_uri", s.redirectURL()), slog.Duration("session_lifetime", a.Lifetime()),
+		slog.String("groups_claim", a.OIDC.Claim()), slog.Bool("roles_mapped", a.Roles != nil))
 	if _, err := s.discovered(ctx); err != nil {
 		h.logger.WarnContext(ctx, "the identity provider cannot be reached; sign-in will try again when someone signs in", slog.Any("error", err))
 	}
@@ -246,7 +251,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, http.StatusServiceUnavailable, "the identity provider cannot be reached; try again shortly")
 		return
 	}
-	id, _, err := p.exchange(ctx, query.Get("code"), f)
+	id, claims, err := p.exchange(ctx, query.Get("code"), f)
 	var rejected *errRejected
 	if errors.As(err, &rejected) {
 		h.logger.WarnContext(ctx, "sign-in refused", slog.String("reason", rejected.reason))
@@ -260,7 +265,23 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, created, err := h.store.SignIn(ctx, id)
+	// Role and teams are decided afresh from the groups in this token, so
+	// that leaving a group at the provider takes effect here.
+	groups := groupsOf(claims, s.auth.OIDC.Claim())
+	g, ok := grant(s.auth.Roles, s.teams, groups)
+	if !ok {
+		if _, err := h.store.Revoke(ctx, id.Issuer, id.Subject); err != nil {
+			h.logger.ErrorContext(ctx, "complete sign-in", slog.Any("error", err))
+			h.fail(w, r, http.StatusInternalServerError, "internal error")
+			return
+		}
+		h.logger.WarnContext(ctx, "sign-in refused", slog.String("reason", "in no group that is mapped to a role"),
+			slog.String("email", id.Email), slog.Int("groups", len(groups)))
+		h.fail(w, r, http.StatusForbidden, "you are not in a group that has access to Beacon; ask an administrator of Beacon")
+		return
+	}
+
+	u, created, err := h.store.SignIn(ctx, id, g)
 	switch {
 	case errors.Is(err, ErrEmailTaken), errors.Is(err, ErrUserDisabled):
 		h.logger.WarnContext(ctx, "sign-in refused", slog.String("reason", err.Error()), slog.String("email", id.Email))
@@ -286,7 +307,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true, Secure: s.secure, SameSite: http.SameSiteLaxMode,
 	})
 	h.logger.InfoContext(ctx, "user signed in", slog.String("user_id", u.ID), slog.String("email", u.Email),
-		slog.String("role", string(u.Role)), slog.Bool("first_sign_in", created))
+		slog.String("role", string(u.Role)), slog.Any("teams", g.Teams), slog.Int("groups", len(groups)), slog.Bool("first_sign_in", created))
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, MePath, http.StatusSeeOther)
 }

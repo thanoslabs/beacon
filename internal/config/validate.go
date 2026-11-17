@@ -135,6 +135,21 @@ func (o object) emails(field string, list []string) {
 	}
 }
 
+// groups checks a list of identity provider group names.
+func (o object) groups(field string, list []string) {
+	seen := map[string]bool{}
+	for i, g := range list {
+		at := fmt.Sprintf("%s[%d]", field, i)
+		switch {
+		case strings.TrimSpace(g) == "":
+			o.errorf(at, "must not be empty")
+		case seen[g]:
+			o.errorf(at, "%q is listed twice", g)
+		}
+		seen[g] = true
+	}
+}
+
 // labelNames checks a list of label names.
 func (o object) labelNames(field string, names []string) {
 	for i, n := range names {
@@ -211,17 +226,7 @@ func (c Config) validate(v *validator) {
 		o := v.object(t.Origin, kindTeam, t.Name)
 		o.name(t.Name, teams)
 		o.emails("members", t.Members)
-		seen := map[string]bool{}
-		for i, g := range t.Groups {
-			at := fmt.Sprintf("groups[%d]", i)
-			switch {
-			case strings.TrimSpace(g) == "":
-				o.errorf(at, "must not be empty")
-			case seen[g]:
-				o.errorf(at, "%q is listed twice", g)
-			}
-			seen[g] = true
-		}
+		o.groups("groups", t.Groups)
 	}
 
 	schedules := map[string]Origin{}
@@ -336,6 +341,13 @@ func (a Auth) validate(o object) {
 	}
 	if l := a.SessionLifetime; l != nil && (time.Duration(*l) < minSessionLifetime || time.Duration(*l) > maxSessionLifetime) {
 		o.errorf("session_lifetime", "must be between 1m and 30d")
+	}
+	if r := a.Roles; r != nil {
+		o.groups("roles.admin", r.Admin)
+		o.groups("roles.member", r.Member)
+		if len(r.Admin) == 0 && len(r.Member) == 0 {
+			o.errorf("roles", "needs admin, member or both; leave roles out to make everyone a member")
+		}
 	}
 	if a.OIDC == nil {
 		return
