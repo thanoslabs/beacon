@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/thanoslabs/beacon/internal/auth/oidctest"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
 	"github.com/thanoslabs/beacon/internal/slack/slacktest"
@@ -149,6 +151,7 @@ func launch(t *testing.T, dbURL, dir string) *beacon {
 		"BEACON_SOURCE_TOKEN=" + sourceToken,
 		"BEACON_SLACK_BOT_TOKEN=" + botToken,
 		"BEACON_SLACK_API_URL=" + b.slack.URL,
+		"BEACON_OIDC_CLIENT_SECRET=" + oidctest.ClientSecret,
 	}
 	stderr, err := b.cmd.StderrPipe()
 	if err != nil {
@@ -747,5 +750,100 @@ func TestReloadReadsSecretFilesAgain(t *testing.T) {
 	}
 	if strings.Contains(b.output(), rotated) {
 		t.Error("the logs contain the rotated secret")
+	}
+}
+
+// signInConfiguration adds sign-in through the Dex of compose.yaml to the
+// configuration.
+func signInConfiguration(t *testing.T) string {
+	t.Helper()
+	return configuration + `auth:
+  public_url: ` + oidctest.PublicURL + `
+  session_lifetime: 1h
+  oidc:
+    issuer: ` + oidctest.Issuer(t) + `
+    client_id: ` + oidctest.ClientID + `
+    client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+`
+}
+
+// do sends a request to Beacon with the browser and returns the status and
+// the body.
+func do(t *testing.T, browser *http.Client, method, path string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, oidctest.PublicURL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := browser.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return resp.StatusCode, string(body)
+}
+
+// TestSignIn signs a person in to the real binary through a real identity
+// provider, uses the session, and signs out.
+func TestSignIn(t *testing.T) {
+	issuer := oidctest.Issuer(t)
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, signInConfiguration(t)))
+	b.waitUntilServing()
+	browser := oidctest.Browser(t, strings.TrimPrefix(b.url, "http://"))
+
+	if code, body := do(t, browser, http.MethodGet, "/api/v1/me"); code != http.StatusUnauthorized {
+		t.Fatalf("GET /api/v1/me before sign-in = %d %s, want 401", code, body)
+	}
+	code, body := oidctest.SignIn(t, browser, oidctest.Grace, oidctest.Password)
+	if code != http.StatusOK || !strings.Contains(body, `"email":"grace@example.com"`) || !strings.Contains(body, `"role":"member"`) {
+		t.Fatalf("after sign-in = %d %s", code, body)
+	}
+	var stored string
+	err := b.db.QueryRow(context.Background(), `SELECT oidc_issuer FROM users WHERE email = 'grace@example.com' AND last_sign_in_at IS NOT NULL`).Scan(&stored)
+	if err != nil || stored != issuer {
+		t.Errorf("the stored user has issuer %q, %v; want %q", stored, err, issuer)
+	}
+
+	// The session survives a reload of the same configuration, and the
+	// webhook still needs no session, only its token.
+	b.reload(signInConfiguration(t), 1)
+	if code, body := do(t, browser, http.MethodGet, "/api/v1/me"); code != http.StatusOK {
+		t.Errorf("GET /api/v1/me after a reload = %d %s", code, body)
+	}
+	if code, res := b.webhook(diskFull); code != http.StatusCreated {
+		t.Errorf("webhook = %d %v", code, res)
+	}
+
+	if code, body := do(t, browser, http.MethodPost, "/auth/logout"); code != http.StatusNoContent {
+		t.Errorf("sign-out = %d %s, want 204", code, body)
+	}
+	if code, _ := do(t, browser, http.MethodGet, "/api/v1/me"); code != http.StatusUnauthorized {
+		t.Errorf("GET /api/v1/me after sign-out = %d, want 401", code)
+	}
+
+	// Taking sign-in out of the configuration turns it off.
+	b.reload(configuration, 2)
+	if code, _ := do(t, browser, http.MethodGet, "/auth/login"); code != http.StatusNotFound {
+		t.Errorf("GET /auth/login without an auth block = %d, want 404", code)
+	}
+
+	if code := b.terminate(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+	logs := b.output()
+	for _, secret := range []string{oidctest.ClientSecret, sourceToken, botToken, signingSecret} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("the logs contain the credential %q", secret)
+		}
+	}
+	for _, cookie := range browser.Jar.Cookies(&url.URL{Scheme: "http", Host: "127.0.0.1"}) {
+		if cookie.Value != "" && strings.Contains(logs, cookie.Value) {
+			t.Errorf("the logs contain the value of the cookie %s", cookie.Name)
+		}
 	}
 }

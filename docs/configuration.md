@@ -4,7 +4,7 @@ tags: [configuration, reference]
 date: 2026-11-17
 ---
 
-Beacon's provisioned objects are defined in YAML files that live in version control: sources, integrations, teams, schedules, escalation policies and routing. This page is the reference for those files. Why they look the way they do is in [[configuration-and-data-model]].
+Beacon's provisioned objects are defined in YAML files that live in version control: sources, integrations, teams, schedules, escalation policies and routing. So is how people sign in. This page is the reference for those files. Why they look the way they do is in [[configuration-and-data-model]].
 
 > [!warning] Loaded and checked, not all acted on yet
 > Beacon reads and validates every kind described here. What it does with them is still growing: webhook sources and Slack integrations work today, and the other source and integration types, schedules, escalation and routing arrive with later releases. Each section says what is in use.
@@ -140,6 +140,20 @@ The first three accept `via`, a list of integration names that narrows how the p
 | `service` | no | Service name the alert is assigned to |
 | `escalation_policy` | yes | Policy to run |
 | `group_by`, `group_wait`, `group_interval` | no | Override the routing settings for this rule |
+
+## Sign-in
+
+The `auth` block says how people sign in. It is one group of settings, not a list of objects, and must be in a single file. [[access]] describes it and what to set up at the identity provider.
+
+```yaml
+auth:
+  public_url: https://beacon.example.com
+  session_lifetime: 12h
+  oidc:
+    issuer: https://idp.example.com
+    client_id: beacon
+    client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+```
 
 ## How changes are applied
 

@@ -18,6 +18,7 @@ var exampleEnv = map[string]string{
 	"BEACON_SMTP_PASSWORD":                  "smtp-" + secretValue,
 	"BEACON_DISCORD_BOT_TOKEN":              "discord-" + secretValue,
 	"BEACON_TICKETING_AUTHORIZATION":        "Bearer " + secretValue,
+	"BEACON_OIDC_CLIENT_SECRET":             "oidc-" + secretValue,
 }
 
 func getenv(env map[string]string) func(string) string {
@@ -79,6 +80,15 @@ func TestLoadDirectory(t *testing.T) {
 	if rule.Match["team"] != "platform" || rule.MatchRE["severity"] != "critical|page" || *rule.GroupWait != Duration(10*time.Second) ||
 		cfg.Routing.Default.EscalationPolicy != "platform-default" || rule.Origin.Line != 62 {
 		t.Errorf("routing = %+v", cfg.Routing)
+	}
+
+	a := cfg.Auth
+	if a == nil || a.PublicURL != "https://beacon.example.com" || a.Lifetime() != 8*time.Hour || a.OIDC == nil || a.OIDC.Issuer != "https://idp.example.com" ||
+		a.OIDC.ClientSecret.Reveal() != exampleEnv["BEACON_OIDC_CLIENT_SECRET"] || len(a.OIDC.RequestedScopes()) != 4 {
+		t.Errorf("auth = %+v", a)
+	}
+	if (Auth{}).Lifetime() != 12*time.Hour || len((OIDC{}).RequestedScopes()) != 3 {
+		t.Error("the defaults of auth are wrong")
 	}
 
 	// What is stored and logged holds references, never values.
@@ -204,7 +214,11 @@ schedules:
 dashboards: []
 routing:
   default: {escalation_policy: p}
+auth:
+  public_url: https://beacon.example.com
+  oidc: {client_secret: inline-secret-marker-3e9a, tenant: x}
 `,
+		"e.yaml": "auth: {public_url: \"https://beacon.example.com\"}\n",
 		"c.yaml": "sources: [\n",
 		"d.yaml": "teams: []\n---\nteams: []\n",
 	})
@@ -230,8 +244,11 @@ routing:
 		`b.yaml:14: schedule "s": effective_from: must be a date and time with a zone, such as 2026-01-05T09:00:00Z`,
 		`b.yaml:15: dashboards: unknown field`,
 		`b.yaml:17: routing: routing is already defined in ` + filepath.Join(dir, "a.yaml") + `; its rules are ordered, so the whole block must be in one file`,
+		`b.yaml:20: auth: oidc.client_secret: secrets are never written inline; use {env: NAME} or {file: /path}`,
+		`b.yaml:20: auth: oidc.tenant: unknown field`,
 		`c.yaml:1: invalid YAML: did not find expected node content`,
 		`d.yaml: the file holds more than one YAML document; use one document per file`,
+		`e.yaml:1: auth: auth is already defined in ` + filepath.Join(dir, "b.yaml") + `; it is one group of settings, so it must be in one file`,
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("errors:\n%s\n\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

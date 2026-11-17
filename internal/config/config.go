@@ -9,6 +9,7 @@ package config
 import (
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/thanoslabs/beacon/internal/alert"
 )
@@ -22,6 +23,8 @@ type Config struct {
 	EscalationPolicies []EscalationPolicy
 	// Routing is nil when no file has a routing block.
 	Routing *Routing
+	// Auth is nil when no file has an auth block. Nobody can sign in then.
+	Auth *Auth
 }
 
 // Origin says where an object was defined. It is empty for objects that did
@@ -273,6 +276,58 @@ type RoutingRule struct {
 	GroupInterval    *Duration         `yaml:"group_interval" json:"group_interval,omitempty"`
 
 	Origin Origin `yaml:"-" json:"-"`
+}
+
+// Auth says how people sign in. It is settings, not an object: it has no
+// name and no row in the database.
+type Auth struct {
+	// PublicURL is the address at which browsers reach Beacon, such as
+	// https://beacon.example.com. The identity provider sends people back
+	// to it, and its scheme decides whether cookies are marked Secure.
+	PublicURL string `yaml:"public_url" json:"public_url"`
+	// SessionLifetime is how long a sign-in lasts. Nil means
+	// DefaultSessionLifetime.
+	SessionLifetime *Duration `yaml:"session_lifetime" json:"session_lifetime,omitempty"`
+	// OIDC is the identity provider. Nil means there is none.
+	OIDC *OIDC `yaml:"oidc" json:"oidc,omitempty"`
+
+	Origin Origin `yaml:"-" json:"-"`
+}
+
+// DefaultSessionLifetime is how long a sign-in lasts unless the
+// configuration says otherwise.
+const DefaultSessionLifetime = Duration(12 * time.Hour)
+
+// Lifetime returns how long a sign-in lasts.
+func (a Auth) Lifetime() time.Duration {
+	if a.SessionLifetime != nil {
+		return time.Duration(*a.SessionLifetime)
+	}
+	return time.Duration(DefaultSessionLifetime)
+}
+
+// OIDC is an OpenID Connect identity provider and Beacon's registration
+// with it.
+type OIDC struct {
+	// Issuer is the provider's issuer URL, under which its discovery
+	// document is found.
+	Issuer       string `yaml:"issuer" json:"issuer"`
+	ClientID     string `yaml:"client_id" json:"client_id"`
+	ClientSecret Secret `yaml:"client_secret" json:"client_secret"`
+	// Scopes are requested at sign-in. Empty means DefaultScopes.
+	Scopes []string `yaml:"scopes" json:"scopes,omitempty"`
+}
+
+// DefaultScopes are the scopes requested at sign-in unless the configuration
+// says otherwise.
+var DefaultScopes = []string{"openid", "profile", "email"}
+
+// RequestedScopes returns the scopes to request at sign-in.
+func (o OIDC) RequestedScopes() []string {
+	if len(o.Scopes) > 0 {
+		return o.Scopes
+	}
+	return DefaultScopes
 }
 
 // ChannelTarget is a shared channel reached through an integration.

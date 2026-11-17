@@ -1,0 +1,108 @@
+---
+title: Sign-in and access
+tags: [access, guide]
+date: 2026-11-17
+---
+
+People sign in to Beacon through your organisation's identity provider, with OpenID Connect. Beacon keeps no passwords. A user is created in Beacon's database the first time they sign in, and updated on every later sign-in.
+
+> [!note] No web interface yet
+> Sign-in works over HTTP today and can be tried in a browser, but there are no pages. After signing in, the browser lands on `/api/v1/me`, which answers who you are as JSON.
+
+## Set up the identity provider
+
+Register Beacon with your provider as a **web application** (a confidential client) that uses the **authorisation code** flow.
+
+| Setting at the provider | Value |
+|---|---|
+| Redirect URI | Beacon's public address followed by `/auth/callback`, for example `https://beacon.example.com/auth/callback` |
+| Scopes | `openid`, `profile`, `email` |
+| Grant type | Authorisation code. Beacon uses PKCE (`S256`) as well as the client secret. |
+
+Note the **issuer URL**, the **client ID** and the **client secret** that the provider gives you. The issuer URL is the one under which `/.well-known/openid-configuration` is served.
+
+## Configure Beacon
+
+Sign-in is part of the configuration files (see [[configuration]]):
+
+```yaml
+auth:
+  public_url: https://beacon.example.com
+  session_lifetime: 12h
+  oidc:
+    issuer: https://idp.example.com
+    client_id: beacon
+    client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `public_url` | yes | The address at which browsers reach Beacon. It must be `https`; plain `http` is accepted only for `localhost`. |
+| `session_lifetime` | no | How long a sign-in lasts, from `1m` to `30d` (default `12h`) |
+| `oidc.issuer` | yes | The provider's issuer URL. It must be `https`, except for a provider on `localhost`. |
+| `oidc.client_id` | yes | The client ID |
+| `oidc.client_secret` | yes | The client secret, as a secret reference |
+| `oidc.scopes` | no | Scopes to request (default `openid`, `profile`, `email`). The list must include `openid`. |
+
+The `auth` block is one group of settings and must be in a single file. Without it, nobody can sign in. It is applied on a [[configuration#Reload without a restart|reload]] like everything else.
+
+Beacon reads the provider's discovery document when it starts. If the provider cannot be reached, Beacon starts anyway, logs a warning, and tries again when someone signs in: alerts keep flowing while the provider is down.
+
+## Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /auth/login` | Starts a sign-in and sends the browser to the provider |
+| `GET /auth/callback` | Where the provider sends the browser back. This is the redirect URI. |
+| `POST /auth/logout` | Ends the session. Answers `204`. |
+| `GET /api/v1/me` | Who is signed in: `id`, `email`, `display_name`, `role` and `session_expires_at`. Answers `401` without a session. |
+
+## Users
+
+- A user is identified by the provider's issuer and subject, which never change. Email address and display name are copied from the ID token at every sign-in.
+- Beacon needs the `email` claim. If the provider says the address is not verified (`email_verified: false`), the sign-in is refused: configuration refers to users by email address, so an address that anyone could claim must not be trusted.
+- If a person's email address changes at the provider, they keep their Beacon account and its history, and the address is updated at their next sign-in. Configuration files that list the old address must be changed to the new one.
+- A sign-in is refused when its email address already belongs to another Beacon user, for example after moving to a different provider. The log names the address. Nothing is merged automatically.
+- New users have the role `member`.
+
+## Sessions
+
+- A sign-in gives the browser a session cookie. It is `HttpOnly`, `SameSite=Lax` and, whenever `public_url` is `https`, `Secure` with the `__Host-` prefix.
+- A session ends at sign-out or after `session_lifetime`, whichever comes first. It is not extended by use. There is no refresh: when it ends, the person signs in again, which is also when their details are read from the provider again.
+- Sessions are stored in Postgres, as a hash of the cookie's value, so every replica accepts them and reading the database does not let anyone take one over.
+- Requests that change something are refused when another site made the browser send them (`Sec-Fetch-Site` and `Origin` are checked).
+
+## What is checked at sign-in
+
+Beacon uses the authorisation code flow with `state`, `nonce` and PKCE:
+
+- the callback is accepted only in the browser that started the sign-in, once, within ten minutes;
+- the ID token's signature is verified against the provider's published keys, and its issuer, audience (the client ID) and expiry are checked;
+- the `nonce` in the ID token must be the one that this sign-in sent.
+
+## Try it locally
+
+`compose.yaml` includes [Dex](https://dexidp.io/), a small identity provider, set up with a few users whose password is `password` (see `dev/dex/config.yaml`):
+
+```sh
+docker compose up -d --wait postgres dex
+cat > /tmp/beacon-auth.yaml <<'YAML'
+auth:
+  public_url: http://127.0.0.1:18080
+  oidc:
+    issuer: http://127.0.0.1:5556/dex
+    client_id: beacon
+    client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+YAML
+export BEACON_OIDC_CLIENT_SECRET=beacon-local-development-client-secret
+export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable'
+beacon serve --config /tmp/beacon-auth.yaml --listen-address 127.0.0.1:18080
+```
+
+Open <http://127.0.0.1:18080/auth/login>, sign in as `ada@example.com` with `password`, and the browser shows who you are. Use `127.0.0.1` and not `localhost` in the address: Dex only sends people back to the address it knows, and cookies are kept per host name.
+
+## Tested with
+
+Sign-in is tested in CI against Dex 2.46, a real provider, with its password connector: a first and a later sign-in, sign-out, an expired session, a wrong password and an unverified address. A hand-written provider in the tests covers what a real one will not do, such as ID tokens with a wrong issuer, audience, signature, expiry or nonce.
+
+Not tested: any hosted provider (Okta, Entra ID, Google, Auth0, Keycloak). Beacon uses only standard discovery, the authorisation code flow and the ID token, so they are expected to work, but nobody has tried. Providers that do not publish a discovery document, or that return the email address only from the UserInfo endpoint and not in the ID token, will not work yet. If yours does not work, please open an issue.

@@ -50,5 +50,25 @@ services:
       timeout: 5s
       retries: 30
 
+  # An OpenID Connect identity provider for development and for the sign-in
+  # tests. It is not started by `docker compose up`; ask for it by name:
+  #
+  #   docker compose up -d --wait dex
+  #
+  # Its users and client are in dev/dex/config.yaml. See docs/access.md.
+  dex:
+    image: ghcr.io/dexidp/dex:v2.46.1
+    profiles: ["oidc"]
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./dev/dex/config.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "127.0.0.1:${BEACON_DEX_PORT:-5556}:5556"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:5556/dex/.well-known/openid-configuration"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
 volumes:
   postgres-data:

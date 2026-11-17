@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/config"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/notify"
@@ -33,6 +34,7 @@ type provisioner struct {
 	ingest       *ingest.Handler
 	interactions *slack.Interactions
 	pipeline     *notify.Pipeline
+	auth         *auth.Handler
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -87,6 +89,7 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 
 	p.applySources(ctx, cfg, rows.IDs[provision.Sources])
 	p.applyNotifications(ctx, cfg, rows.IDs[provision.Integrations])
+	p.auth.Configure(ctx, cfg.Auth)
 	p.successful.Set(1)
 	p.lastOK.SetToCurrentTime()
 	return nil

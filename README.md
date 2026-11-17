@@ -100,6 +100,8 @@ The server answers on these endpoints:
 |---|---|
 | `POST /api/v1/ingest/<source>` | Receives alerts from a source. See the [webhook page](docs/webhook.md). |
 | `POST /api/v1/integrations/<name>/interactions` | Receives button presses from Slack. See the [Slack page](docs/slack.md). |
+| `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` | Sign-in through an OpenID Connect identity provider. See the [access page](docs/access.md). |
+| `GET /api/v1/me` | Who is signed in. Needs a session. |
 | `GET /healthz` | Liveness: the process is running. It does not check the database. |
 | `GET /readyz` | Readiness: the database answers and the server is not shutting down. Returns `503` otherwise. |
 | `GET /metrics` | Prometheus metrics: Go runtime, process and build information, and configuration reloads. |
@@ -111,6 +113,13 @@ Tests that need a database are skipped unless `BEACON_TEST_DATABASE_URL` points 
 ```sh
 export BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable'
 go test -race ./...
+```
+
+The sign-in tests need an identity provider. `compose.yaml` has one, [Dex](https://dexidp.io/), which is started by name and is skipped by the tests unless its address is set:
+
+```sh
+docker compose up -d --wait postgres dex
+export BEACON_TEST_OIDC_ISSUER='http://127.0.0.1:5556/dex'
 ```
 
 The tests in `internal/e2e` build the binary and run it as a process against Postgres and a fake Slack: an alert goes in by webhook, a message comes out to Slack, a button press acknowledges it and the source resolves it. They run with the rest of the tests.

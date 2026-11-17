@@ -15,8 +15,8 @@ Beacon has three kinds of settings and state. Each has exactly one place where i
 
 | Kind | Where it lives | Changed by | Examples |
 |---|---|---|---|
-| Process settings | Environment variables and flags | The operator, per deployment | Listen address, database URL, log level, identity provider client |
-| Provisioned objects | YAML files | A reviewed change in version control | Sources, integrations, teams, schedules, escalation policies, routing |
+| Process settings | Environment variables and flags | The operator, per deployment | Listen address, database URL, log level |
+| Provisioned objects and sign-in settings | YAML files | A reviewed change in version control | Sources, integrations, teams, schedules, escalation policies, routing, the identity provider |
 | Runtime state | Postgres | The UI, the API, chat actions and Beacon itself | Users, alerts, silences, overrides, shifts, notifications |
 
 The running process evaluates provisioned objects from the files it loaded. It also copies them into Postgres, for two reasons: runtime rows need something stable to reference, and the API must be able to show an object that history refers to after it has left the files.
@@ -143,6 +143,22 @@ People targets (`schedule`, `team`, `user`) accept an optional `via` list of int
 | `group_by`, `group_wait`, `group_interval` | no | Override the routing defaults for this rule |
 
 A service is a plain name on an alert, used for filtering and as a metric label. It is not a provisioned object in the MVP.
+
+### Sign-in
+
+`auth` is one group of settings, not a kind of object: it has no name, is not copied into the database, and must be in a single file. [[access]] describes its fields.
+
+```yaml
+auth:
+  public_url: https://beacon.example.com
+  session_lifetime: 12h
+  oidc:
+    issuer: https://idp.example.com
+    client_id: beacon
+    client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+```
+
+The first version of this design listed the identity provider client under process settings. It moved into the files because issue 19 asks for it there, and because it then follows the same review, validation and reload as everything else.
 
 ### Worked example
 
@@ -352,6 +368,10 @@ Applying a configuration makes these rows match the files, in one transaction, s
 | `created_at`, `updated_at`, `last_sign_in_at` | `timestamptz` | |
 | `disabled_at` | `timestamptz` | |
 
+**`sessions`**: `id`, `token_hash`, `user_id`, `created_at`, `expires_at`. One row per signed-in browser. The cookie holds a random token and the row holds its SHA-256 hash, so every replica accepts a session and reading the table does not let anyone take one over. A session has a fixed lifetime and is deleted at sign-out.
+
+**`sign_in_flows`**: `state_hash`, `nonce`, `code_verifier`, `created_at`, `expires_at`. A sign-in that has been sent to the identity provider and has not come back. A row is used once and lives ten minutes. Keeping it in Postgres, not in a signed cookie, means there is no session key to manage and the callback can arrive at any replica.
+
 **`user_identities`**: `user_id`, `provider` (`slack` or `discord`), `external_id`, `created_at`. Unique on (`provider`, `external_id`) and on (`user_id`, `provider`).
 
 **`team_members`**: `team_id`, `user_id`, `origin` (`config` or `group`), `created_at`. Primary key on all three of `team_id`, `user_id`, `origin`.
@@ -487,12 +507,12 @@ These are judgement calls made in this proposal. Each can be changed before the 
 
 ## Open questions
 
-1. **Roles from the identity provider.** The mapping of provider roles or groups to `admin` and `member`, and the name of the claim that carries them, has to live somewhere. It could be process settings (environment variables beside the client identifier and secret) or a provisioned `access` block in YAML. This proposal leaves it out of the YAML schema until sign-in is designed (issues 19 and 20).
-2. **A user's email address changes.** Configuration refers to users by email. If the provider changes someone's email, the files must change too. Is that acceptable, or should the files be able to name a stable identifier?
+1. **Roles from the identity provider.** *Partly resolved (issue 19):* the identity provider's settings live in an `auth` block in YAML, not in process settings. The role mapping and the claim that carries it follow in issue 20.
+2. **A user's email address changes.** *Resolved for now (issue 19), for the project owner to confirm:* a user is identified by the provider's issuer and subject, so the account and its history survive a change of address, and the stored address is updated at the next sign-in. The files must then be changed to the new address; until they are, the old address in a team or rotation is an unknown user and is skipped. The alternative is to let the files name a stable identifier, which nobody could write by hand.
 3. **Unknown users in a rotation.** The requirements say an unknown user in a team is skipped and logged. This proposal applies the same rule to rotation members. The alternative is to treat it as an error that blocks applying the schedule, since a skipped member changes who is on call.
 4. **Must rotation members belong to the owning team?** The proposal does not require it, so someone from another team can cover. Requiring it would catch mistakes.
 5. **Service as an object.** Routing can assign a service name, but nothing else is attached to a service. Should services become provisioned objects with an owning team before the MVP, or stay as names?
 6. **Shared channels for a team.** A shared channel is named in each escalation step. Should a team have a default channel, so that policies need not repeat it?
 7. **Minimum Postgres version.** No feature here needs a recent version. Stating a minimum (for example the oldest release still supported upstream) would let later work rely on it.
 8. **Retention.** `alert_events`, `notification_attempts` and `shifts` grow without bound. Is a retention setting needed for the MVP, or is it left to the operator?
-9. **Sessions.** Browser sessions after sign-in need storage that works across replicas. A `sessions` table is the likely answer and is left to the sign-in design.
+9. **Sessions.** *Resolved (issue 19), for the project owner to confirm:* a `sessions` table holding a hash of an opaque random token, with a fixed lifetime (`auth.session_lifetime`, 12 hours by default) and no refresh. The alternative, a signed or encrypted cookie that carries the session, needs a key shared by all replicas and cannot be revoked at sign-out without a table anyway.

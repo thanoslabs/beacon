@@ -41,10 +41,15 @@ Tooling:
 │       └── renovate.yaml     # Renovate workflow
 ├── cmd/
 │   └── beacon/               # Entry point of the single binary
+├── dev/
+│   └── dex/                  # Configuration of the identity provider used in development and tests
 ├── docs/                     # Project documentation (markdown source for the docs site)
 ├── examples/                 # Example configurations; a test keeps them valid
 ├── internal/
+│   ├── access/               # Roles and the principal behind a request
 │   ├── alert/                # Alert model, state machine and timeline
+│   ├── auth/                 # Sign-in through OpenID Connect, users and sessions
+│   │   └── oidctest/         # Test helper: sign in through the Dex of compose.yaml
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
 │   ├── config/               # Typed provisioned objects, the YAML loader and the Secret type
 │   ├── e2e/                  # End-to-end tests: the real binary, Postgres and a fake Slack
@@ -85,7 +90,8 @@ Run `mise install` first so that the pinned versions are used.
 | Build | `go build -o bin/beacon ./cmd/beacon` |
 | Run | `./bin/beacon version` (or `go run ./cmd/beacon version`) |
 | Start Postgres | `docker compose up -d --wait postgres` |
-| Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' go test -race ./...` |
+| Start Postgres and the identity provider | `docker compose up -d --wait postgres dex` |
+| Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_TEST_OIDC_ISSUER='http://127.0.0.1:5556/dex' go test -race ./...` |
 | Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_SOURCE_TOKEN=local-development-token ./bin/beacon serve --config examples/quickstart` then `curl localhost:8080/readyz` |
 | Check configuration | `./bin/beacon validate --config examples/full` |
 | Apply migrations | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon migrate` |
@@ -96,7 +102,7 @@ Run `mise install` first so that the pinned versions are used.
 | Build the image | `docker build -t beacon:dev .` |
 | Run Beacon and Postgres | `docker compose up --build -d --wait`, then `curl localhost:8080/readyz` (set `BEACON_PORT` if 8080 is taken) |
 
-CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres from `compose.yaml`, so CI and development use the same Postgres version. The tests include the end-to-end tests in `internal/e2e`. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, the non-root user and a clean exit on termination.
+CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres and Dex from `compose.yaml`, so CI and development use the same versions. The tests include the end-to-end tests in `internal/e2e`. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, the non-root user and a clean exit on termination.
 
 ### Container image
 
@@ -140,6 +146,15 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Hold every credential in a `config.Secret`. In a file it is a reference, `{env: NAME}` or `{file: /path}`, never the value. It prints, logs and encodes as that reference; call `Reveal` only at the point of use. A new secret field also goes into `resolveSecrets` in `internal/config/load.go`. Add every new secret to `secretSettings` and `secretsConfig` in `internal/cli/secrets_test.go`, which checks that no secret reaches help, errors or logs. A credential that is a process setting, such as the database URL, is registered with `secretSetting`.
 - `provision.Reconcile` makes the provisioned rows match the configuration: it creates, updates and marks as removed, in one transaction under an advisory lock, and returns the row of every object. It never deletes; a removed object keeps its row for history and is revived if it returns. A new kind needs its table (with the common columns, including `provisioned`), a constant in `provision.Kinds` in dependency order, and a case in `objectsOf`.
 - Rows with `provisioned = true` belong to the files. Nothing but reconciliation may write them: an API route for a provisioned kind is read-only.
+
+### Sign-in and sessions
+
+- `internal/auth` signs people in with the authorisation code flow. The protocol and the cryptography belong to [go-oidc](https://github.com/coreos/go-oidc) and `golang.org/x/oauth2`: never verify a token, build an authorisation URL or compare a signature by hand. `docs/access.md` is the guide; keep it true.
+- Every sign-in uses a fresh state, nonce and PKCE verifier. The callback checks, in this order, the sign-in cookie against the state, the stored flow (used once, ten minutes), then the code and the ID token. Do not reorder them or make any of them optional.
+- Session tokens and states are stored as SHA-256 hashes (`hashToken`), never as they are. Never log a token, a code, a state or a cookie value.
+- Cookies are `HttpOnly` and `SameSite=Lax`, and `Secure` whenever `auth.public_url` is `https`. Routes that need a session go through `Handler.RequireSession`, which also refuses cross-site requests.
+- The identity provider is discovered lazily, so Beacon starts and handles alerts while it is down. Do not make the start depend on it.
+- Tests that need a real provider use `oidctest` against the Dex in `compose.yaml` (`dev/dex/config.yaml` holds its users). Without `BEACON_TEST_OIDC_ISSUER` they are skipped locally and fail in CI. Use the hand-written provider in `internal/auth/fake_test.go` only for what a real one will not do, such as a token that is wrong in one way. Beacon has no account at any hosted provider; say in the PR that those are unverified.
 
 ### Ingestion
 

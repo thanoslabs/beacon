@@ -2,9 +2,11 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/mail"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -263,6 +265,10 @@ func (c Config) validate(v *validator) {
 		}
 	}
 
+	if a := c.Auth; a != nil {
+		a.validate(object{v: v, origin: a.Origin, label: kindAuth})
+	}
+
 	if r := c.Routing; r != nil {
 		o := object{v: v, origin: r.Origin, label: kindRouting}
 		o.labelNames("group_by", r.GroupBy)
@@ -309,6 +315,55 @@ func (c Config) validate(v *validator) {
 			o.positive("group_interval", rule.GroupInterval)
 		}
 	}
+}
+
+// The shortest and longest session lifetimes accepted.
+const (
+	minSessionLifetime = time.Minute
+	maxSessionLifetime = 30 * Day
+)
+
+func (a Auth) validate(o object) {
+	public, err := url.Parse(a.PublicURL)
+	switch {
+	case a.PublicURL == "":
+		o.errorf("public_url", "is required: the address at which browsers reach Beacon, such as https://beacon.example.com")
+	case err != nil || public.Host == "" || (public.Scheme != "https" && public.Scheme != "http") ||
+		strings.Trim(public.Path, "/") != "" || public.RawQuery != "" || public.Fragment != "" || public.User != nil:
+		o.errorf("public_url", "must be an http or https address without a path, such as https://beacon.example.com")
+	case public.Scheme == "http" && !loopback(public.Hostname()):
+		o.errorf("public_url", "must use https; plain http is accepted only for localhost, where it is useful for trying Beacon out")
+	}
+	if l := a.SessionLifetime; l != nil && (time.Duration(*l) < minSessionLifetime || time.Duration(*l) > maxSessionLifetime) {
+		o.errorf("session_lifetime", "must be between 1m and 30d")
+	}
+	if a.OIDC == nil {
+		return
+	}
+	issuer, err := url.Parse(a.OIDC.Issuer)
+	switch {
+	case a.OIDC.Issuer == "":
+		o.errorf("oidc.issuer", "is required: the issuer URL of the identity provider")
+	case err != nil || issuer.Host == "" || (issuer.Scheme != "https" && issuer.Scheme != "http") || issuer.RawQuery != "" || issuer.Fragment != "":
+		o.errorf("oidc.issuer", "must be an http or https URL")
+	case issuer.Scheme == "http" && !loopback(issuer.Hostname()):
+		// Over plain http anyone on the network path could answer in the
+		// provider's place and sign people in as whoever they like.
+		o.errorf("oidc.issuer", "must use https; plain http is accepted only for a provider on localhost")
+	}
+	if a.OIDC.ClientID == "" {
+		o.errorf("oidc.client_id", "is required")
+	}
+	o.required("oidc.client_secret", a.OIDC.ClientSecret)
+	if len(a.OIDC.Scopes) > 0 && !slices.Contains(a.OIDC.Scopes, "openid") {
+		o.errorf("oidc.scopes", "must include openid")
+	}
+}
+
+// loopback reports whether host is this machine.
+func loopback(host string) bool {
+	ip := net.ParseIP(host)
+	return host == "localhost" || (ip != nil && ip.IsLoopback())
 }
 
 // required reports a secret that is neither referenced nor set.

@@ -1,0 +1,61 @@
+# Dex, an OpenID Connect identity provider, set up for development and tests.
+# compose.yaml starts it:
+#
+#   docker compose up -d --wait dex
+#
+# Everything here is public and for local use only: the client secret, the
+# users and their password ("password") protect nothing. The sign-in tests
+# and docs/access.md rely on these values; change them together.
+
+issuer: http://127.0.0.1:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  # Sign in without the "grant access" page.
+  skipApprovalScreen: true
+
+staticClients:
+  - id: beacon
+    name: Beacon
+    secret: beacon-local-development-client-secret
+    redirectURIs:
+      # A Beacon run by hand on port 18080, and the address the tests use.
+      - http://127.0.0.1:18080/auth/callback
+      - http://localhost:18080/auth/callback
+
+enablePasswordDB: true
+
+# The bcrypt hash is of the string "password".
+staticPasswords:
+  - email: ada@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: ada
+    name: Ada Example
+    userID: 5f0d2c1e-0001-4a6b-9c1d-000000000001
+    groups:
+      - beacon-admins
+      - platform-engineers
+  - email: grace@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: grace
+    name: Grace Example
+    userID: 5f0d2c1e-0002-4a6b-9c1d-000000000002
+    groups:
+      - platform-engineers
+  - email: linus@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: linus
+    name: Linus Example
+    userID: 5f0d2c1e-0003-4a6b-9c1d-000000000003
+  # An address the provider has not verified. Beacon must refuse it.
+  - email: mallory@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: mallory
+    name: Mallory Example
+    userID: 5f0d2c1e-0004-4a6b-9c1d-000000000004
+    emailVerified: false
