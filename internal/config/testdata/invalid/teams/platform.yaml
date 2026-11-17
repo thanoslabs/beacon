@@ -1,0 +1,57 @@
+teams:
+  - name: platform
+    members: [ada@example.com, Ada@Example.com, not-an-email, "Grace <grace@example.com>"]
+    groups: [engineers, "", engineers]
+schedules:
+  - name: primary
+    team: plataform
+    time_zone: Europe/Londres
+    rotation:
+      members: [ada@example.com, ada@example.com]
+      shift_length: 36h
+      handoff: {time: "9am"}
+  - name: weekly
+    time_zone: Europe/London
+    rotation:
+      shift_length: 2w
+      handoff: {time: "09:00", day: Monday}
+  - name: daily
+    team: platform
+    time_zone: UTC
+    rotation:
+      members: [ada@example.com]
+      shift_length: 3d
+      handoff: {time: "09:00", day: monday}
+escalation_policies:
+  - name: default
+    repeat: -1
+    steps:
+      - notify:
+          - schedule: secondary
+          - team: nobody
+            via: [pagerduty]
+          - user: ada
+          - channel: "#alerts"
+          - integration: slack
+          - channel: "#alerts"
+            integration: carrier-pigeon
+            via: [slack]
+          - schedule: primary
+            team: platform
+          - {}
+      - notify: []
+        timeout: 0s
+  - name: empty
+routing:
+  group_by: [alertname, "not a label"]
+  group_wait: 0s
+  default:
+    team: nobody
+  rules:
+    - name: r1
+      escalation_policy: missing
+      team: nobody
+    - name: r1
+      match: {"bad-label": x}
+      match_re: {severity: "(critical", "also bad": x}
+      group_interval: 0s

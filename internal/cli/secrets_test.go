@@ -71,7 +71,7 @@ func TestSecretsAreNeverPrinted(t *testing.T) {
 
 func TestShortSourceTokenIsRejectedWithoutEchoingIt(t *testing.T) {
 	code, _, stderr := runCLIEnv(t, map[string]string{"BEACON_SOURCE_TOKEN": "hunter2"}, "serve", "--database-url", "postgres://localhost/beacon")
-	if code != exitError || !strings.Contains(stderr, `source "default": token must be at least 16 characters`) {
+	if code != exitError || !strings.Contains(stderr, `source "default": token: must be at least 16 characters`) {
 		t.Errorf("exit %d, stderr = %q", code, stderr)
 	}
 	assertNoSecrets(t, "stderr", stderr, "hunter2")

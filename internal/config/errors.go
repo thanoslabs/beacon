@@ -52,14 +52,22 @@ func (es Errors) Error() string {
 	return strings.Join(lines, "\n")
 }
 
-// sorted orders the errors by file and line, keeping the order in which
-// problems on the same line were found.
+// sorted orders the errors by file and line, then by object, field and
+// message, so that the same configuration always gives the same report.
 func (es Errors) sorted() Errors {
 	sort.SliceStable(es, func(i, j int) bool {
-		if es[i].File != es[j].File {
-			return es[i].File < es[j].File
+		a, b := es[i], es[j]
+		switch {
+		case a.File != b.File:
+			return a.File < b.File
+		case a.Line != b.Line:
+			return a.Line < b.Line
+		case a.Object != b.Object:
+			return a.Object < b.Object
+		case a.Field != b.Field:
+			return a.Field < b.Field
 		}
-		return es[i].Line < es[j].Line
+		return a.Msg < b.Msg
 	})
 	return es
 }

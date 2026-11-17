@@ -88,6 +88,7 @@ export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmo
 ./bin/beacon serve              # apply pending migrations, then serve on :8080
 ./bin/beacon migrate            # apply schema migrations without serving
 ./bin/beacon migrate --status   # list migrations and their state
+./bin/beacon validate --config examples/full   # check configuration files; needs no database
 ```
 
 The server answers on these endpoints:

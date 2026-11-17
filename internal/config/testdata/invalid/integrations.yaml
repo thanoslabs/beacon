@@ -1,0 +1,21 @@
+integrations:
+  - name: slack
+    type: slack
+  - name: chat
+    type: slack
+    slack: {bot_token: {env: GOOD_TOKEN}}
+    email: {host: smtp.example.com}
+  - name: discord
+    type: discord
+    discord: {public_key: abc, application_id: beacon}
+  - name: email
+    type: email
+    email: {port: 70000, from: "Beacon <beacon@example.com>", tls: yes, username: beacon}
+  - name: hook
+    type: webhook
+    webhook:
+      url: tickets.example.com
+      headers: {"Bad Header": x}
+  - name: pager
+    type: sms
+  - name: untyped

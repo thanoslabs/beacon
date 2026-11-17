@@ -115,13 +115,13 @@ func TestValidate(t *testing.T) {
 		change func(*Source)
 		want   string
 	}{
-		{name: "uppercase name", change: func(s *Source) { s.Name = "Prod" }, want: `source "Prod": name must be`},
-		{name: "empty name", change: func(s *Source) { s.Name = "" }, want: `source "": name must be`},
-		{name: "name with slash", change: func(s *Source) { s.Name = "a/b" }, want: "name must be"},
-		{name: "long name", change: func(s *Source) { s.Name = "a" + strings.Repeat("b", 63) }, want: "name must be"},
-		{name: "unknown type", change: func(s *Source) { s.Type = "alertmanager" }, want: `type "alertmanager" is not supported`},
-		{name: "missing token", change: func(s *Source) { s.Token = Secret{} }, want: "token must be at least 16 characters"},
-		{name: "short token", change: func(s *Source) { s.Token = NewSecret(SecretRef{}, "hunter2") }, want: "token must be at least 16 characters"},
+		{name: "uppercase name", change: func(s *Source) { s.Name = "Prod" }, want: `source "Prod": name: must be`},
+		{name: "empty name", change: func(s *Source) { s.Name = "" }, want: `source "": name: must be`},
+		{name: "name with slash", change: func(s *Source) { s.Name = "a/b" }, want: "name: must be"},
+		{name: "long name", change: func(s *Source) { s.Name = "a" + strings.Repeat("b", 63) }, want: "name: must be"},
+		{name: "unknown type", change: func(s *Source) { s.Type = "pager" }, want: `type: "pager" is not alertmanager, grafana or webhook`},
+		{name: "missing token", change: func(s *Source) { s.Token = Secret{} }, want: "token: is required"},
+		{name: "short token", change: func(s *Source) { s.Token = NewSecret(SecretRef{}, "hunter2") }, want: "token: must be at least 16 characters"},
 		{name: "bad mapping", change: func(s *Source) { s.Severity.Mapping = map[string]alert.Severity{"page": "urgent"} }, want: `severity.mapping.page: "urgent" is not`},
 		{name: "bad default", change: func(s *Source) { s.Severity.Default = "urgent" }, want: `severity.default: "urgent" is not`},
 	}
@@ -140,7 +140,7 @@ func TestValidate(t *testing.T) {
 	}
 
 	err := Config{Sources: []Source{testSource(), testSource()}}.Validate()
-	if err == nil || !strings.Contains(err.Error(), "name is used twice") {
+	if err == nil || !strings.Contains(err.Error(), "the name is used twice") {
 		t.Errorf("duplicate names: Validate = %v", err)
 	}
 }
@@ -176,14 +176,14 @@ func TestValidateIntegrations(t *testing.T) {
 		change func(*Config)
 		want   string
 	}{
-		{name: "bad name", change: func(c *Config) { c.Integrations[0].Name = "Slack!" }, want: `integration "Slack!": name must be`},
-		{name: "duplicate", change: func(c *Config) { c.Integrations = append(c.Integrations, testSlack()) }, want: `integration "slack": name is used twice`},
-		{name: "unknown type", change: func(c *Config) { c.Integrations[0].Type = "pager" }, want: `type "pager" is not supported`},
+		{name: "bad name", change: func(c *Config) { c.Integrations[0].Name = "Slack!" }, want: `integration "Slack!": name: must be`},
+		{name: "duplicate", change: func(c *Config) { c.Integrations = append(c.Integrations, testSlack()) }, want: `integration "slack": name: the name is used twice`},
+		{name: "unknown type", change: func(c *Config) { c.Integrations[0].Type = "pager" }, want: `type: "pager" is not slack, discord, email or webhook`},
 		{name: "missing settings", change: func(c *Config) { c.Integrations[0].Slack = nil }, want: "slack: the settings are missing"},
-		{name: "missing bot token", change: func(c *Config) { c.Integrations[0].Slack.BotToken = Secret{} }, want: "slack.bot_token is required"},
-		{name: "missing signing secret", change: func(c *Config) { c.Integrations[0].Slack.SigningSecret = Secret{} }, want: "slack.signing_secret is required"},
-		{name: "target without channel", change: func(c *Config) { c.Notify[0].Channel = "" }, want: "notify target 1: channel is required"},
-		{name: "target with unknown integration", change: func(c *Config) { c.Notify[0].Integration = "email" }, want: `notify target 1: integration "email" does not exist`},
+		{name: "missing bot token", change: func(c *Config) { c.Integrations[0].Slack.BotToken = Secret{} }, want: "slack.bot_token: is required"},
+		{name: "missing signing secret", change: func(c *Config) { c.Integrations[0].Slack.SigningSecret = Secret{} }, want: "slack.signing_secret: is required"},
+		{name: "target without channel", change: func(c *Config) { c.Notify[0].Channel = "" }, want: "notify target 1: channel: is required"},
+		{name: "target with unknown integration", change: func(c *Config) { c.Notify[0].Integration = "email" }, want: `notify target 1: integration: integration "email" does not exist`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -42,6 +42,7 @@ Tooling:
 ├── cmd/
 │   └── beacon/               # Entry point of the single binary
 ├── docs/                     # Project documentation (markdown source for the docs site)
+├── examples/                 # Example configurations; a test keeps them valid
 ├── internal/
 │   ├── alert/                # Alert model, state machine and timeline
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
@@ -85,6 +86,7 @@ Run `mise install` first so that the pinned versions are used.
 | Start Postgres | `docker compose up -d --wait postgres` |
 | Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' go test -race ./...` |
 | Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon serve` then `curl localhost:8080/readyz` |
+| Check configuration | `./bin/beacon validate --config examples/full` |
 | Apply migrations | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon migrate` |
 | End-to-end tests only | `BEACON_TEST_DATABASE_URL=... go test -race -count=1 ./internal/e2e/` |
 | Lint | `golangci-lint run ./...` |
@@ -128,7 +130,9 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 - Provisioned objects are typed in `internal/config`, following `docs/configuration-and-data-model.md`. `config.Load` reads them from one YAML file or a directory. `beacon serve` does not use it yet: `bootstrapSettings` in `internal/cli/bootstrap.go` still fills `config.Config` from a few temporary flags and environment variables. Do not add a second route into the features; extend `config.Config`.
 - A new field needs a `yaml` tag and a `json` tag (the JSON form is what is stored in Postgres), and a case in `TestLoadReportsEveryStructuralError`. Unknown fields are rejected, so a field cannot be added by accident. A type with its own `UnmarshalYAML` reports problems with `typeError`, which lets the loader report every problem in a file and name the field.
-- Loader errors are `config.Errors`: each names the file, line, object and field. Never put a value from the file into a message; it may be a secret typed into the wrong field.
+- `config.Read` loads and validates in one call, and is what commands use. Every check of what a value means goes in `internal/config/validate.go`, reports through `object.errorf` with the path of the field, and gets a case in `testdata/invalid` (regenerate `testdata/invalid.golden` with `go test ./internal/config -run TestReadReportsEveryProblem -update`, and read the difference). Validation must never need a database.
+- Errors are `config.Errors`: each names the file, line, object and field. Never put the value of a secret field into a message, and never repeat a value that the decoder rejected; it may be a secret typed into the wrong field.
+- `docs/configuration.md` is the user's reference for the files, and `examples/` holds configurations that a test keeps valid. Update both with the schema.
 - Hold every credential in a `config.Secret`. In a file it is a reference, `{env: NAME}` or `{file: /path}`, never the value. It prints, logs and encodes as that reference; call `Reveal` only at the point of use. A new secret field also goes into `resolveSecrets` in `internal/config/load.go`. Register a credential setting with `secretSetting`, and add it to `secretSettings` in `internal/cli/secrets_test.go`, which checks that no secret reaches help, errors or logs.
 - `provision.Ensure` gives a provisioned object its row, which runtime rows reference.
 
