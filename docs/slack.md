@@ -110,7 +110,7 @@ A message shows:
 - the `description` annotation, when present;
 - a **Runbook** link, when the `runbook_url` annotation holds an `http` or `https` address;
 - the labels;
-- the links the source sent with the alert, when they are `http` or `https` addresses: **Source** for the link to where the alert was generated, which Alertmanager sends;
+- the links the source sent with the alert, when they are `http` or `https` addresses: **Source** for where the alert was generated, which Alertmanager and Grafana send, and **Dashboard**, **Panel** and **Silence at the source**, which Grafana sends;
 - what last happened: since when it fires, or who acknowledged, snoozed or resolved it and when, shown in each reader's time zone.
 
 Text from an alert is escaped, so an alert cannot add links or mentions such as `@channel` to the message.

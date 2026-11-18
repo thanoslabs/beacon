@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager or over a generic webhook, stored and posted to a Slack channel, where people can acknowledge, snooze and resolve them. Routing, schedules, escalation and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored and posted to a Slack channel, where people can acknowledge, snooze and resolve them. Routing, schedules, escalation and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -43,6 +43,7 @@ Tooling:
 │   └── beacon/               # Entry point of the single binary
 ├── dev/
 │   ├── alertmanager/         # Configuration of the Alertmanager of the Compose profile "alertmanager"
+│   ├── grafana/              # Provisioning of the Grafana of the Compose profile "grafana", and a rule to try it with
 │   └── dex/                  # Configuration of the identity provider used in development and tests
 ├── docs/                     # Project documentation (markdown source for the docs site)
 ├── examples/                 # Example configurations; a test keeps them valid
@@ -54,7 +55,7 @@ Tooling:
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
 │   ├── config/               # Typed provisioned objects, the YAML loader and the Secret type
 │   ├── e2e/                  # End-to-end tests: the real binary, Postgres and a fake Slack
-│   ├── ingest/               # Receivers for Alertmanager and the generic webhook: POST /api/v1/ingest/<source>
+│   ├── ingest/               # Receivers for Alertmanager, Grafana and the generic webhook: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
 │   ├── notify/               # Notification queue, workers, retries and the Channel interface
 │   ├── postgres/             # Connection pool and migrator
@@ -104,8 +105,9 @@ Run `mise install` first so that the pinned versions are used.
 | Build the image | `docker build -t beacon:dev .` |
 | Run Beacon and Postgres | `docker compose up --build -d --wait`, then `curl localhost:8080/readyz` (set `BEACON_PORT` if 8080 is taken) |
 | Run them with an Alertmanager that sends to Beacon | `BEACON_CONFIG_DIR=./examples/alertmanager docker compose --profile alertmanager up --build -d --wait` (set `BEACON_ALERTMANAGER_PORT` if 9093 is taken) |
+| Run them with a Grafana that sends to Beacon | `BEACON_CONFIG_DIR=./examples/grafana docker compose --profile grafana up --build -d --wait` (set `BEACON_GRAFANA_PORT` if 3000 is taken), then create the rule as `docs/grafana.md` shows |
 
-CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres and Dex from `compose.yaml`, so CI and development use the same versions. The tests include the end-to-end tests in `internal/e2e`. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, the non-root user and a clean exit on termination. It then starts the Alertmanager of the Compose profile `alertmanager` and checks that an alert added to it fires and resolves in Beacon.
+CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres and Dex from `compose.yaml`, so CI and development use the same versions. The tests include the end-to-end tests in `internal/e2e`. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, the non-root user and a clean exit on termination. It then starts the Alertmanager and the Grafana of the Compose profiles `alertmanager` and `grafana` and checks that an alert of each fires and resolves in Beacon.
 
 ### Container image
 
@@ -168,10 +170,10 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 ### Ingestion
 
-- `internal/ingest` serves `POST /api/v1/ingest/<source>`. The type of the source decides which payload is read: `docs/webhook.md` is the contract for the generic JSON payload, `docs/alertmanager.md` for Alertmanager's. Every payload error must name the field at fault.
+- `internal/ingest` serves `POST /api/v1/ingest/<source>`. The type of the source decides which payload is read: `docs/webhook.md` is the contract for the generic JSON payload, `docs/alertmanager.md` for Alertmanager's and `docs/grafana.md` for Grafana's. Every payload error must name the field at fault.
 - A parser turns a payload into `delivery` values, one per alert, and `Handler.apply` hands each to the alert model. A new kind of source is a parser and a case in `ServeHTTP`; it must not reach the store by another path.
 - The generic webhook is Beacon's own contract and rejects fields it does not know. The payloads of other systems are theirs: read only the fields Beacon uses, ignore the rest, and check the shape against the sender's current documentation and source, not memory. Say in the PR which version was implemented.
-- `internal/ingest/testdata` holds notifications captured from the real senders. Capture new ones with the real sender when a payload changes, rather than editing them by hand. The Alertmanager under the Compose profile `alertmanager` is set up for that.
+- `internal/ingest/testdata` holds notifications captured from the real senders. Capture new ones with the real sender when a payload changes, rather than editing them by hand. The Alertmanager and the Grafana under the Compose profiles `alertmanager` and `grafana` are set up for that.
 - A sender repeats and retries. Whatever a receiver does must be safe to do twice, and a notification that could not be stored in full is answered with `500` so that it is sent again.
 - Receivers change alerts only through `alert.Store`.
 

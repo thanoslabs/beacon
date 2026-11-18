@@ -1,0 +1,19 @@
+# Beacon behind Grafana alerting: one source that reads the notifications of
+# a Grafana webhook contact point. docs/grafana.md is the guide, and
+# dev/grafana holds the Grafana side of it.
+#
+# Try the two together:
+#
+#   BEACON_CONFIG_DIR=./examples/grafana docker compose --profile grafana up --build
+#
+# The token is read from the environment; secrets are never written in files.
+
+sources:
+  - name: grafana
+    type: grafana
+    token: {env: BEACON_SOURCE_TOKEN}
+    # Grafana has no severity of its own. This reads it from the label
+    # "severity" of the alert rule; a rule without it gives a warning.
+    severity:
+      label: severity
+      default: warning

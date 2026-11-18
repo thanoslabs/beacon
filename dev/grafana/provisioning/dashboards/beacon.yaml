@@ -1,0 +1,10 @@
+# The folder and the dashboard that the demonstration alert rule in
+# ../../demo-rule.json belongs to.
+apiVersion: 1
+providers:
+  - name: beacon
+    folder: Beacon
+    folderUid: beacon
+    type: file
+    options:
+      path: /etc/grafana/dashboards
