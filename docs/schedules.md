@@ -23,7 +23,7 @@ schedules:
 ```
 
 > [!warning] What works today
-> Beacon runs the rotation, records the shifts, applies changes to a definition safely and takes overrides. Escalation policies do not page the person on call yet.
+> Beacon runs the rotation, records the shifts, applies changes to a definition safely, takes overrides and answers who is on call. Escalation policies do not page the person on call yet.
 
 ## The file is the intent, the database is the position
 
@@ -195,6 +195,89 @@ A list answers `{"overrides": [...]}`, by start, at most 1000.
 | `404` | No schedule has this name, or it has no override with this identifier |
 | `409` | The period overlaps another override of the schedule |
 | `413` | The body is larger than 16 KiB |
+
+## Who is on call
+
+The person on call for a schedule is the person of the override in force, and otherwise the person the rotation has. For a team it is the person on call for each schedule that the team owns.
+
+The answer is worked out when it is asked for: a handoff that fell due a second ago, or an override that has just begun, counts even if the worker has not recorded it yet. Escalation asks the same question in the same way.
+
+```
+GET /api/v1/schedules                  every schedule, with who is on call
+GET /api/v1/schedules/<name>           one schedule
+GET /api/v1/schedules/<name>/shifts    who is on call over a period, past or to come
+GET /api/v1/teams/<name>/on-call       who is on call for a team
+```
+
+All four need a signed-in user or an API token, with either role. They only read: a schedule is provisioned and cannot be changed through the API.
+
+```sh
+curl -H "Authorization: Bearer $BEACON_TOKEN" https://beacon.example.com/api/v1/schedules/platform-primary
+```
+
+```json
+{
+  "name": "platform-primary",
+  "team": "platform",
+  "rotation": {
+    "time_zone": "Europe/London",
+    "members": ["ada@example.com", "grace@example.com", "linus@example.com"],
+    "shift_length": "1w",
+    "handoff_time": "09:00",
+    "handoff_day": "monday"
+  },
+  "next_handoff": "2026-12-28T09:00:00Z",
+  "on_call": {
+    "schedule": "platform-primary",
+    "user": "grace@example.com",
+    "since": "2026-12-24T09:00:00Z",
+    "until": "2026-12-27T09:00:00Z",
+    "override": {"id": "0d6f3b52-7a0e-4a0f-9d0b-0a6e5f1f3c77", "user": "grace@example.com", "state": "active", "reason": "covering the holidays", "...": "..."},
+    "rotation_user": "ada@example.com"
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `rotation` | The rotation in force. It is the one in the files unless a change is pending. |
+| `pending` | Present when a changed definition has not taken over yet: its `rotation`, `takes_over_at`, and `stated`, which is `true` when the files state the time and `false` when it is the next handoff |
+| `next_handoff` | When the rotation next hands over |
+| `on_call.user` | The email address of the person on call, or `null` when nobody is: no rotation member is a user and no override is in force |
+| `on_call.since`, `on_call.until` | The shift or the override that puts them on call |
+| `on_call.override` | The override in force, when there is one |
+| `on_call.rotation_user` | Whom the rotation has on call. It differs from `user` during an override. |
+
+`GET /api/v1/schedules` answers `{"schedules": [...]}` with the same objects, by name. `GET /api/v1/teams/<name>/on-call` answers `{"team": "<name>", "on_call": [...]}` with one `on_call` object per schedule of the team, by schedule name; a team without schedules has an empty list.
+
+### Shifts over a period
+
+`GET /api/v1/schedules/<name>/shifts?from=<time>&to=<time>` answers who is on call from `from` to `to`, both in RFC 3339 form. Without `from` the period begins now, and without `to` it lasts four weeks. It may be at most a year long.
+
+```json
+{
+  "schedule": "platform-primary",
+  "from": "2026-12-21T00:00:00Z",
+  "to": "2026-12-29T00:00:00Z",
+  "shifts": [
+    {"user": "ada@example.com", "starts_at": "2026-12-14T09:00:00Z", "ends_at": "2026-12-21T09:00:00Z", "kind": "rotation", "planned": false},
+    {"user": "ada@example.com", "starts_at": "2026-12-21T09:00:00Z", "ends_at": "2026-12-24T09:00:00Z", "kind": "rotation", "planned": true},
+    {"user": "grace@example.com", "starts_at": "2026-12-24T09:00:00Z", "ends_at": "2026-12-27T09:00:00Z", "kind": "override", "override_id": "0d6f3b52-7a0e-4a0f-9d0b-0a6e5f1f3c77", "planned": true},
+    {"user": "ada@example.com", "starts_at": "2026-12-27T09:00:00Z", "ends_at": "2026-12-28T09:00:00Z", "kind": "rotation", "planned": true},
+    {"user": "linus@example.com", "starts_at": "2026-12-28T09:00:00Z", "ends_at": "2026-01-04T09:00:00Z", "kind": "rotation", "planned": true}
+  ]
+}
+```
+
+- **One person at any moment.** Where an override covers the rotation, only the override is listed, and the rotation shift around it is cut. Time in which nobody is on call is left out.
+- **Past time comes from the record**, future time from the same arithmetic that will carry it out, with the overrides that exist and a pending change of definition taken into account. `planned` is `false` for a shift that is over and on record, and `true` for one that has not ended: it is what happens if nothing but time changes.
+- A shift that reaches beyond the period is listed whole, with its real start and end.
+
+| Status | Meaning |
+|---|---|
+| `400` | `from` or `to` is not a time, or the period is empty, backwards or longer than a year. `field` names the parameter. |
+| `401` | No valid session or token |
+| `404` | No schedule, or no team, has this name |
 
 ## When a schedule leaves the configuration
 
