@@ -6,8 +6,7 @@ date: 2026-11-18
 
 A silence keeps Beacon quiet about the alerts that match some labels, for a period: during planned work, or while a known problem is being fixed. Silences are runtime state. People create and end them through the API; they are not part of the configuration files.
 
-> [!warning] Stored, not applied yet
-> Silences can be created, listed and expired. They do not yet change what Beacon notifies about; that arrives with the next change.
+A silenced alert is still received, stored and shown with its timeline. It is only kept out of notifications.
 
 ## What a silence is
 
@@ -33,6 +32,24 @@ A matcher is a label, an operator and a value:
 - At least one matcher must not match an empty value. Otherwise a silence such as `team != "dba"` would cover every alert that has no `team` label at all.
 
 A silence is `pending` before its start, `active` during its period, and `expired` afterwards.
+
+## What a silence does
+
+Beacon looks at silences when it is about to notify about an alert group ([[notifications#Groups]]), not when an alert arrives. An alert is silenced at that moment if a silence in force matches its labels. So a silence created now covers alerts that are already open, and a silence stops covering an alert the moment it ends.
+
+| Situation | What happens |
+|---|---|
+| An alert arrives under a silence | It is stored, `firing`, in its group. No notification is sent for it. When that leaves the group with nothing to tell, the group's timeline gets a `notification_silenced` event with the silence and its end. |
+| Some alerts of a group are silenced and some are not | The group is told about with the alerts that are not. The silenced ones are left out of the message. |
+| A silenced alert resolves | Nothing is sent. Nobody was told that it fired, so nobody is told that it stopped. |
+| The silence ends, or is expired, and the alert still fires | The alert is news now: its group is told about it, as a first notification or as an update. An expired silence takes effect at once, not at the end it used to have. |
+| An alert that people were already told about is silenced | Its message stays as it is and nothing more is sent because of it. If it resolves, the message is updated to say so, so that it does not show a problem that is over. |
+| Someone presses a button on a message | The message is updated, silence or not: that is an answer to a person, not a notification. |
+
+A silence does not change the state of an alert, and it does not stop anyone from acknowledging or resolving it. Only a silence in force counts: a `pending` or `expired` one does nothing.
+
+> [!note] Silences in Alertmanager and Grafana
+> Those apply before Beacon hears of an alert: an alert silenced there is never sent, and Beacon does not know it exists. A silence in Beacon keeps the alert on record.
 
 ## Who may do what
 

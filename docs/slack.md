@@ -122,6 +122,8 @@ For a group of several alerts it shows instead:
 - a list of the alerts, those that fire first, each with its `summary` and the labels that tell it apart. Ten are listed and the rest are counted;
 - what last happened, as above.
 
+Alerts that a silence keeps quiet are left out of the message for as long as the silence covers them; see [[silences]].
+
 Text from an alert is escaped, so an alert cannot add links or mentions such as `@channel` to the message.
 
 ## Buttons
