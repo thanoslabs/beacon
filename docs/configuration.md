@@ -7,7 +7,7 @@ date: 2026-11-17
 Beacon's provisioned objects are defined in YAML files that live in version control: sources, integrations, teams, schedules, escalation policies and routing. So is how people sign in. This page is the reference for those files. Why they look the way they do is in [[configuration-and-data-model]].
 
 > [!warning] Loaded and checked, not all acted on yet
-> Beacon reads and validates every kind described here. What it does with them is still growing: every type of source, grouping and Slack integrations work today, and the other integration types, schedules, escalation and routing rules arrive with later releases. Each section says what is in use.
+> Beacon reads and validates every kind described here. What it does with them is still growing: every type of source, routing, grouping and Slack integrations work today. The other integration types, schedules and escalation beyond the first step of a policy arrive with later releases. Each section says what is in use.
 
 ## Files
 
@@ -128,6 +128,9 @@ A schedule is one rotation.
 | `steps[].notify` | yes | Targets, at least one |
 | `steps[].timeout` | yes | How long to wait for an acknowledgement before the next step |
 
+> [!warning] Only the first step, and only channels
+> Escalation is not implemented yet. Of the policy that routing gives an alert group, Beacon acts on the `{channel, integration}` targets of the **first step**, once. Schedule, team and user targets, later steps, timeouts and `repeat` are read and checked and do nothing; `beacon serve` logs a warning for each policy that has any. A group whose policy has no channel in its first step notifies nobody, and its timeline says so.
+
 A target has exactly one of these forms:
 
 | Target | Who is notified |
@@ -152,13 +155,50 @@ The first three accept `via`, a list of integration names that narrows how the p
 
 | Rule field | Required | Meaning |
 |---|---|---|
-| `name` | yes | Identity |
+| `name` | yes | Identity; recorded on each alert the rule matched |
 | `match` | one or both | Map of label to exact value; all must match |
-| `match_re` | one or both | Map of label to regular expression ([RE2 syntax](https://github.com/google/re2/wiki/Syntax)), anchored at both ends; all must match |
+| `match_re` | one or both | Map of label to regular expression, which must match the whole value; all must match |
 | `team` | no | Team the alert is assigned to |
-| `service` | no | Service name the alert is assigned to |
-| `escalation_policy` | yes | Policy to run |
-| `group_by`, `group_wait`, `group_interval` | no | Override the routing settings for this rule |
+| `service` | no | Service the alert is assigned to, at most 100 characters. Without it, the alert's `service` label is used. |
+| `escalation_policy` | yes | Policy of the alert's group |
+| `group_by`, `group_wait`, `group_interval` | no | Replace the routing settings for the alerts of this rule |
+
+### How an alert is routed
+
+When an alert is opened, Beacon tries the rules in the order of the file. **The first rule whose matchers all match wins**; the rules after it are not tried. An alert that matches no rule gets `default`.
+
+```yaml
+routing:
+  default:
+    team: platform
+    escalation_policy: platform-default
+  rules:
+    - name: database
+      match:
+        team: dba
+      team: dba
+      service: postgres
+      escalation_policy: dba
+    - name: pages
+      match_re:
+        severity: critical|page
+      escalation_policy: platform-urgent
+      group_wait: 0s
+```
+
+- **Labels.** Rules read the alert's labels as Beacon stores them, which includes the labels its source adds. A label the alert does not have counts as empty: `match: {team: ""}` matches alerts without a `team` label.
+- **Regular expressions** use [RE2 syntax](https://github.com/google/re2/wiki/Syntax) and are anchored at both ends, as in Prometheus: `5..` matches `500` and not `1500`, and `critical|page` does not match `pager`. A pattern may be at most 1024 characters. RE2 matches in time linear in the length of the value whatever the pattern, so a rule cannot be written that stalls Beacon. `beacon validate` reports a pattern that does not compile, with the file, the rule and the label.
+- **A label is in `match` or in `match_re`**, not both.
+- **What the rule decides** is stored on the alert: the rule, the team and the service. The escalation policy is stored on the alert's group. They are decided once: a repeated delivery of an open alert does not route it again, and neither does a reload.
+- **Groups form within a rule.** Alerts that different rules matched never share a group, even when they agree on the `group_by` labels, because the rules may send them to different people.
+- **Unmatched alerts** are counted in the metric `beacon_routing_unmatched_alerts_total{source="..."}`, once when the alert is opened. A value that keeps rising for a source means alerts are arriving that no rule expects.
+- **Without a `routing` block** alerts are stored and grouped, and nobody is notified.
+
+A service is a name on an alert, for filtering and for metrics. It is not an object in the configuration.
+
+### Severity
+
+Severity is not part of routing: it is derived for each alert from a label, by the alert's source; see [Sources](#sources). The label is `severity` unless `severity.label` names another, `severity.mapping` maps its values to `critical`, `warning` and `info`, and `severity.default` applies to everything else. A rule can route on the label itself, as `pages` does above.
 
 ### Grouping
 

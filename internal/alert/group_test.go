@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -76,7 +77,7 @@ func (f *fixture) due(t *testing.T) []string {
 	t.Helper()
 	var got []string
 	for {
-		found, err := f.store.NotifyDueGroup(context.Background(), func(_ context.Context, _ pgx.Tx, g alert.Group) error {
+		found, err := f.store.NotifyDueGroup(context.Background(), func(_ context.Context, _ pgx.Tx, g alert.Group, _ []alert.Alert) (alert.Outcome, error) {
 			switch {
 			case g.NotifiedAt == nil:
 				got = append(got, "first")
@@ -85,7 +86,7 @@ func (f *fixture) due(t *testing.T) []string {
 			default:
 				got = append(got, "update")
 			}
-			return nil
+			return alert.Outcome{Notified: true}, nil
 		})
 		if err != nil {
 			t.Fatalf("NotifyDueGroup: %v", err)
@@ -287,11 +288,11 @@ func TestDueGroupsAreHandedOutOnce(t *testing.T) {
 	for range callers {
 		wg.Go(func() {
 			for {
-				found, err := f.store.NotifyDueGroup(context.Background(), func(_ context.Context, _ pgx.Tx, g alert.Group) error {
+				found, err := f.store.NotifyDueGroup(context.Background(), func(_ context.Context, _ pgx.Tx, g alert.Group, _ []alert.Alert) (alert.Outcome, error) {
 					mu.Lock()
 					defer mu.Unlock()
 					handed[g.ID]++
-					return nil
+					return alert.Outcome{Notified: true}, nil
 				})
 				if err != nil {
 					t.Errorf("NotifyDueGroup: %v", err)
@@ -325,16 +326,16 @@ func TestAGroupThatCannotBeNotifiedDoesNotHoldUpTheOthers(t *testing.T) {
 	f.clock.Advance(time.Minute)
 
 	var handed []string
-	notify := func(_ context.Context, tx pgx.Tx, g alert.Group) error {
+	notify := func(_ context.Context, tx pgx.Tx, g alert.Group, _ []alert.Alert) (alert.Outcome, error) {
 		handed = append(handed, g.ID)
 		if g.ID == bad.GroupID {
 			// What was written for the group goes when it fails.
 			if _, err := tx.Exec(ctx, `UPDATE alert_groups SET labels = '{"written": "by the failed attempt"}' WHERE id = $1`, g.ID); err != nil {
-				return err
+				return alert.Outcome{}, err
 			}
-			return errors.New("no luck")
+			return alert.Outcome{}, errors.New("no luck")
 		}
-		return nil
+		return alert.Outcome{Notified: true}, nil
 	}
 	if found, err := f.store.NotifyDueGroup(ctx, notify); !found || err == nil {
 		t.Fatalf("NotifyDueGroup = found %v, %v; want the failure", found, err)
@@ -428,5 +429,78 @@ func TestAcknowledgingAGroupAcknowledgesItsAlerts(t *testing.T) {
 	// Acknowledging again takes the new one and leaves the rest.
 	if changed, err := f.store.ApplyToGroup(ctx, a.GroupID, alert.ActionAcknowledge, bob, alert.Options{}); err != nil || len(changed) != 1 || changed[0].ID != d.ID {
 		t.Errorf("second acknowledgement changed %v, %v; want only the new alert", changed, err)
+	}
+}
+
+// TestOutcomeOfADueGroup: what the callback returns is what the group
+// remembers.
+func TestOutcomeOfADueGroup(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	a := f.mustFire(t, f.grouped("db1"))
+	b := f.mustFire(t, f.grouped("db2"))
+	f.clock.Advance(30 * time.Second)
+
+	// Not notified, and due again later: the group waits, and counts as
+	// never notified.
+	later := f.clock.Now().Add(time.Hour)
+	var silenceID string
+	if err := f.pool.QueryRow(ctx, `INSERT INTO users (email) VALUES ('ada@example.com') RETURNING id::text`).Scan(&silenceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.pool.QueryRow(ctx, `INSERT INTO silences (matchers, starts_at, ends_at, comment, created_by) VALUES ('[]', $1, $2, 'x', $3) RETURNING id::text`,
+		f.clock.Now(), later, silenceID).Scan(&silenceID); err != nil {
+		t.Fatal(err)
+	}
+	var handed []string
+	found, err := f.store.NotifyDueGroup(ctx, func(_ context.Context, _ pgx.Tx, _ alert.Group, alerts []alert.Alert) (alert.Outcome, error) {
+		for _, x := range alerts {
+			handed = append(handed, x.Fingerprint)
+		}
+		return alert.Outcome{RetryAt: later, SilenceID: silenceID}, nil
+	})
+	slices.Sort(handed)
+	if err != nil || !found || !reflect.DeepEqual(handed, []string{"db1", "db2"}) {
+		t.Fatalf("NotifyDueGroup = found %v, %v, with alerts %v", found, err, handed)
+	}
+	g := f.group(t, a.GroupID)
+	if g.NotifiedAt != nil || g.NotifyAt == nil || !g.NotifyAt.Equal(later) || g.SilenceID != silenceID || len(g.NotifiedAlerts) != 0 {
+		t.Fatalf("after a deferral: %+v", g)
+	}
+
+	// An alert that joins meanwhile is due after its own wait, not when the
+	// silence ends: it may be one the silence does not cover.
+	f.clock.Advance(time.Minute)
+	f.mustFire(t, f.grouped("db3"))
+	if g := f.group(t, a.GroupID); g.NotifyAt == nil || !g.NotifyAt.Equal(f.clock.Now().Add(30*time.Second)) {
+		t.Fatalf("after an alert joined a waiting group: due at %v, want in 30s", g.NotifyAt)
+	}
+
+	// The silence is ended early: the group is due at once.
+	_, err = f.pool.Exec(ctx, `UPDATE alert_groups SET notify_at = $2 WHERE id = $1`, a.GroupID, later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = pgx.BeginFunc(ctx, f.pool, func(tx pgx.Tx) error { return f.store.WakeGroupsWaitingFor(ctx, tx, silenceID) })
+	if g := f.group(t, a.GroupID); err != nil || g.NotifyAt == nil || !g.NotifyAt.Equal(f.clock.Now()) {
+		t.Fatalf("after the silence was ended: due at %v, %v; want now", g.NotifyAt, err)
+	}
+
+	// Notified: the time, what was shown, and no silence to wait for.
+	found, err = f.store.NotifyDueGroup(ctx, func(context.Context, pgx.Tx, alert.Group, []alert.Alert) (alert.Outcome, error) {
+		return alert.Outcome{Notified: true, Shown: map[string]string{a.ID: alert.ShownOpen}}, nil
+	})
+	g = f.group(t, a.GroupID)
+	if err != nil || !found || g.NotifiedAt == nil || g.NotifyAt != nil || g.SilenceID != "" || !reflect.DeepEqual(g.NotifiedAlerts, map[string]string{a.ID: alert.ShownOpen}) {
+		t.Fatalf("after a notification: %+v, found %v, %v", g, found, err)
+	}
+	// What is shown later is added to what was shown.
+	f.clock.Advance(time.Hour)
+	f.mustFire(t, f.grouped("db4"))
+	_, err = f.store.NotifyDueGroup(ctx, func(context.Context, pgx.Tx, alert.Group, []alert.Alert) (alert.Outcome, error) {
+		return alert.Outcome{Notified: true, Shown: map[string]string{a.ID: alert.ShownResolved, b.ID: alert.ShownOpen}}, nil
+	})
+	if g := f.group(t, a.GroupID); err != nil || !reflect.DeepEqual(g.NotifiedAlerts, map[string]string{a.ID: alert.ShownResolved, b.ID: alert.ShownOpen}) {
+		t.Errorf("shown = %v, %v", g.NotifiedAlerts, err)
 	}
 }

@@ -44,6 +44,8 @@ type fixture struct {
 	alerts        *alert.Store
 	sourceID      string
 	integrationID string
+	// policyID is the row of an escalation policy for groups to refer to.
+	policyID string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -52,6 +54,7 @@ func newFixture(t *testing.T) *fixture {
 	f := &fixture{t: t, pool: pool, alerts: alert.NewStore(pool)}
 	f.sourceID = provisiontest.Row(t, pool, provision.Sources, "test")
 	f.integrationID = provisiontest.Row(t, pool, provision.Integrations, "chat")
+	f.policyID = provisiontest.Row(t, pool, provision.EscalationPolicies, "default")
 	return f
 }
 
