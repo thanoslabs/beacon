@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"math/rand/v2"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,10 +60,13 @@ type Pipeline struct {
 	logger *slog.Logger
 	cfg    Config
 	now    func() time.Time
-	// channels and targets follow the configuration, and are replaced as a
+	// channels and policies follow the configuration, and are replaced as a
 	// whole when it is reloaded.
 	channels atomic.Pointer[map[string]Channel]
-	targets  atomic.Pointer[[]Target]
+	policies atomic.Pointer[map[string]Policy]
+	// silences is where the pipeline learns which alerts are silenced. It
+	// holds nil until SetSilences is called, and then nothing is.
+	silences atomic.Pointer[Silences]
 }
 
 // New returns a pipeline. Register its channels before calling Run.
@@ -89,7 +91,8 @@ func New(db *pgxpool.Pool, alerts *alert.Store, logger *slog.Logger, cfg Config)
 	}
 	p := &Pipeline{db: db, alerts: alerts, logger: logger, cfg: cfg, now: time.Now}
 	p.SetChannels(nil)
-	p.SetTargets(nil)
+	p.SetPolicies(nil)
+	p.SetSilences(nil)
 	return p
 }
 
@@ -116,13 +119,21 @@ func (p *Pipeline) SetChannels(channels map[string]Channel) {
 	p.channels.Store(&channels)
 }
 
-// SetTargets replaces the targets that the first notification of every group
-// goes to. It is safe while alerts change.
-//
-// Temporary: routing will give each group its escalation policy.
-func (p *Pipeline) SetTargets(targets []Target) {
-	targets = slices.Clone(targets)
-	p.targets.Store(&targets)
+// SetPolicies replaces the escalation policies, by the identifier of their
+// rows. It is safe while alerts change. A group whose policy is not among
+// them notifies nobody when its first notification falls due.
+func (p *Pipeline) SetPolicies(policies map[string]Policy) {
+	policies = maps.Clone(policies)
+	if policies == nil {
+		policies = map[string]Policy{}
+	}
+	p.policies.Store(&policies)
+}
+
+// SetSilences makes the pipeline keep quiet about the alerts that the
+// silences of s match. Call it before the pipeline is used.
+func (p *Pipeline) SetSilences(s Silences) {
+	p.silences.Store(&s)
 }
 
 // Enqueue queues n for delivery through tx, so the notification exists if and
@@ -244,6 +255,9 @@ func (p *Pipeline) send(ctx context.Context, n Notification) (ref string, err er
 	}
 	if m.Events, err = p.alerts.GroupTimeline(ctx, n.GroupID); err != nil {
 		return "", fmt.Errorf("load timeline: %w", err)
+	}
+	if m.Alerts, err = p.unsilenced(ctx, m.Group, m.Alerts); err != nil {
+		return "", fmt.Errorf("load silences: %w", err)
 	}
 	err = p.db.QueryRow(ctx, `SELECT external_ref FROM notifications
 		WHERE alert_group_id = $1 AND integration_id = $2 AND destination = $3 AND status = 'sent' AND external_ref <> ''

@@ -102,6 +102,13 @@ type Alert struct {
 	// Links are the web addresses the source sent with the alert, by name:
 	// see the Link constants.
 	Links map[string]string
+	// RoutingRuleID is the routing rule the alert matched when it was
+	// opened. It is empty when the default applied.
+	RoutingRuleID string
+	// TeamID is the team the alert was assigned to, or empty.
+	TeamID string
+	// Service is the service the alert was assigned to, or empty.
+	Service string
 
 	StartedAt      time.Time
 	LastReceivedAt time.Time

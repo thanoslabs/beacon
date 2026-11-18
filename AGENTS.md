@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, grouped and posted to a Slack channel, where people can acknowledge, snooze and resolve them. Routing rules, schedules, escalation and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules, escalation beyond a policy's first step and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -62,8 +62,10 @@ Tooling:
 │   │   ├── migrations/       # Versioned SQL migrations, embedded in the binary
 │   │   └── postgrestest/     # Test helper: one empty database per test
 │   ├── provision/            # Reconciles provisioned objects into Postgres
+│   ├── routing/              # Routing rules: which team, service, policy and grouping an alert gets
 │   │   └── provisiontest/    # Test helper: a provisioned row to reference
 │   ├── server/               # HTTP server, middleware, health, readiness and metrics endpoints
+│   ├── silence/              # Silences: matchers, the store and the API
 │   ├── slack/                # Slack channel: Web API client, message rendering and button presses
 │   │   └── slacktest/        # Fake Slack for tests
 │   └── version/              # Build version reporting
@@ -146,7 +148,6 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Provisioned objects are typed in `internal/config`, following `docs/configuration-and-data-model.md`. `config.Load` reads them from one YAML file or a directory, and `beacon serve` takes that path as `--config`. The files are the only route into the features: do not add a flag or an environment variable for something that is provisioned. Process settings, such as the listen address, stay flags.
 - Everything that follows the configuration is applied by the `provisioner` in `internal/cli/app.go`, at start and on every reload (`SIGHUP`). It reconciles first and swaps afterwards, so a failure leaves the previous configuration active. A feature that reads provisioned objects must take them through a setter that is safe while requests run (`ingest.Handler.SetSources`, `notify.Pipeline.SetChannels`), called from the provisioner; never capture configuration at start. `TestReload` in `internal/e2e` is the guard: extend it when a feature starts to follow the configuration.
 - A kind or type can be valid in the files before it does anything. `beacon serve` stores it and logs a warning that names it (see the provisioner); remove the warning when the behaviour lands.
-- `Config.EveryAlertTargets` is temporary, like `Pipeline.SetTargets`: until routing and escalation exist, the first notification of every alert group goes to the channel targets in the first step of the default escalation policy.
 - A new field needs a `yaml` tag and a `json` tag (the JSON form is what is stored in Postgres), and a case in `TestLoadReportsEveryStructuralError`. Unknown fields are rejected, so a field cannot be added by accident. A type with its own `UnmarshalYAML` reports problems with `typeError`, which lets the loader report every problem in a file and name the field.
 - `config.Read` loads and validates in one call, and is what commands use. Every check of what a value means goes in `internal/config/validate.go`, reports through `object.errorf` with the path of the field, and gets a case in `testdata/invalid` (regenerate `testdata/invalid.golden` with `go test ./internal/config -run TestReadReportsEveryProblem -update`, and read the difference). Validation must never need a database.
 - Errors are `config.Errors`: each names the file, line, object and field. Never put the value of a secret field into a message, and never repeat a value that the decoder rejected; it may be a secret typed into the wrong field.
@@ -179,6 +180,21 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - A sender repeats and retries. Whatever a receiver does must be safe to do twice, and a notification that could not be stored in full is answered with `500` so that it is sent again.
 - Receivers change alerts only through `alert.Store`.
 
+### Routing
+
+- `internal/routing` turns the routing block into a `Router`. The ingest handler asks it for the `Route` of every delivery and hands the result to `alert.Store.Fire`, which keeps it only when the delivery opens an alert: an open alert is never routed again. The provisioner builds the router before it swaps anything, so a router that cannot be built leaves the old configuration active.
+- Patterns from users, in routing rules and in silences, are compiled with `config.CompileMatcher` and nothing else: it anchors the pattern at both ends, as Prometheus does, and bounds its length. Go's `regexp` is RE2, which matches in linear time; do not replace it with an engine that backtracks.
+- The group key has the routing rule as its scope (`alert.GroupKey`), so alerts of different rules never share a group.
+- Metric labels stay bounded: `beacon_routing_unmatched_alerts_total` has the source and nothing else. A rule name, an alert name, a fingerprint or an identifier is never a label.
+
+### Silences
+
+- `internal/silence` owns the `silences` table and serves `/api/v1/silences`; `docs/silences.md` is the contract. A silence is runtime state: it is created through the API, never from the files.
+- Everything in a silence comes from a request, so everything is bounded (`MaxMatchers`, `MaxValueLength` and the rest in `silence.go`), and a pattern is compiled with `config.CompileMatcher` like one in a routing rule. Check a silence in `compile` and `Store.Create`, not in the handler, so that no other way of creating one can skip the checks.
+- The author is the principal of the request, a user or a token, taken from `access.FromContext`. Never read it from the body.
+- A silence acts where a group's notification is decided, `Pipeline.notifyGroup`, and nowhere else: nothing is written on an alert when a silence matches it, so a silence that is created, ends or is expired needs no pass over the alerts. `alert_groups.notified_alerts` remembers what each notification showed, which is what makes "news" and "hidden" decidable, and `alert_groups.silence_id` names the silence a group waits for, which is what `Store.WakeGroupsWaitingFor` uses when `silence.Store.Expire` ends one early. The escalation engine must ask the same question (`Pipeline.quiet`) before each step it runs.
+- The routes follow the tokens' conventions: a list is `{"silences": [...]}`, a creation answers `201` with the object, `DELETE` answers `204`, an error is `{"error", "field"}`, and an identifier that is not a UUID is `404` like one that does not exist.
+
 ### Notifications
 
 - `internal/notify` owns the `notifications` and `notification_attempts` tables. `docs/notifications.md` describes the delivery rules; keep it true.
@@ -186,13 +202,14 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - A new notification service is a type that implements `notify.Channel`, registered with `Pipeline.Register`. The pipeline must not learn anything specific to a service. A channel returns `notify.Permanent` for failures that retrying cannot fix and `notify.RetryAfter` when the service says how long to wait; anything else is retried with backoff. Channel errors are stored and shown on the timeline, so they must never contain a credential.
 - Delivery is at least once. A channel should make a repeated `Send` harmless where the service allows it.
 - Notifications are about groups, and `internal/notify/groups.go` decides when one is queued: what sources report is batched by the group's timer (`Pipeline.NotifyDueGroups`, run every second by `RunGroups`), and what people do is told at once by the observer `Pipeline.Observe`. Updates go to every destination that was told about the group before, and a destination with a notification still waiting gets no second one, because a message is built when it is delivered.
-- `Pipeline.startEscalation` queues the first notification of a group. It is temporary in what it notifies: the targets set with `SetTargets`, until routing gives a group its policy.
+- `Pipeline.startEscalation` is the seam for the escalation engine (issue 34) and says so in its comment. It runs once per group, when the group's wait is over, and today it is all of escalation: one notification to each channel target in the first step of the group's policy. People targets, later steps, timeouts and repeats do nothing, and the provisioner logs a warning for each policy that has any. The engine should replace its body, not add a second path to `Enqueue`.
 - Tests of timing move the clock (`SetClock` on the store and the pipeline) and call `NotifyDueGroups` themselves. Do not sleep and do not wait for the ticker.
 
 ### Slack
 
 - `internal/slack` is the Slack channel. It calls two Web API methods, `chat.postMessage` and `chat.update`, with the standard library; there is no Slack SDK.
 - Beacon has no Slack credentials for testing. Test against `slacktest`, the fake Slack, which checks requests against the documented shapes and limits. When you change what is sent, read Slack's current documentation rather than trusting memory, teach the fake the same rule, and say in the PR that real delivery is unverified.
+- A message is about an alert group. `render` shows a group of one alert as that alert, and a larger group as what its alerts share and a bounded list of them; the state shown and the buttons offered are derived from all the alerts.
 - Everything that comes from an alert passes through `escape` before it goes into message text, and each part is clipped so a message stays within Block Kit's limits.
 - Button presses arrive at `POST /api/v1/integrations/<name>/interactions`. The handler verifies the Slack signature over the raw body before it parses anything; keep it that way. It answers within Slack's three seconds, and changes alerts only through `alert.Store.ApplyToGroup` with `alert.ChatUser`, so the timeline records the Slack user in the form that identity linking will use.
 - The buttons a message offers are derived from the state machine (`alert.Next`), so they cannot drift from what is allowed.

@@ -56,9 +56,17 @@ Every alert belongs to an alert group: the alerts that share the values of the `
 
 A group is `open` while any of its alerts is not resolved, and `resolved` once all are. A resolved group never opens again: the next alert with the same labels opens a new group. Notifications are sent for the group ([[notifications#Groups]]), and an action taken on a group's message applies to each of its alerts that allows it.
 
+## Silences
+
+A silence keeps notifications about matching alerts back for a period; see [[silences]]. It is not a state: a silenced alert is `firing`, or whatever it would be otherwise, and can be acknowledged, snoozed and resolved like any alert.
+
 ## Severity
 
-Every alert has one of three fixed levels: `critical`, `warning` or `info`.
+Every alert has one of three fixed levels: `critical`, `warning` or `info`. The level is read from a label of the alert, as the alert's source says; see [[configuration#Severity]].
+
+## Routing
+
+When an alert is opened, the routing rules decide its team, its service and the escalation policy of its group; see [[configuration#How an alert is routed]]. The alert keeps what was decided for as long as it is open.
 
 ## Timeline
 

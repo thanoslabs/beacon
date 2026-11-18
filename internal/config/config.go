@@ -7,6 +7,7 @@
 package config
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -302,6 +303,22 @@ func (r *Routing) Grouping() Grouping {
 	return g
 }
 
+// GroupingFor returns the grouping of the alerts that rule matches: the
+// routing block's, with what the rule sets in its place.
+func (r *Routing) GroupingFor(rule RoutingRule) Grouping {
+	g := r.Grouping()
+	if rule.GroupBy != nil {
+		g.By = rule.GroupBy
+	}
+	if rule.GroupWait != nil {
+		g.Wait = time.Duration(*rule.GroupWait)
+	}
+	if rule.GroupInterval != nil {
+		g.Interval = time.Duration(*rule.GroupInterval)
+	}
+	return g
+}
+
 // RouteDefault applies to alerts that match no rule.
 type RouteDefault struct {
 	Team             string `yaml:"team" json:"team,omitempty"`
@@ -419,35 +436,24 @@ func (o OIDC) RequestedScopes() []string {
 	return DefaultScopes
 }
 
-// ChannelTarget is a shared channel reached through an integration.
-type ChannelTarget struct {
-	Channel     string
-	Integration string
-}
+// MaxMatcherLength bounds a regular expression that matches label values,
+// in a routing rule or in a silence. Go's regular expressions run in time
+// linear in their input whatever the pattern, so the bound is on the cost of
+// compiling and keeping a pattern, not on a pathological one.
+const MaxMatcherLength = 1024
 
-// EveryAlertTargets returns the shared channels that are told about every
-// alert: the channel targets in the first step of the escalation policy that
-// routing names as its default.
-//
-// Temporary: it stands in for routing and escalation, which will decide who
-// is notified about what, and when. It reads only what the files already
-// say, so a configuration written for it keeps its meaning when they arrive.
-func (c Config) EveryAlertTargets() []ChannelTarget {
-	if c.Routing == nil {
-		return nil
+// CompileMatcher compiles a regular expression that matches label values.
+// It is anchored at both ends, as in Prometheus: "5.." matches "500" and not
+// "1500". The syntax is RE2's, which Go's regexp package implements.
+func CompileMatcher(expr string) (*regexp.Regexp, error) {
+	if len(expr) > MaxMatcherLength {
+		return nil, fmt.Errorf("is longer than %d characters", MaxMatcherLength)
 	}
-	var targets []ChannelTarget
-	for _, p := range c.EscalationPolicies {
-		if p.Name != c.Routing.Default.EscalationPolicy || len(p.Steps) == 0 {
-			continue
-		}
-		for _, t := range p.Steps[0].Notify {
-			if t.Channel != "" {
-				targets = append(targets, ChannelTarget{Channel: t.Channel, Integration: t.Integration})
-			}
-		}
+	re, err := regexp.Compile("^(?:" + expr + ")$")
+	if err != nil {
+		return nil, fmt.Errorf("is not a regular expression: %s", strings.TrimPrefix(err.Error(), "error parsing regexp: "))
 	}
-	return targets
+	return re, nil
 }
 
 var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
