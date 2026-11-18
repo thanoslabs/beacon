@@ -165,8 +165,8 @@ func TestServeWarnsAboutWhatIsNotImplemented(t *testing.T) {
 		"BEACON_DATABASE_URL": postgrestest.NewURL(t),
 		"BEACON_SOURCE_TOKEN": token,
 		"BEACON_CONFIG": writeConfig(t, `sources:
-  - name: am
-    type: alertmanager
+  - name: grafana
+    type: grafana
     token: {env: BEACON_SOURCE_TOKEN}
 integrations:
   - name: tickets
@@ -181,8 +181,8 @@ routing:
   default: {escalation_policy: default}
 `),
 	})
-	if code, _ := postJSON(t, srv.baseURL+"/api/v1/ingest/am", token, `{"labels": {"alertname": "A"}}`); code != http.StatusUnauthorized {
-		t.Errorf("POST to an alertmanager source = %d, want 401", code)
+	if code, _ := postJSON(t, srv.baseURL+"/api/v1/ingest/grafana", token, `{"labels": {"alertname": "A"}}`); code != http.StatusUnauthorized {
+		t.Errorf("POST to a grafana source = %d, want 401", code)
 	}
 	logs := srv.logs.String()
 	for _, want := range []string{"this type of source does not receive alerts yet", "this type of integration does not deliver yet", "alerts are stored but nobody is notified"} {

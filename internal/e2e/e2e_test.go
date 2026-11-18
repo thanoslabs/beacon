@@ -251,6 +251,13 @@ func (b *beacon) webhook(payload string) (int, map[string]string) {
 // webhookTo is webhook for another source with the same token.
 func (b *beacon) webhookTo(source, payload string) (int, map[string]string) {
 	b.t.Helper()
+	var out map[string]string
+	return b.deliver(source, payload, &out), out
+}
+
+// deliver sends a payload to a source and decodes the response into out.
+func (b *beacon) deliver(source, payload string, out any) int {
+	b.t.Helper()
 	req, err := http.NewRequest(http.MethodPost, b.url+"/api/v1/ingest/"+source, strings.NewReader(payload))
 	if err != nil {
 		b.t.Fatalf("new request: %v", err)
@@ -263,11 +270,10 @@ func (b *beacon) webhookTo(source, payload string) (int, map[string]string) {
 	}
 	defer resp.Body.Close() //nolint:errcheck // test cleanup
 	raw, _ := io.ReadAll(resp.Body)
-	var out map[string]string
-	if err := json.Unmarshal(raw, &out); err != nil {
-		b.t.Fatalf("webhook answered %d %q, not a JSON object", resp.StatusCode, raw)
+	if err := json.Unmarshal(raw, out); err != nil {
+		b.t.Fatalf("webhook answered %d %q, not the expected JSON", resp.StatusCode, raw)
 	}
-	return resp.StatusCode, out
+	return resp.StatusCode
 }
 
 // click presses a button on a Slack message as a Slack user.
@@ -506,6 +512,91 @@ func TestSourceResolvesAnAlertNobodyTook(t *testing.T) {
 			t.Fatalf("Slack has %d messages, want a second one for the new alert", len(b.slack.Messages()))
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitForMessages waits until Slack has n messages that all satisfy cond, and
+// returns them.
+func (b *beacon) waitForMessages(what string, n int, cond func(slacktest.Message) bool) []slacktest.Message {
+	b.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		msgs := b.slack.Messages()
+		ok := len(msgs) == n
+		for _, m := range msgs {
+			ok = ok && cond(m)
+		}
+		if ok {
+			return msgs
+		}
+		if time.Now().After(deadline) {
+			b.t.Fatalf("timed out waiting for %s; Slack has: %+v", what, msgs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// captured reads a payload that a real sender produced, from the fixtures of
+// the ingest package.
+func captured(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "ingest", "testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// TestAlertmanagerSource delivers what a real Alertmanager sent about a group
+// of two alerts: firing, repeated, one resolved, both resolved.
+func TestAlertmanagerSource(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, strings.Replace(configuration, "type: webhook", "type: alertmanager", 1)))
+	b.waitUntilServing()
+	deliver := func(fixture string) map[string]int {
+		t.Helper()
+		var res map[string]any
+		if code := b.deliver("e2e", captured(t, fixture), &res); code != http.StatusOK || res["result"] != "accepted" {
+			t.Fatalf("%s = %d %v, want 200 accepted", fixture, code, res)
+		}
+		counts := map[string]int{}
+		for k, v := range res {
+			if n, ok := v.(float64); ok && n != 0 {
+				counts[k] = int(n)
+			}
+		}
+		return counts
+	}
+
+	if got := deliver("alertmanager/firing.json"); got["received"] != 2 || got["created"] != 2 {
+		t.Fatalf("firing = %v, want two alerts created", got)
+	}
+	msgs := b.waitForMessages("both alerts in Slack", 2, contains("*Firing*", "|:mag: Source", "`team=platform`"))
+	if all := msgs[0].JSON() + msgs[1].JSON(); !strings.Contains(all, "Disk is full on db1") || !strings.Contains(all, "Disk is filling up on db2") ||
+		!strings.Contains(all, `http://prometheus.example.com:9090/graph?g0.expr=node_filesystem_avail_bytes+%3C+1e9`) {
+		t.Errorf("the messages do not show both alerts with their links:\n%s", all)
+	}
+
+	// The repeat that Alertmanager sends every repeat_interval changes
+	// nothing and tells nobody.
+	if got := deliver("alertmanager/firing.json"); got["updated"] != 2 || got["created"] != 0 {
+		t.Fatalf("repeated firing = %v, want two alerts updated", got)
+	}
+	if got := deliver("alertmanager/some-resolved.json"); got["updated"] != 1 || got["resolved"] != 1 {
+		t.Fatalf("one resolved = %v", got)
+	}
+	if got := deliver("alertmanager/resolved.json"); got["resolved"] != 1 {
+		t.Fatalf("all resolved = %v", got)
+	}
+	b.waitForMessages("both resolutions in Slack", 2, contains("*Resolved*", "Resolved by the source"))
+
+	var alerts, notifications int
+	err := b.db.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM alerts WHERE status = 'resolved'), (SELECT count(*) FROM notifications)`).Scan(&alerts, &notifications)
+	if err != nil || alerts != 2 || notifications != 4 {
+		t.Errorf("%d resolved alerts and %d notifications, %v; want 2 and 4: one firing and one resolved message each, and nothing for the repeat", alerts, notifications, err)
+	}
+	if strings.Contains(b.output(), sourceToken) {
+		t.Errorf("the logs contain the source token")
 	}
 }
 

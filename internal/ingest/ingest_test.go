@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/config"
 	"github.com/thanoslabs/beacon/internal/ingest"
@@ -22,9 +24,11 @@ import (
 const (
 	prodToken    = "prod-token-0123456789abcdef"
 	stagingToken = "staging-token-0123456789abcdef"
+	amToken      = "alertmanager-token-0123456789abcdef"
 )
 
 type fixture struct {
+	pool  *pgxpool.Pool
 	store *alert.Store
 	mux   *http.ServeMux
 	logs  *bytes.Buffer
@@ -34,13 +38,15 @@ type fixture struct {
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	pool := postgrestest.NewMigrated(t)
-	f := &fixture{store: alert.NewStore(pool), mux: http.NewServeMux(), logs: &bytes.Buffer{}, ids: map[string]string{}}
+	f := &fixture{pool: pool, store: alert.NewStore(pool), mux: http.NewServeMux(), logs: &bytes.Buffer{}, ids: map[string]string{}}
 
 	sources := []config.Source{
 		{Name: "prod", Type: config.SourceTypeWebhook, Token: config.NewSecret(config.SecretRef{}, prodToken),
 			Labels: map[string]string{"environment": "production", "team": "from-source"}},
 		{Name: "staging", Type: config.SourceTypeWebhook, Token: config.NewSecret(config.SecretRef{}, stagingToken),
 			Severity: config.SeverityMapping{Label: "priority", Mapping: map[string]alert.Severity{"page": alert.SeverityCritical}, Default: alert.SeverityInfo}},
+		{Name: "am", Type: config.SourceTypeAlertmanager, Token: config.NewSecret(config.SecretRef{}, amToken),
+			Labels: map[string]string{"environment": "production"}},
 	}
 	rows, err := provision.Reconcile(context.Background(), pool, config.Config{Sources: sources})
 	if err != nil {
@@ -62,20 +68,27 @@ type result struct {
 
 func (f *fixture) post(t *testing.T, source, token, body string) result {
 	t.Helper()
+	res := result{}
+	res.code = f.postInto(t, source, token, body, &res.body)
+	return res
+}
+
+// postInto sends body to a source and decodes the response into out.
+func (f *fixture) postInto(t *testing.T, source, token, body string, out any) int {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest/"+source, strings.NewReader(body))
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	rec := httptest.NewRecorder()
 	f.mux.ServeHTTP(rec, req)
-	res := result{code: rec.Code}
-	if err := json.Unmarshal(rec.Body.Bytes(), &res.body); err != nil {
-		t.Fatalf("response %d is not a JSON object: %q", rec.Code, rec.Body.String())
+	if err := json.Unmarshal(rec.Body.Bytes(), out); err != nil {
+		t.Fatalf("response %d is not the expected JSON: %q", rec.Code, rec.Body.String())
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q", ct)
 	}
-	return res
+	return rec.Code
 }
 
 const diskFull = `{

@@ -269,7 +269,7 @@ func (p *provisioner) reloadFrom(ctx context.Context) error {
 func (p *provisioner) applySources(ctx context.Context, cfg config.Config, ids map[string]string) {
 	sources := make([]ingest.Source, 0, len(cfg.Sources))
 	for _, s := range cfg.Sources {
-		if s.Type != config.SourceTypeWebhook {
+		if s.Type == config.SourceTypeGrafana {
 			p.logger.WarnContext(ctx, "this type of source does not receive alerts yet, so its endpoint refuses every request",
 				slog.String("source", s.Name), slog.String("type", s.Type))
 			continue
@@ -280,7 +280,7 @@ func (p *provisioner) applySources(ctx context.Context, cfg config.Config, ids m
 			slog.String("path", strings.Replace(ingest.Path, "{source}", s.Name, 1)))
 	}
 	if len(sources) == 0 {
-		p.logger.WarnContext(ctx, "no source is configured, so every request to the ingest endpoint is refused; add a source of type webhook to the configuration")
+		p.logger.WarnContext(ctx, "no source is configured, so every request to the ingest endpoint is refused; add a source to the configuration")
 	}
 	p.ingest.SetSources(sources)
 }

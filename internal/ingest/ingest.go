@@ -1,5 +1,7 @@
 // Package ingest receives alerts from sources over HTTP and hands them to the
-// alert model. docs/webhook.md describes the endpoint and the payload.
+// alert model. A source's type decides which payload its endpoint reads:
+// docs/webhook.md describes the generic one and docs/alertmanager.md
+// Alertmanager's.
 package ingest
 
 import (
@@ -26,8 +28,12 @@ import (
 // the source.
 const Path = "/api/v1/ingest/{source}"
 
-// maxBodyBytes bounds a request body.
-const maxBodyBytes = 1 << 20
+// maxBodyBytes bounds the body of a request to a webhook source, which holds
+// one alert. maxGroupBodyBytes bounds a notification about a group of alerts.
+const (
+	maxBodyBytes      = 1 << 20
+	maxGroupBodyBytes = 4 << 20
+)
 
 // Source is a configured source and the identifier of its row in Postgres.
 type Source struct {
@@ -72,7 +78,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("POST "+Path, h)
 }
 
-// response is the body of a successful request.
+// response is the body of a successful request to a webhook source.
 type response struct {
 	// Result is created, updated, resolved or not_found.
 	Result  string `json:"result"`
@@ -80,11 +86,46 @@ type response struct {
 	Status  string `json:"status,omitempty"`
 }
 
+// The values of response.Result.
+const (
+	resultCreated  = "created"
+	resultUpdated  = "updated"
+	resultResolved = "resolved"
+	resultNotFound = "not_found"
+)
+
+// groupResponse is the body of a successful request to a source that sends
+// several alerts at once: how many it held and what became of them.
+type groupResponse struct {
+	// Result is always accepted.
+	Result   string `json:"result"`
+	Received int    `json:"received"`
+	Created  int    `json:"created"`
+	Updated  int    `json:"updated"`
+	Resolved int    `json:"resolved"`
+	NotFound int    `json:"not_found"`
+}
+
 // errorResponse is the body of a failed request.
 type errorResponse struct {
 	Error string `json:"error"`
 	// Field names the part of the payload at fault, when there is one.
 	Field string `json:"field,omitempty"`
+}
+
+// delivery is one alert as a source reports it, whatever payload it came in.
+type delivery struct {
+	// Resolved is true when the source says the alert is over.
+	Resolved bool
+	// Fingerprint is the identity the source gave the alert. When it is
+	// empty the identity is computed from the labels.
+	Fingerprint string
+	Labels      map[string]string
+	Annotations map[string]string
+	Links       map[string]string
+	// StartsAt and EndsAt are zero when the source did not say.
+	StartsAt time.Time
+	EndsAt   time.Time
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -95,33 +136,105 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	limit := int64(maxBodyBytes)
+	if src.Type != config.SourceTypeWebhook {
+		limit = maxGroupBodyBytes
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			h.write(w, r, http.StatusRequestEntityTooLarge, errorResponse{Error: fmt.Sprintf("the body is larger than %d bytes", maxBodyBytes)})
+			h.write(w, r, http.StatusRequestEntityTooLarge, errorResponse{Error: fmt.Sprintf("the body is larger than %d bytes", limit)})
 			return
 		}
 		h.write(w, r, http.StatusBadRequest, errorResponse{Error: "could not read the body"})
 		return
 	}
-	p, err := parsePayload(body)
+
+	switch src.Type {
+	case config.SourceTypeAlertmanager:
+		g, err := parseAlertmanager(body)
+		h.serveGroup(w, r, src, g, err, AlertmanagerVersion)
+	default:
+		p, err := parsePayload(body)
+		h.serveOne(w, r, src, p, err)
+	}
+}
+
+// serveOne handles the generic webhook: one alert per request.
+func (h *Handler) serveOne(w http.ResponseWriter, r *http.Request, src Source, p payload, err error) {
 	if err != nil {
-		var fe *fieldError
-		errors.As(err, &fe)
-		h.write(w, r, http.StatusBadRequest, errorResponse{Error: fe.msg, Field: fe.field})
+		h.invalid(w, r, err)
 		return
 	}
-
-	res, status, err := h.apply(r.Context(), src, p)
+	d := delivery{
+		Resolved: p.Status == statusResolved, Fingerprint: p.Fingerprint,
+		Labels: p.Labels, Annotations: p.Annotations, StartsAt: p.StartsAt, EndsAt: p.EndsAt,
+	}
+	res, err := h.apply(r.Context(), src, d)
 	if err != nil {
-		h.logger.ErrorContext(r.Context(), "store alert", slog.String("source", src.Name), slog.Any("error", err))
-		h.write(w, r, http.StatusInternalServerError, errorResponse{Error: "internal error"})
+		h.failed(w, r, src, err)
 		return
 	}
 	h.logger.InfoContext(r.Context(), "alert received",
 		slog.String("source", src.Name), slog.String("result", res.Result), slog.String("alert_id", res.AlertID))
+	status := http.StatusOK
+	if res.Result == resultCreated {
+		status = http.StatusCreated
+	}
 	h.write(w, r, status, res)
+}
+
+// serveGroup handles a notification about a group of alerts. Each alert is
+// stored on its own. If one cannot be stored the request fails as a whole
+// and the sender delivers it again, which is safe: the alerts that were
+// stored are recognised by their fingerprints.
+func (h *Handler) serveGroup(w http.ResponseWriter, r *http.Request, src Source, g alertGroup, err error, wantVersion string) {
+	if err != nil {
+		h.invalid(w, r, err)
+		return
+	}
+	ctx := r.Context()
+	if g.Version != wantVersion {
+		h.logger.WarnContext(ctx, "the payload has another version than the one Beacon reads; it is read all the same",
+			slog.String("source", src.Name), slog.String("type", src.Type), slog.String("version", g.Version), slog.String("expected", wantVersion))
+	}
+	if g.Truncated > 0 {
+		h.logger.WarnContext(ctx, "the sender left alerts out of the notification, so Beacon does not know about them; raise or remove its limit on alerts per notification",
+			slog.String("source", src.Name), slog.Int("truncated", g.Truncated))
+	}
+	out := groupResponse{Result: "accepted", Received: len(g.Deliveries)}
+	for _, d := range g.Deliveries {
+		res, err := h.apply(ctx, src, d)
+		if err != nil {
+			h.failed(w, r, src, err)
+			return
+		}
+		switch res.Result {
+		case resultCreated:
+			out.Created++
+		case resultUpdated:
+			out.Updated++
+		case resultResolved:
+			out.Resolved++
+		case resultNotFound:
+			out.NotFound++
+		}
+	}
+	h.logger.InfoContext(ctx, "alerts received", slog.String("source", src.Name), slog.Int("received", out.Received),
+		slog.Int("created", out.Created), slog.Int("updated", out.Updated), slog.Int("resolved", out.Resolved), slog.Int("not_found", out.NotFound))
+	h.write(w, r, http.StatusOK, out)
+}
+
+func (h *Handler) invalid(w http.ResponseWriter, r *http.Request, err error) {
+	var fe *fieldError
+	errors.As(err, &fe)
+	h.write(w, r, http.StatusBadRequest, errorResponse{Error: fe.msg, Field: fe.field})
+}
+
+func (h *Handler) failed(w http.ResponseWriter, r *http.Request, src Source, err error) {
+	h.logger.ErrorContext(r.Context(), "store alert", slog.String("source", src.Name), slog.Any("error", err))
+	h.write(w, r, http.StatusInternalServerError, errorResponse{Error: "internal error"})
 }
 
 // authenticate returns the source named in the path when the request carries
@@ -137,29 +250,29 @@ func (h *Handler) authenticate(r *http.Request) (Source, bool) {
 	return src, known && src.Token.IsSet() && strings.EqualFold(scheme, "Bearer") && match
 }
 
-// apply hands the payload to the alert model.
-func (h *Handler) apply(ctx context.Context, src Source, p payload) (response, int, error) {
-	fingerprint := p.Fingerprint
+// apply hands one alert to the alert model.
+func (h *Handler) apply(ctx context.Context, src Source, d delivery) (response, error) {
+	fingerprint := d.Fingerprint
 	if fingerprint == "" {
-		fingerprint = Fingerprint(p.Labels)
+		fingerprint = Fingerprint(d.Labels)
 	}
 
-	if p.Status == statusResolved {
-		a, found, err := h.alerts.ResolveFromSource(ctx, src.ID, fingerprint, p.EndsAt)
+	if d.Resolved {
+		a, found, err := h.alerts.ResolveFromSource(ctx, src.ID, fingerprint, d.EndsAt)
 		if err != nil {
-			return response{}, 0, err
+			return response{}, err
 		}
 		if !found {
-			return response{Result: "not_found"}, http.StatusOK, nil
+			return response{Result: resultNotFound}, nil
 		}
-		return response{Result: "resolved", AlertID: a.ID, Status: string(a.Status)}, http.StatusOK, nil
+		return response{Result: resultResolved, AlertID: a.ID, Status: string(a.Status)}, nil
 	}
 
-	labels := make(map[string]string, len(p.Labels)+len(src.Labels))
+	labels := make(map[string]string, len(d.Labels)+len(src.Labels))
 	for k, v := range src.Labels {
 		labels[k] = v
 	}
-	for k, v := range p.Labels {
+	for k, v := range d.Labels {
 		labels[k] = v
 	}
 	a, created, err := h.alerts.Fire(ctx, alert.Firing{
@@ -167,16 +280,17 @@ func (h *Handler) apply(ctx context.Context, src Source, p payload) (response, i
 		Fingerprint: fingerprint,
 		Severity:    src.Severity.Resolve(labels),
 		Labels:      labels,
-		Annotations: p.Annotations,
-		StartsAt:    p.StartsAt,
+		Annotations: d.Annotations,
+		Links:       d.Links,
+		StartsAt:    d.StartsAt,
 	})
 	if err != nil {
-		return response{}, 0, err
+		return response{}, err
 	}
 	if created {
-		return response{Result: "created", AlertID: a.ID, Status: string(a.Status)}, http.StatusCreated, nil
+		return response{Result: resultCreated, AlertID: a.ID, Status: string(a.Status)}, nil
 	}
-	return response{Result: "updated", AlertID: a.ID, Status: string(a.Status)}, http.StatusOK, nil
+	return response{Result: resultUpdated, AlertID: a.ID, Status: string(a.Status)}, nil
 }
 
 func (h *Handler) write(w http.ResponseWriter, r *http.Request, status int, body any) {
