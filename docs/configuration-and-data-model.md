@@ -311,7 +311,7 @@ Provisioned objects are read-only in the UI and the API. Runtime state is never 
 | Escalation progress | Runtime | Yes | Current step and timer per alert group |
 | Routing rule | Provisioned | Copy, for references | |
 | User | Runtime | Yes | Created on first sign-in |
-| Linked Slack and Discord identity | Runtime | Yes | |
+| Linked Slack and Discord identity | Runtime | Yes | Per integration. Slack: found by email address. Discord: linked by the user. |
 | Role (admin or member) | Runtime | Yes | Set from identity provider claims at each sign-in |
 | API token | Runtime | Yes | Hash only |
 | Alert, alert group | Runtime | Yes | |
@@ -376,7 +376,11 @@ Applying a configuration makes these rows match the files, in one transaction, s
 
 **`sign_in_flows`**: `state_hash`, `nonce`, `code_verifier`, `created_at`, `expires_at`. A sign-in that has been sent to the identity provider and has not come back. A row is used once and lives ten minutes. Keeping it in Postgres, not in a signed cookie, means there is no session key to manage and the callback can arrive at any replica.
 
-**`user_identities`**: `user_id`, `provider` (`slack` or `discord`), `external_id`, `created_at`. Unique on (`provider`, `external_id`) and on (`user_id`, `provider`).
+**`user_identities`**: `user_id`, `integration_id`, `provider` (`slack` or `discord`), `external_id`, `origin` (`email` or `self`), `created_at`. Primary key on (`user_id`, `integration_id`), unique on (`integration_id`, `external_id`). The first version of this design keyed an identity by provider alone. A Slack user ID means something only within one workspace, and Beacon reaches the person through the integration of that workspace, so an identity belongs to an integration; `provider` is kept because the actor of a timeline event names it. `origin` says whether Beacon found the account by the user's email address or the user linked it themselves.
+
+**`identity_lookups`**: `user_id`, `integration_id`, `email`, `outcome` (`pending`, `not_found` or `error`), `next_check_at`. One row for each user whom Beacon has asked a chat service about and who has no identity there. It says when to ask again, so that replicas do not repeat each other and a person the service does not know is asked for once an hour and not on every pass. A replica claims a user by moving `next_check_at` ahead in the statement that selects them.
+
+**`identity_link_codes`**: `code_hash`, `user_id`, `integration_id`, `created_at`, `expires_at`. One-time codes with which a user links an account themselves. Only the SHA-256 hash of a code is stored; a code is used once and lives ten minutes.
 
 **`team_members`**: `team_id`, `user_id`, `origin` (`config` or `group`), `created_at`. Primary key on all three of `team_id`, `user_id`, `origin`.
 
