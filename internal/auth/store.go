@@ -44,7 +44,7 @@ var (
 	// ErrUserDisabled means the user exists and has been disabled.
 	ErrUserDisabled = errors.New("the account is disabled")
 	// ErrNoSession means the session does not exist or has expired.
-	ErrNoSession = errors.New("no session")
+	ErrNoSession = fmt.Errorf("no session: %w", access.ErrUnauthenticated)
 	// ErrNoFlow means the sign-in was not started here, was already
 	// completed, or took too long.
 	ErrNoFlow = errors.New("the sign-in has expired or was already completed")
@@ -88,23 +88,30 @@ func hashToken(token string) string {
 // the email address, name and time of sign-in on later ones. The user is
 // found by issuer and subject, which the provider never changes, so a person
 // whose email address changed keeps their account.
-func (s *Store) SignIn(ctx context.Context, id Identity) (u User, created bool, err error) {
+//
+// The grant is applied as it stands: the user's role becomes g.Role, and
+// their team memberships of origin "group" become exactly g.Teams. A group
+// that the person has left therefore takes its role and its teams with it.
+// Their memberships of origin "config" become exactly g.Listed, which is how
+// someone listed in a team before they ever signed in joins it now, and how
+// memberships follow a changed email address.
+func (s *Store) SignIn(ctx context.Context, id Identity, g Grant) (u User, created bool, err error) {
 	now := s.now()
 	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		var disabled bool
 		err := tx.QueryRow(ctx, `
-			UPDATE users SET email = $3, display_name = $4, last_sign_in_at = $5,
-				updated_at = CASE WHEN email = $3 AND display_name = $4 THEN updated_at ELSE $5 END
+			UPDATE users SET email = $3, display_name = $4, role = $6, last_sign_in_at = $5,
+				updated_at = CASE WHEN email = $3 AND display_name = $4 AND role = $6 THEN updated_at ELSE $5 END
 			WHERE oidc_issuer = $1 AND oidc_subject = $2
 			RETURNING id::text, email, display_name, role, disabled_at IS NOT NULL`,
-			id.Issuer, id.Subject, id.Email, id.Name, now).Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role, &disabled)
+			id.Issuer, id.Subject, id.Email, id.Name, now, g.Role).Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role, &disabled)
 		if errors.Is(err, pgx.ErrNoRows) {
 			created = true
 			err = tx.QueryRow(ctx, `
-				INSERT INTO users (email, display_name, oidc_issuer, oidc_subject, created_at, updated_at, last_sign_in_at)
-				VALUES ($3, $4, $1, $2, $5, $5, $5)
+				INSERT INTO users (email, display_name, role, oidc_issuer, oidc_subject, created_at, updated_at, last_sign_in_at)
+				VALUES ($3, $4, $6, $1, $2, $5, $5, $5)
 				RETURNING id::text, email, display_name, role`,
-				id.Issuer, id.Subject, id.Email, id.Name, now).Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role)
+				id.Issuer, id.Subject, id.Email, id.Name, now, g.Role).Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role)
 		}
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.ConstraintName == "users_email_key" {
@@ -116,7 +123,45 @@ func (s *Store) SignIn(ctx context.Context, id Identity) (u User, created bool, 
 		if disabled {
 			return ErrUserDisabled
 		}
-		return nil
+		// Only rows of origin "group" are touched; memberships that come
+		// from the members list of a team belong to the configuration.
+		// A nil slice would reach Postgres as NULL, and comparing with NULL
+		// matches nothing, so no membership would ever be removed.
+		teams := g.Teams
+		if teams == nil {
+			teams = []string{}
+		}
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM team_members m USING teams t
+			WHERE m.team_id = t.id AND m.user_id = $1 AND m.origin = 'group' AND NOT (t.name = ANY($2) AND t.removed_at IS NULL)`,
+			u.ID, teams); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO team_members (team_id, user_id, origin, created_at)
+			SELECT t.id, $1, 'group', $3 FROM teams t WHERE t.name = ANY($2) AND t.removed_at IS NULL
+			ON CONFLICT DO NOTHING`, u.ID, teams, now); err != nil {
+			return err
+		}
+		// The same for the teams that list the person by email address.
+		// Reconciliation writes these rows for users who exist; this covers
+		// the person who did not exist, or had another address, when the
+		// configuration was last applied.
+		teams = g.Listed
+		if teams == nil {
+			teams = []string{}
+		}
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM team_members m USING teams t
+			WHERE m.team_id = t.id AND m.user_id = $1 AND m.origin = 'config' AND NOT (t.name = ANY($2) AND t.removed_at IS NULL)`,
+			u.ID, teams); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO team_members (team_id, user_id, origin, created_at)
+			SELECT t.id, $1, 'config', $3 FROM teams t WHERE t.name = ANY($2) AND t.removed_at IS NULL
+			ON CONFLICT DO NOTHING`, u.ID, teams, now)
+		return err
 	})
 	if err != nil {
 		if !errors.Is(err, ErrEmailTaken) && !errors.Is(err, ErrUserDisabled) {
@@ -125,6 +170,34 @@ func (s *Store) SignIn(ctx context.Context, id Identity) (u User, created bool, 
 		return User{}, false, err
 	}
 	return u, created, nil
+}
+
+// Revoke takes away what earlier sign-ins gave the person with this issuer
+// and subject: their sessions and their team memberships of origin "group".
+// It is what happens when someone who is no longer in any group with access
+// tries to sign in. The user's row stays, for the history that refers to it.
+// found is false when there is no such user.
+func (s *Store) Revoke(ctx context.Context, issuer, subject string) (found bool, err error) {
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		var userID string
+		err := tx.QueryRow(ctx, `SELECT id::text FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2 FOR UPDATE`, issuer, subject).Scan(&userID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		found = true
+		if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE user_id = $1`, userID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM team_members WHERE user_id = $1 AND origin = 'group'`, userID)
+		return err
+	})
+	if err != nil {
+		return false, fmt.Errorf("revoke access: %w", err)
+	}
+	return found, nil
 }
 
 // CreateSession starts a session for the user and returns its token, which

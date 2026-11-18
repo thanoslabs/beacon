@@ -128,4 +128,12 @@ auth:
     issuer: https://idp.example.com
     client_id: beacon
     client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
-    scopes: [openid, profile, email]
+    # The groups scope makes many providers put the groups claim into the
+    # ID token.
+    scopes: [openid, profile, email, groups]
+    groups_claim: groups
+  # Which of the provider's groups give which role. Someone in neither
+  # cannot sign in.
+  roles:
+    admin: [beacon-admins]
+    member: [beacon-users]

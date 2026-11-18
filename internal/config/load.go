@@ -511,6 +511,9 @@ func resolveSecrets(doc *document, r secretReader, dir string) Errors {
 	if a := doc.Auth; a != nil && a.OIDC != nil {
 		resolve(&a.OIDC.ClientSecret, a.Origin, kindAuth, "oidc.client_secret")
 	}
+	if a := doc.Auth; a != nil && a.BootstrapAdmin != nil {
+		resolve(&a.BootstrapAdmin.PasswordHash, a.Origin, kindAuth, "bootstrap_admin.password_hash")
+	}
 	return errs
 }
 

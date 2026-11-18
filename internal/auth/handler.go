@@ -33,13 +33,27 @@ type Handler struct {
 	// settings follow the configuration, and are replaced as a whole when it
 	// is reloaded. Nil means that nobody can sign in.
 	settings atomic.Pointer[settings]
-	// csrf refuses requests that another site made a browser send.
+	// csrf refuses requests that another site made a browser send, on the
+	// one public route that changes something.
 	csrf *http.CrossOriginProtection
+	// attempts bounds the bootstrap admin's sign-in.
+	attempts attemptLimiter
+	// afterSignIn is called after each completed sign-in.
+	afterSignIn atomic.Pointer[func(context.Context)]
+}
+
+// AfterSignIn makes the handler call hook after every completed sign-in, by
+// when the user exists and has their memberships.
+func (h *Handler) AfterSignIn(hook func(context.Context)) {
+	h.afterSignIn.Store(&hook)
 }
 
 // settings is the auth block of the configuration, prepared for use.
 type settings struct {
 	auth config.Auth
+	// teams are the teams of the configuration, whose groups decide which
+	// teams a person belongs to.
+	teams []config.Team
 	// secure is whether Beacon is reached over https, and so whether
 	// cookies are marked Secure.
 	secure bool
@@ -56,22 +70,41 @@ func NewHandler(logger *slog.Logger, store *Store) *Handler {
 	return &Handler{logger: logger, store: store, csrf: http.NewCrossOriginProtection()}
 }
 
-// Configure makes a the active sign-in settings; nil turns sign-in off. It
-// is safe while requests are being handled. Sessions that exist stay valid
-// as long as sign-in stays on.
-func (h *Handler) Configure(ctx context.Context, a *config.Auth) {
+// Configure makes a the active sign-in settings; nil turns sign-in off.
+// teams are the teams of the configuration. It is safe while requests are
+// being handled. Sessions that exist stay valid as long as sign-in stays on;
+// a changed mapping of groups applies to a person at their next sign-in.
+func (h *Handler) Configure(ctx context.Context, a *config.Auth, teams []config.Team) {
+	if a == nil || a.BootstrapAdmin == nil {
+		// Taking the bootstrap admin out of the configuration ends its
+		// sessions at once, on every replica: they are refused as soon as
+		// the user is turned off.
+		switch off, err := h.store.disableBootstrapAdmin(ctx); {
+		case err != nil:
+			h.logger.ErrorContext(ctx, "turn the bootstrap admin off", slog.Any("error", err))
+		case off:
+			h.logger.InfoContext(ctx, "the bootstrap admin is turned off, and its sessions are ended")
+		}
+	}
 	if a == nil {
 		h.settings.Store(nil)
-		h.logger.WarnContext(ctx, "sign-in is not configured, so nobody can sign in; add an auth block to the configuration")
+		h.logger.WarnContext(ctx, "sign-in is not configured, so nobody can sign in; API tokens that exist keep working. Add an auth block to the configuration")
 		return
 	}
-	s := &settings{auth: *a, secure: strings.HasPrefix(a.PublicURL, "https://")}
+	s := &settings{auth: *a, teams: teams, secure: strings.HasPrefix(a.PublicURL, "https://")}
 	h.settings.Store(s)
+	switch {
+	case a.BootstrapAdmin != nil && a.OIDC != nil:
+		h.logger.WarnContext(ctx, "the bootstrap admin is enabled although an identity provider is configured; remove auth.bootstrap_admin once an admin can sign in through the provider")
+	case a.BootstrapAdmin != nil:
+		h.logger.InfoContext(ctx, "the bootstrap admin is enabled", slog.String("path", BootstrapPath))
+	}
 	if a.OIDC == nil {
 		return
 	}
 	h.logger.InfoContext(ctx, "sign-in configured", slog.String("issuer", a.OIDC.Issuer), slog.String("client_id", a.OIDC.ClientID),
-		slog.String("redirect_uri", s.redirectURL()), slog.Duration("session_lifetime", a.Lifetime()))
+		slog.String("redirect_uri", s.redirectURL()), slog.Duration("session_lifetime", a.Lifetime()),
+		slog.String("groups_claim", a.OIDC.Claim()), slog.Bool("roles_mapped", a.Roles != nil))
 	if _, err := s.discovered(ctx); err != nil {
 		h.logger.WarnContext(ctx, "the identity provider cannot be reached; sign-in will try again when someone signs in", slog.Any("error", err))
 	}
@@ -113,17 +146,33 @@ func (s *settings) flowCookie() string {
 	return "beacon_sign_in"
 }
 
-// Register attaches the endpoints to mux.
-func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET "+LoginPath, h.handleLogin)
-	mux.HandleFunc("GET "+CallbackPath, h.handleCallback)
-	mux.Handle("POST "+LogoutPath, h.RequireSession(http.HandlerFunc(h.handleLogout)))
-	mux.Handle("GET "+MePath, h.RequireSession(http.HandlerFunc(h.handleMe)))
+// Routes returns the sign-in endpoints with who may use each. Starting and
+// completing a sign-in are public, as they must be: they are how a person
+// gets a session.
+func (h *Handler) Routes() []access.Route {
+	routes := []access.Route{
+		{Pattern: "GET " + LoginPath, Level: access.Public, Handler: http.HandlerFunc(h.handleLogin)},
+		{Pattern: "GET " + CallbackPath, Level: access.Public, Handler: http.HandlerFunc(h.handleCallback)},
+		{Pattern: "POST " + LogoutPath, Level: access.Member, Handler: http.HandlerFunc(h.handleLogout)},
+		{Pattern: "GET " + MePath, Level: access.Member, Handler: http.HandlerFunc(h.handleMe)},
+		// Checks the password itself, and bounds the attempts.
+		{Pattern: "POST " + BootstrapPath, Level: access.Public, Handler: http.HandlerFunc(h.handleBootstrap)},
+	}
+	return append(routes, h.tokenRoutes()...)
 }
 
-// Authenticate returns who is behind r, from its session cookie. It returns
-// ErrNoSession when there is no valid session.
+// Authenticate returns who is behind r: the API token in its Authorization
+// header, or else the session in its cookie. It returns an error that wraps
+// access.ErrUnauthenticated when there is neither. It implements
+// access.Authenticator.
+//
+// A request that presents a token is judged by the token alone. A token that
+// is not valid does not fall back to the cookie, so a client always knows
+// which of its credentials was used.
 func (h *Handler) Authenticate(r *http.Request) (access.Principal, error) {
+	if token, ok := bearer(r); ok {
+		return h.store.tokenPrincipal(r.Context(), token)
+	}
 	p, _, err := h.session(r)
 	return p, err
 }
@@ -142,29 +191,6 @@ func (h *Handler) session(r *http.Request) (access.Principal, time.Time, error) 
 		return access.Principal{}, time.Time{}, err
 	}
 	return access.Principal{UserID: u.ID, Email: u.Email, Name: u.DisplayName, Role: u.Role}, expires, nil
-}
-
-// RequireSession lets a request through only when it carries a valid
-// session, and puts the principal into its context. A request that changes
-// something is also refused when another site made the browser send it.
-func (h *Handler) RequireSession(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := h.csrf.Check(r); err != nil {
-			h.fail(w, r, http.StatusForbidden, "the request came from another site")
-			return
-		}
-		p, err := h.Authenticate(r)
-		if errors.Is(err, ErrNoSession) {
-			h.fail(w, r, http.StatusUnauthorized, "sign in first, at "+LoginPath)
-			return
-		}
-		if err != nil {
-			h.logger.ErrorContext(r.Context(), "read session", slog.Any("error", err))
-			h.fail(w, r, http.StatusInternalServerError, "internal error")
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(access.WithPrincipal(r.Context(), p)))
-	})
 }
 
 // handleLogin starts a sign-in and sends the browser to the provider.
@@ -246,7 +272,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, http.StatusServiceUnavailable, "the identity provider cannot be reached; try again shortly")
 		return
 	}
-	id, _, err := p.exchange(ctx, query.Get("code"), f)
+	id, claims, err := p.exchange(ctx, query.Get("code"), f)
 	var rejected *errRejected
 	if errors.As(err, &rejected) {
 		h.logger.WarnContext(ctx, "sign-in refused", slog.String("reason", rejected.reason))
@@ -260,7 +286,27 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, created, err := h.store.SignIn(ctx, id)
+	// Role and teams are decided afresh from the groups in this token, so
+	// that leaving a group at the provider takes effect here.
+	groups := groupsOf(claims, s.auth.OIDC.Claim())
+	g, ok := grant(s.auth.Roles, s.teams, groups)
+	if !ok {
+		if _, err := h.store.Revoke(ctx, id.Issuer, id.Subject); err != nil {
+			h.logger.ErrorContext(ctx, "complete sign-in", slog.Any("error", err))
+			h.fail(w, r, http.StatusInternalServerError, "internal error")
+			return
+		}
+		h.logger.WarnContext(ctx, "sign-in refused", slog.String("reason", "in no group that is mapped to a role"),
+			slog.String("email", id.Email), slog.Int("groups", len(groups)))
+		h.fail(w, r, http.StatusForbidden, "you are not in a group that has access to Beacon; ask an administrator of Beacon")
+		return
+	}
+
+	// The teams that list this person by email address. Someone who was
+	// listed before they had ever signed in becomes a member now.
+	g.Listed = listed(s.teams, id.Email)
+
+	u, created, err := h.store.SignIn(ctx, id, g)
 	switch {
 	case errors.Is(err, ErrEmailTaken), errors.Is(err, ErrUserDisabled):
 		h.logger.WarnContext(ctx, "sign-in refused", slog.String("reason", err.Error()), slog.String("email", id.Email))
@@ -285,8 +331,11 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Name: s.sessionCookie(), Value: token, Path: "/", Expires: expires, MaxAge: int(s.auth.Lifetime().Seconds()),
 		HttpOnly: true, Secure: s.secure, SameSite: http.SameSiteLaxMode,
 	})
+	if hook := h.afterSignIn.Load(); hook != nil {
+		(*hook)(ctx)
+	}
 	h.logger.InfoContext(ctx, "user signed in", slog.String("user_id", u.ID), slog.String("email", u.Email),
-		slog.String("role", string(u.Role)), slog.Bool("first_sign_in", created))
+		slog.String("role", string(u.Role)), slog.Any("teams", g.Teams), slog.Int("groups", len(groups)), slog.Bool("first_sign_in", created))
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, MePath, http.StatusSeeOther)
 }
@@ -315,8 +364,11 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // me is the body of MePath.
 type me struct {
-	ID          string      `json:"id"`
-	Email       string      `json:"email"`
+	// ID is the user's identifier. It is empty for an API token, which has
+	// TokenID instead.
+	ID          string      `json:"id,omitempty"`
+	TokenID     string      `json:"token_id,omitempty"`
+	Email       string      `json:"email,omitempty"`
 	DisplayName string      `json:"display_name"`
 	Role        access.Role `json:"role"`
 	// SessionExpiresAt is when the person has to sign in again.
@@ -326,9 +378,11 @@ type me struct {
 // handleMe answers who is signed in.
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	p, _ := access.FromContext(r.Context())
-	body := me{ID: p.UserID, Email: p.Email, DisplayName: p.Name, Role: p.Role}
-	if _, expires, err := h.session(r); err == nil {
-		body.SessionExpiresAt = &expires
+	body := me{ID: p.UserID, TokenID: p.TokenID, Email: p.Email, DisplayName: p.Name, Role: p.Role}
+	if p.TokenID == "" {
+		if _, expires, err := h.session(r); err == nil {
+			body.SessionExpiresAt = &expires
+		}
 	}
 	h.write(w, r, http.StatusOK, body)
 }

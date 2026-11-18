@@ -76,3 +76,7 @@ auth:
     client_id: beacon
     client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
     scopes: [openid, profile, email, groups]
+    groups_claim: groups
+  roles:
+    admin: [beacon-admins]
+    member: [beacon-users, platform-engineers]

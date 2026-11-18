@@ -17,3 +17,8 @@ auth:
   oidc:
     issuer: http://idp.example.com
     scopes: [profile, email]
+  roles:
+    admin: [admins, "", admins]
+    member: []
+  bootstrap_admin:
+    password_hash: {env: SHORT_TOKEN}
