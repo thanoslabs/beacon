@@ -105,36 +105,60 @@ jobs:
           docker compose stop beacon
           test "$(docker inspect --format '{{.State.ExitCode}}' "$(docker compose ps --all --quiet beacon)")" = "0"
 
-      # A real Alertmanager, the version pinned in compose.yaml, delivers a
-      # firing and then a resolved notification to Beacon. The loops wait for
-      # the alert to change, not for a fixed time: Alertmanager sends after
-      # its group_wait and group_interval.
-      - name: Check that Alertmanager delivers to Beacon
+      # A real Alertmanager and a real Grafana, the versions pinned in
+      # compose.yaml, each deliver a firing and then a resolved notification
+      # to Beacon. The loops wait for the alert to change, not for a fixed
+      # time: both send after their group_wait and group_interval, and
+      # Grafana takes up to a minute to start using its contact point.
+      - name: Check that Alertmanager and Grafana deliver to Beacon
         env:
           BEACON_SOURCE_TOKEN: ci-only-source-token-0123456789
-          BEACON_CONFIG_DIR: ./examples/alertmanager
-          COMPOSE_PROFILES: alertmanager
+          BEACON_CONFIG_DIR: ./ci-sources
+          COMPOSE_PROFILES: alertmanager,grafana
         run: |
           set -euo pipefail
+          # Both sources in one configuration: the files of a directory are
+          # read as one.
+          mkdir ci-sources
+          cp examples/alertmanager/beacon.yaml ci-sources/alertmanager.yaml
+          cp examples/grafana/beacon.yaml ci-sources/grafana.yaml
           docker compose up --detach --wait
+
           amtool() { docker compose exec -T alertmanager amtool --alertmanager.url=http://localhost:9093 "$@"; }
+          grafana_rule() {
+            curl --fail --silent --show-error --output /dev/null --user admin:admin --request "$1" \
+              --header 'Content-Type: application/json' --header 'X-Disable-Provenance: true' \
+              --data @- "http://127.0.0.1:3000/api/v1/provisioning/alert-rules$2"
+          }
+          # alert_is <source> <status and severity> waits for the one alert
+          # of the source to be in that state.
           alert_is() {
-            for _ in $(seq 1 120); do
-              state="$(docker compose exec -T postgres psql --username beacon --no-align --tuples-only \
-                --command "SELECT status || ' ' || severity FROM alerts WHERE labels->>'alertname' = 'AlertmanagerSmokeTest'")"
-              if [ "$state" = "$1" ]; then return 0; fi
+            for _ in $(seq 1 180); do
+              state="$(docker compose exec -T postgres psql --username beacon --no-align --tuples-only --command \
+                "SELECT a.status || ' ' || a.severity FROM alerts a JOIN sources s ON s.id = a.source_id WHERE s.name = '$1'")"
+              if [ "$state" = "$2" ]; then return 0; fi
               sleep 1
             done
-            echo "::error::the alert is '$state' in Beacon, want '$1'"
+            echo "::error::the alert from $1 is '$state' in Beacon, want '$2'"
             return 1
           }
+
           amtool alert add AlertmanagerSmokeTest instance=ci severity=page
-          alert_is "firing critical"
+          grafana_rule POST "" < dev/grafana/demo-rule.json
+          alert_is alertmanager "firing critical"
+          alert_is grafana "firing critical"
+
           amtool alert add AlertmanagerSmokeTest instance=ci severity=page --end="$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
-          alert_is "resolved critical"
+          jq '.isPaused = true' dev/grafana/demo-rule.json | grafana_rule PUT /beacon-demo
+          alert_is alertmanager "resolved critical"
+          alert_is grafana "resolved critical"
+          # The Grafana alert kept its dashboard and panel links.
+          links="$(docker compose exec -T postgres psql --username beacon --no-align --tuples-only --command \
+            "SELECT count(*) FROM alerts WHERE links ? 'generator' AND links ? 'dashboard' AND links ? 'panel'")"
+          test "$links" = "1"
 
       - name: Show logs
         if: always()
         env:
-          COMPOSE_PROFILES: alertmanager
+          COMPOSE_PROFILES: alertmanager,grafana
         run: docker compose logs --no-color
