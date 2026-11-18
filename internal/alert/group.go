@@ -36,6 +36,11 @@ type Group struct {
 	// or nil when there has been none.
 	NotifiedAt *time.Time
 	ResolvedAt *time.Time
+	// RoutingRuleID, TeamID and EscalationPolicyID are what routing decided
+	// for the alert that opened the group. Each may be empty.
+	RoutingRuleID      string
+	TeamID             string
+	EscalationPolicyID string
 }
 
 // Grouping says which group a new alert joins and how often that group
@@ -53,6 +58,12 @@ type Grouping struct {
 	// Interval is the least time between two notifications about the group
 	// that its sources cause.
 	Interval time.Duration
+	// RoutingRuleID, TeamID and EscalationPolicyID are stored on a group
+	// that this alert opens. Alerts that share a key share them, when the
+	// key was made with the routing rule as its scope.
+	RoutingRuleID      string
+	TeamID             string
+	EscalationPolicyID string
 }
 
 // GroupKey returns the key of the group for an alert with these labels, and
@@ -95,14 +106,15 @@ func (s *Store) joinGroup(ctx context.Context, tx pgx.Tx, f Firing, now time.Tim
 	}
 	var id string
 	err := tx.QueryRow(ctx, `
-		INSERT INTO alert_groups (group_key, labels, update_interval, created_at, notify_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO alert_groups (group_key, labels, update_interval, created_at, notify_at, routing_rule_id, team_id, escalation_policy_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (group_key) WHERE status = 'open' DO UPDATE SET notify_at = CASE
 			WHEN alert_groups.notified_at IS NOT NULL AND alert_groups.notify_at IS NULL
 				THEN GREATEST(EXCLUDED.created_at, alert_groups.notified_at + alert_groups.update_interval)
 			ELSE alert_groups.notify_at END
 		RETURNING id::text`,
-		g.Key, nonNil(g.Labels), max(g.Interval, 0), now, now.Add(max(g.Wait, 0))).Scan(&id)
+		g.Key, nonNil(g.Labels), max(g.Interval, 0), now, now.Add(max(g.Wait, 0)),
+		nullable(g.RoutingRuleID), nullable(g.TeamID), nullable(g.EscalationPolicyID)).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("join alert group: %w", err)
 	}
@@ -144,11 +156,13 @@ func (s *Store) afterResolve(ctx context.Context, tx pgx.Tx, groupID string, byS
 	return nil
 }
 
-const groupColumns = `id::text, group_key, status, labels, created_at, notify_at, notified_at, resolved_at`
+const groupColumns = `id::text, group_key, status, labels, created_at, notify_at, notified_at, resolved_at,
+	COALESCE(routing_rule_id::text, ''), COALESCE(team_id::text, ''), COALESCE(escalation_policy_id::text, '')`
 
 func scanGroup(row pgx.Row) (Group, error) {
 	var g Group
-	err := row.Scan(&g.ID, &g.Key, &g.Status, &g.Labels, &g.CreatedAt, &g.NotifyAt, &g.NotifiedAt, &g.ResolvedAt)
+	err := row.Scan(&g.ID, &g.Key, &g.Status, &g.Labels, &g.CreatedAt, &g.NotifyAt, &g.NotifiedAt, &g.ResolvedAt,
+		&g.RoutingRuleID, &g.TeamID, &g.EscalationPolicyID)
 	return g, err
 }
 

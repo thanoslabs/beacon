@@ -53,6 +53,12 @@ type Firing struct {
 	Links map[string]string
 	// StartsAt is when the source says the alert began. Zero means now.
 	StartsAt time.Time
+	// RoutingRuleID, TeamID and Service are what routing decided for the
+	// alert. Each may be empty. Like Group, they are kept as they were when
+	// the alert was opened: a repeated delivery does not route it again.
+	RoutingRuleID string
+	TeamID        string
+	Service       string
 	// Group says which group the alert joins if it is new. An alert that is
 	// already open stays in the group it has.
 	Group Grouping
@@ -68,12 +74,14 @@ type Options struct {
 }
 
 const alertColumns = `id::text, source_id::text, group_id::text, fingerprint, status, severity,
-	labels, annotations, links, started_at, last_received_at, acknowledged_at, snoozed_until, resolved_at`
+	labels, annotations, links, started_at, last_received_at, acknowledged_at, snoozed_until, resolved_at,
+	COALESCE(routing_rule_id::text, ''), COALESCE(team_id::text, ''), COALESCE(service, '')`
 
 func scanAlert(row interface{ Scan(...any) error }) (Alert, error) {
 	var a Alert
 	err := row.Scan(&a.ID, &a.SourceID, &a.GroupID, &a.Fingerprint, &a.Status, &a.Severity,
-		&a.Labels, &a.Annotations, &a.Links, &a.StartedAt, &a.LastReceivedAt, &a.AcknowledgedAt, &a.SnoozedUntil, &a.ResolvedAt)
+		&a.Labels, &a.Annotations, &a.Links, &a.StartedAt, &a.LastReceivedAt, &a.AcknowledgedAt, &a.SnoozedUntil, &a.ResolvedAt,
+		&a.RoutingRuleID, &a.TeamID, &a.Service)
 	return a, err
 }
 
@@ -115,10 +123,12 @@ func (s *Store) Fire(ctx context.Context, f Firing) (a Alert, created bool, err 
 			startedAt = now
 		}
 		a, err = scanAlert(tx.QueryRow(ctx, `
-			INSERT INTO alerts (source_id, fingerprint, severity, labels, annotations, group_id, started_at, last_received_at, links)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			INSERT INTO alerts (source_id, fingerprint, severity, labels, annotations, group_id, started_at, last_received_at, links,
+				routing_rule_id, team_id, service)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			RETURNING `+alertColumns,
-			f.SourceID, f.Fingerprint, f.Severity, nonNil(f.Labels), nonNil(f.Annotations), groupID, startedAt, now, nonNil(f.Links)))
+			f.SourceID, f.Fingerprint, f.Severity, nonNil(f.Labels), nonNil(f.Annotations), groupID, startedAt, now, nonNil(f.Links),
+			nullable(f.RoutingRuleID), nullable(f.TeamID), nullable(f.Service)))
 		if err != nil {
 			return fmt.Errorf("create alert: %w", err)
 		}
