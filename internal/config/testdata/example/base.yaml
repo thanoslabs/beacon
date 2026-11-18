@@ -67,3 +67,16 @@ routing:
       team: platform
       escalation_policy: platform-default
       group_wait: 10s
+
+auth:
+  public_url: https://beacon.example.com
+  session_lifetime: 8h
+  oidc:
+    issuer: https://idp.example.com
+    client_id: beacon
+    client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+    scopes: [openid, profile, email, groups]
+    groups_claim: groups
+  roles:
+    admin: [beacon-admins]
+    member: [beacon-users, platform-engineers]

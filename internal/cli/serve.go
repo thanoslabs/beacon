@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/thanoslabs/beacon/internal/alert"
+	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/logging"
 	"github.com/thanoslabs/beacon/internal/notify"
@@ -27,6 +28,10 @@ import (
 // snoozeExpiryInterval is how often the server looks for snoozes that have run
 // out, and so the longest a snoozed alert stays quiet past its time.
 const snoozeExpiryInterval = 5 * time.Second
+
+// sessionCleanupInterval is how often expired sessions are deleted. They are
+// refused from the moment they expire; this only keeps the table small.
+const sessionCleanupInterval = 5 * time.Minute
 
 func runServe(ctx context.Context, e env, args []string) error {
 	var (
@@ -111,26 +116,32 @@ func runServe(ctx context.Context, e env, args []string) error {
 		}
 	}
 
+	// The parts that follow the configuration start empty. The provisioner
+	// fills them now, and again on every reload.
+	alerts := alert.NewStore(pool)
+	sessions := auth.NewStore(pool)
+	signIn := auth.NewHandler(logger, sessions)
+	pipeline := notify.New(pool, alerts, logger, notifyCfg)
+
 	registry := server.NewRegistry()
+	srvCfg.Authenticator = signIn
 	srv := server.New(srvCfg, logger, pool, registry)
 	if err := srv.Listen(); err != nil {
 		return err
 	}
-
-	// The parts that follow the configuration start empty. The provisioner
-	// fills them now, and again on every reload.
-	alerts := alert.NewStore(pool)
-	pipeline := notify.New(pool, alerts, logger, notifyCfg)
 	alerts.Observe(pipeline.NotifyAll(nil))
 	prov := &provisioner{
 		logger: logger, pool: pool, path: cfgPath, getenv: e.getenv, slackAPIURL: slackAPIURL,
 		ingest:       ingest.New(logger, alerts, nil),
 		interactions: slack.NewInteractions(logger, alerts, nil),
 		pipeline:     pipeline,
+		auth:         signIn,
 	}
 	prov.registerMetrics(registry)
-	prov.ingest.Register(srv.Mux())
-	prov.interactions.Register(srv.Mux())
+	prov.auth.AfterSignIn(prov.refreshSkipped)
+	for _, route := range prov.routes() {
+		srv.Handle(route)
+	}
 	// The provisioned rows are made to match the files before anything that
 	// refers to them is served.
 	if err := prov.apply(ctx, cfg); err != nil {
@@ -146,6 +157,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 	var background sync.WaitGroup
 	background.Go(func() { pipeline.Run(ctx) })
 	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
+	background.Go(func() { sessions.RunCleanup(ctx, logger, sessionCleanupInterval) })
 	background.Go(func() {
 		for {
 			select {

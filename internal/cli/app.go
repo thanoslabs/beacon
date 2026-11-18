@@ -2,15 +2,20 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/thanoslabs/beacon/internal/access"
+	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/config"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/notify"
@@ -33,6 +38,7 @@ type provisioner struct {
 	ingest       *ingest.Handler
 	interactions *slack.Interactions
 	pipeline     *notify.Pipeline
+	auth         *auth.Handler
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -41,6 +47,86 @@ type provisioner struct {
 	reloads    *prometheus.CounterVec
 	successful prometheus.Gauge
 	lastOK     prometheus.Gauge
+	skipped    *prometheus.GaugeVec
+
+	// teams are the teams of the active configuration.
+	teams atomic.Pointer[[]config.Team]
+}
+
+// ReloadPath is the route that reloads the configuration.
+const ReloadPath = "/api/v1/config/reload"
+
+// routes lists every route that beacon serve adds to the server, with who
+// may use it. The server refuses anything that is not listed, and puts every
+// route that is not public behind a session.
+//
+// The public routes are the explicit allow-list of what is reachable without
+// a session. Each must either be harmless to a stranger or check a
+// credential of its own. TestRoutes holds the same list; a route added here
+// must be added there, which is a second look at its level.
+func (p *provisioner) routes() []access.Route {
+	routes := []access.Route{
+		// The source's token is checked by the handler.
+		{Pattern: "POST " + ingest.Path, Level: access.Public, Handler: p.ingest},
+		// Slack's signature over the body is checked by the handler.
+		{Pattern: "POST " + slack.InteractionsPath, Level: access.Public, Handler: p.interactions},
+		{Pattern: "POST " + ReloadPath, Level: access.Admin, Handler: http.HandlerFunc(p.handleReload)},
+	}
+	return append(routes, p.auth.Routes()...)
+}
+
+// handleReload reloads the configuration for an admin. It does what SIGHUP
+// does, and answers with the outcome.
+func (p *provisioner) handleReload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	err := p.reload(r.Context(), "api")
+	if err == nil {
+		_ = json.NewEncoder(w).Encode(map[string]string{"result": "reloaded"})
+		return
+	}
+	// The problems name files, objects and fields, never the value of a
+	// secret, and the caller is an admin.
+	body := struct {
+		Error    string          `json:"error"`
+		Problems []reloadProblem `json:"problems,omitempty"`
+	}{Error: err.Error() + "; the previous configuration stays active"}
+	var problems config.Errors
+	status := http.StatusInternalServerError
+	if errors.As(err, &problems) {
+		status = http.StatusUnprocessableEntity
+		for _, problem := range problems {
+			body.Problems = append(body.Problems, reloadProblem{File: problem.File, Line: problem.Line, Object: problem.Object, Field: problem.Field, Problem: problem.Msg})
+		}
+	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// reloadProblem is one problem of a rejected configuration, as the reload
+// endpoint reports it.
+type reloadProblem struct {
+	File    string `json:"file,omitempty"`
+	Line    int    `json:"line,omitempty"`
+	Object  string `json:"object,omitempty"`
+	Field   string `json:"field,omitempty"`
+	Problem string `json:"problem"`
+}
+
+// invalidConfig is a configuration that was rejected, with its problems.
+type invalidConfig struct{ problems config.Errors }
+
+func (e *invalidConfig) Error() string {
+	return "the configuration is not valid: " + plural(len(e.problems), "problem")
+}
+
+// As lets errors.As find the problems.
+func (e *invalidConfig) As(target any) bool {
+	if t, ok := target.(*config.Errors); ok {
+		*t = e.problems
+		return true
+	}
+	return false
 }
 
 // Values of the result label of the reload counter.
@@ -63,7 +149,11 @@ func (p *provisioner) registerMetrics(reg prometheus.Registerer) {
 		Name: "beacon_config_last_reload_success_timestamp_seconds",
 		Help: "Unix time at which the active configuration was loaded.",
 	})
-	reg.MustRegister(p.reloads, p.successful, p.lastOK)
+	p.skipped = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "beacon_team_members_skipped",
+		Help: "Email addresses in a team's members list that belong to no user, by team, as of the last time this process applied the configuration or completed a sign-in. Such a person joins the team when they first sign in.",
+	}, []string{"team"})
+	reg.MustRegister(p.reloads, p.successful, p.lastOK, p.skipped)
 	// Both results exist from the start, so a rate over them is never empty.
 	p.reloads.WithLabelValues(resultSuccess)
 	p.reloads.WithLabelValues(resultFailure)
@@ -83,13 +173,54 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 	for _, c := range rows.Changes {
 		p.logger.InfoContext(ctx, "provisioned object "+string(c.Action), slog.String("kind", string(c.Kind)), slog.String("name", c.Name))
 	}
-	p.logger.InfoContext(ctx, "configuration reconciled", slog.Int("changes", len(rows.Changes)))
+	p.logger.InfoContext(ctx, "configuration reconciled", slog.Int("changes", len(rows.Changes)),
+		slog.Int("team_members_added", rows.MembersAdded), slog.Int("team_members_removed", rows.MembersRemoved))
+	// A listed person who has never signed in is an error in the log, as
+	// the requirements ask, but not a failure: everything else is applied.
+	for _, s := range rows.Skipped {
+		p.logger.ErrorContext(ctx, "team member skipped: no user has this email address; they join the team when they first sign in",
+			slog.String("team", s.Team), slog.String("email", s.Email))
+	}
+	p.teams.Store(&cfg.Teams)
+	p.countSkipped(cfg.Teams, rows.Skipped)
 
 	p.applySources(ctx, cfg, rows.IDs[provision.Sources])
 	p.applyNotifications(ctx, cfg, rows.IDs[provision.Integrations])
+	p.auth.Configure(ctx, cfg.Auth, cfg.Teams)
 	p.successful.Set(1)
 	p.lastOK.SetToCurrentTime()
 	return nil
+}
+
+// countSkipped sets the metric of skipped team members.
+func (p *provisioner) countSkipped(teams []config.Team, skipped []provision.SkippedMember) {
+	// Reset first, so that a team that left the configuration leaves the
+	// metric too.
+	p.skipped.Reset()
+	for _, t := range teams {
+		p.skipped.WithLabelValues(t.Name).Set(0)
+	}
+	for _, s := range skipped {
+		p.skipped.WithLabelValues(s.Team).Inc()
+	}
+}
+
+// refreshSkipped counts the skipped team members again. It runs after each
+// sign-in, which is when a skipped person may have become a user.
+func (p *provisioner) refreshSkipped(ctx context.Context) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	loaded := p.teams.Load()
+	if loaded == nil {
+		return
+	}
+	teams := *loaded
+	skipped, err := provision.SkippedMembers(ctx, p.pool, teams)
+	if err != nil {
+		p.logger.ErrorContext(ctx, "count skipped team members", slog.Any("error", err))
+		return
+	}
+	p.countSkipped(teams, skipped)
 }
 
 // reload reads the configuration again and applies it. A configuration that
@@ -125,7 +256,7 @@ func (p *provisioner) reloadFrom(ctx context.Context) error {
 				slog.String("file", problem.File), slog.Int("line", problem.Line),
 				slog.String("object", problem.Object), slog.String("field", problem.Field), slog.String("problem", problem.Msg))
 		}
-		return errors.New("the configuration is not valid: " + plural(len(problems), "problem"))
+		return &invalidConfig{problems: problems}
 	}
 	if err != nil {
 		return err

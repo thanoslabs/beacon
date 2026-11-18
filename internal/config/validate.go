@@ -2,11 +2,15 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/mail"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	// Time zones are checked against the embedded database, so that the
 	// answer does not depend on the machine that runs the check.
@@ -133,6 +137,21 @@ func (o object) emails(field string, list []string) {
 	}
 }
 
+// groups checks a list of identity provider group names.
+func (o object) groups(field string, list []string) {
+	seen := map[string]bool{}
+	for i, g := range list {
+		at := fmt.Sprintf("%s[%d]", field, i)
+		switch {
+		case strings.TrimSpace(g) == "":
+			o.errorf(at, "must not be empty")
+		case seen[g]:
+			o.errorf(at, "%q is listed twice", g)
+		}
+		seen[g] = true
+	}
+}
+
 // labelNames checks a list of label names.
 func (o object) labelNames(field string, names []string) {
 	for i, n := range names {
@@ -209,17 +228,7 @@ func (c Config) validate(v *validator) {
 		o := v.object(t.Origin, kindTeam, t.Name)
 		o.name(t.Name, teams)
 		o.emails("members", t.Members)
-		seen := map[string]bool{}
-		for i, g := range t.Groups {
-			at := fmt.Sprintf("groups[%d]", i)
-			switch {
-			case strings.TrimSpace(g) == "":
-				o.errorf(at, "must not be empty")
-			case seen[g]:
-				o.errorf(at, "%q is listed twice", g)
-			}
-			seen[g] = true
-		}
+		o.groups("groups", t.Groups)
 	}
 
 	schedules := map[string]Origin{}
@@ -261,6 +270,10 @@ func (c Config) validate(v *validator) {
 				t.validate(o, fmt.Sprintf("%s.notify[%d]", at, j), schedules, teams, integrations)
 			}
 		}
+	}
+
+	if a := c.Auth; a != nil {
+		a.validate(object{v: v, origin: a.Origin, label: kindAuth})
 	}
 
 	if r := c.Routing; r != nil {
@@ -309,6 +322,79 @@ func (c Config) validate(v *validator) {
 			o.positive("group_interval", rule.GroupInterval)
 		}
 	}
+}
+
+// MinBcryptCost is the lowest bcrypt cost accepted for the bootstrap admin's
+// password hash.
+const MinBcryptCost = 10
+
+// The shortest and longest session lifetimes accepted.
+const (
+	minSessionLifetime = time.Minute
+	maxSessionLifetime = 30 * Day
+)
+
+func (a Auth) validate(o object) {
+	public, err := url.Parse(a.PublicURL)
+	switch {
+	case a.PublicURL == "":
+		o.errorf("public_url", "is required: the address at which browsers reach Beacon, such as https://beacon.example.com")
+	case err != nil || public.Host == "" || (public.Scheme != "https" && public.Scheme != "http") ||
+		strings.Trim(public.Path, "/") != "" || public.RawQuery != "" || public.Fragment != "" || public.User != nil:
+		o.errorf("public_url", "must be an http or https address without a path, such as https://beacon.example.com")
+	case public.Scheme == "http" && !loopback(public.Hostname()):
+		o.errorf("public_url", "must use https; plain http is accepted only for localhost, where it is useful for trying Beacon out")
+	}
+	if l := a.SessionLifetime; l != nil && (time.Duration(*l) < minSessionLifetime || time.Duration(*l) > maxSessionLifetime) {
+		o.errorf("session_lifetime", "must be between 1m and 30d")
+	}
+	if r := a.Roles; r != nil {
+		o.groups("roles.admin", r.Admin)
+		o.groups("roles.member", r.Member)
+		if len(r.Admin) == 0 && len(r.Member) == 0 {
+			o.errorf("roles", "needs admin, member or both; leave roles out to make everyone a member")
+		}
+	}
+	if a.OIDC == nil && a.BootstrapAdmin == nil {
+		o.errorf("", "needs oidc, bootstrap_admin or both: without either, nobody can sign in")
+	}
+	if b := a.BootstrapAdmin; b != nil {
+		o.required("bootstrap_admin.password_hash", b.PasswordHash)
+		// The value is checked only once it has been read. The message must
+		// not repeat it: someone may have put the password itself there.
+		if h := b.PasswordHash; h.IsSet() {
+			if cost, err := bcrypt.Cost([]byte(h.Reveal())); err != nil || cost < MinBcryptCost {
+				o.errorf("bootstrap_admin.password_hash", "must be a bcrypt hash with a cost of at least %d, as `beacon hash-password` prints it; it must not be the password itself", MinBcryptCost)
+			}
+		}
+	}
+	if a.OIDC == nil {
+		return
+	}
+	issuer, err := url.Parse(a.OIDC.Issuer)
+	switch {
+	case a.OIDC.Issuer == "":
+		o.errorf("oidc.issuer", "is required: the issuer URL of the identity provider")
+	case err != nil || issuer.Host == "" || (issuer.Scheme != "https" && issuer.Scheme != "http") || issuer.RawQuery != "" || issuer.Fragment != "":
+		o.errorf("oidc.issuer", "must be an http or https URL")
+	case issuer.Scheme == "http" && !loopback(issuer.Hostname()):
+		// Over plain http anyone on the network path could answer in the
+		// provider's place and sign people in as whoever they like.
+		o.errorf("oidc.issuer", "must use https; plain http is accepted only for a provider on localhost")
+	}
+	if a.OIDC.ClientID == "" {
+		o.errorf("oidc.client_id", "is required")
+	}
+	o.required("oidc.client_secret", a.OIDC.ClientSecret)
+	if len(a.OIDC.Scopes) > 0 && !slices.Contains(a.OIDC.Scopes, "openid") {
+		o.errorf("oidc.scopes", "must include openid")
+	}
+}
+
+// loopback reports whether host is this machine.
+func loopback(host string) bool {
+	ip := net.ParseIP(host)
+	return host == "localhost" || (ip != nil && ip.IsLoopback())
 }
 
 // required reports a secret that is neither referenced nor set.

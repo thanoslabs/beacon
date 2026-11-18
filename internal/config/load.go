@@ -34,6 +34,7 @@ type document struct {
 	Schedules          []Schedule         `yaml:"schedules"`
 	EscalationPolicies []EscalationPolicy `yaml:"escalation_policies"`
 	Routing            *Routing           `yaml:"routing"`
+	Auth               *Auth              `yaml:"auth"`
 }
 
 // The names of the kinds, as error messages give them.
@@ -45,6 +46,7 @@ const (
 	kindPolicy      = "escalation policy"
 	kindRouting     = "routing"
 	kindRule        = "routing rule"
+	kindAuth        = "auth"
 )
 
 // listKinds maps the top-level keys that hold lists to their kinds.
@@ -73,6 +75,7 @@ func Load(path string, opts LoadOptions) (Config, error) {
 		cfg         Config
 		errs        Errors
 		routingFile string
+		authFile    string
 	)
 	secrets := secretReader{getenv: opts.Getenv, readFile: os.ReadFile}
 	for _, file := range files {
@@ -99,6 +102,14 @@ func Load(path string, opts LoadOptions) (Config, error) {
 				Msg: fmt.Sprintf("routing is already defined in %s; its rules are ordered, so the whole block must be in one file", routingFile)})
 		default:
 			cfg.Routing, routingFile = doc.Routing, file
+		}
+		switch {
+		case doc.Auth == nil:
+		case cfg.Auth != nil:
+			errs = append(errs, Error{File: file, Line: doc.Auth.Origin.Line, Object: kindAuth,
+				Msg: fmt.Sprintf("auth is already defined in %s; it is one group of settings, so it must be in one file", authFile)})
+		default:
+			cfg.Auth, authFile = doc.Auth, file
 		}
 	}
 	return cfg, errs.err()
@@ -234,6 +245,9 @@ func parseFile(file string, raw []byte) (document, Errors) {
 	for i := range doc.EscalationPolicies {
 		doc.EscalationPolicies[i].Origin = at(i)
 	}
+	if doc.Auth != nil {
+		doc.Auth.Origin = origin(kindAuth, 1)(0)
+	}
 	if doc.Routing != nil {
 		doc.Routing.Origin = origin(kindRouting, 1)(0)
 		at = origin(kindRule, len(doc.Routing.Rules))
@@ -266,6 +280,9 @@ func indexObjects(top *yaml.Node) []objectRef {
 		key, value := top.Content[i], top.Content[i+1]
 		if kind, ok := listKinds[key.Value]; ok {
 			list(kind, value)
+		}
+		if key.Value == "auth" && value.Kind == yaml.MappingNode {
+			refs = append(refs, objectRef{kind: kindAuth, label: kindAuth, node: value})
 		}
 		if key.Value == "routing" && value.Kind == yaml.MappingNode {
 			// The rules come first: they lie inside the routing block, and
@@ -490,6 +507,12 @@ func resolveSecrets(doc *document, r secretReader, dir string) Errors {
 				in.Webhook.Headers[name] = value
 			}
 		}
+	}
+	if a := doc.Auth; a != nil && a.OIDC != nil {
+		resolve(&a.OIDC.ClientSecret, a.Origin, kindAuth, "oidc.client_secret")
+	}
+	if a := doc.Auth; a != nil && a.BootstrapAdmin != nil {
+		resolve(&a.BootstrapAdmin.PasswordHash, a.Origin, kindAuth, "bootstrap_admin.password_hash")
 	}
 	return errs
 }

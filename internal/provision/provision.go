@@ -69,6 +69,20 @@ type Result struct {
 	// Changes lists what was created, updated, revived and removed. It is
 	// empty when the database already matched the files.
 	Changes []Change
+	// MembersAdded and MembersRemoved count the team memberships of origin
+	// "config" that were written and deleted.
+	MembersAdded, MembersRemoved int
+	// Skipped lists the team members that the files name and no user has
+	// the email address of. They are not an error of the reconciliation:
+	// a person becomes a user when they first sign in.
+	Skipped []SkippedMember
+}
+
+// SkippedMember is an email address in a team's members list that belongs
+// to no user.
+type SkippedMember struct {
+	Team  string
+	Email string
 }
 
 // lockKey names the advisory lock that serialises reconciliations.
@@ -111,7 +125,7 @@ func Reconcile(ctx context.Context, db *pgxpool.Pool, cfg config.Config) (Result
 			res.IDs[kind] = ids
 			res.Changes = append(res.Changes, changes...)
 		}
-		return nil
+		return reconcileMembers(ctx, tx, cfg.Teams, res.IDs[Teams], &res)
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("reconcile configuration: %w", err)
@@ -254,4 +268,91 @@ func reconcileKind(ctx context.Context, tx pgx.Tx, kind Kind, objects []object) 
 		changes = append(changes, Change{Kind: kind, Name: name, Action: Removed})
 	}
 	return ids, changes, nil
+}
+
+// reconcileMembers makes the team memberships of origin "config" equal the
+// members lists of the teams. Memberships of origin "group", which come
+// from the identity provider at sign-in, are not touched. An email address
+// that no user has is skipped and reported in res; reconciliation carries
+// on, and the membership is added when the person signs in, or at the next
+// reconciliation after that.
+func reconcileMembers(ctx context.Context, tx pgx.Tx, teams []config.Team, ids map[string]string, res *Result) error {
+	// A team that left the files has no configured members any more.
+	tag, err := tx.Exec(ctx, `
+		DELETE FROM team_members m USING teams t
+		WHERE m.team_id = t.id AND m.origin = 'config' AND t.provisioned AND t.removed_at IS NOT NULL`)
+	if err != nil {
+		return fmt.Errorf("remove members of removed teams: %w", err)
+	}
+	res.MembersRemoved += int(tag.RowsAffected())
+
+	for _, team := range teams {
+		id := ids[team.Name]
+		// Never nil: as a query argument nil would be NULL, and a
+		// comparison with NULL matches nothing.
+		emails := make([]string, 0, len(team.Members))
+		for _, m := range team.Members {
+			emails = append(emails, config.NormalizeEmail(m))
+		}
+		tag, err := tx.Exec(ctx, `
+			DELETE FROM team_members m USING users u
+			WHERE m.user_id = u.id AND m.team_id = $1 AND m.origin = 'config' AND NOT (u.email = ANY($2))`, id, emails)
+		if err != nil {
+			return fmt.Errorf("remove members of team %q: %w", team.Name, err)
+		}
+		res.MembersRemoved += int(tag.RowsAffected())
+
+		tag, err = tx.Exec(ctx, `
+			INSERT INTO team_members (team_id, user_id, origin)
+			SELECT $1, u.id, 'config' FROM users u WHERE u.email = ANY($2)
+			ON CONFLICT DO NOTHING`, id, emails)
+		if err != nil {
+			return fmt.Errorf("add members of team %q: %w", team.Name, err)
+		}
+		res.MembersAdded += int(tag.RowsAffected())
+	}
+
+	skipped, err := skippedMembers(ctx, tx, teams)
+	res.Skipped = skipped
+	return err
+}
+
+// querier is what a pool and a transaction have in common.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// SkippedMembers lists the members of these teams that no user has the
+// email address of, in the order of the files.
+func SkippedMembers(ctx context.Context, db *pgxpool.Pool, teams []config.Team) ([]SkippedMember, error) {
+	return skippedMembers(ctx, db, teams)
+}
+
+func skippedMembers(ctx context.Context, db querier, teams []config.Team) ([]SkippedMember, error) {
+	var listed []string
+	for _, team := range teams {
+		for _, m := range team.Members {
+			listed = append(listed, config.NormalizeEmail(m))
+		}
+	}
+	if len(listed) == 0 {
+		return nil, nil
+	}
+	rows, err := db.Query(ctx, `SELECT email FROM users WHERE email = ANY($1)`, listed)
+	if err != nil {
+		return nil, fmt.Errorf("read users: %w", err)
+	}
+	known, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("read users: %w", err)
+	}
+	var skipped []SkippedMember
+	for _, team := range teams {
+		for _, m := range team.Members {
+			if email := config.NormalizeEmail(m); !slices.Contains(known, email) {
+				skipped = append(skipped, SkippedMember{Team: team.Name, Email: email})
+			}
+		}
+	}
+	return skipped, nil
 }

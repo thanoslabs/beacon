@@ -22,6 +22,7 @@ const (
 // commands without touching global state.
 type env struct {
 	getenv func(string) string
+	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
 }
@@ -35,10 +36,11 @@ type command struct {
 // commands lists every subcommand by name.
 func commands() map[string]command {
 	return map[string]command{
-		"migrate":  {summary: "Apply database schema migrations", run: runMigrate},
-		"serve":    {summary: "Run the Beacon server", run: runServe},
-		"validate": {summary: "Check the configuration without applying it", run: runValidate},
-		"version":  {summary: "Print the version and exit", run: runVersion},
+		"hash-password": {summary: "Hash a password for the bootstrap admin", run: runHashPassword},
+		"migrate":       {summary: "Apply database schema migrations", run: runMigrate},
+		"serve":         {summary: "Run the Beacon server", run: runServe},
+		"validate":      {summary: "Check the configuration without applying it", run: runValidate},
+		"version":       {summary: "Print the version and exit", run: runVersion},
 	}
 }
 
@@ -48,8 +50,8 @@ var errUsage = errors.New("usage error")
 
 // Run executes the beacon command line and returns the process exit code.
 // args excludes the program name. getenv looks up environment variables.
-func Run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
-	e := env{getenv: getenv, stdout: stdout, stderr: stderr}
+func Run(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
+	e := env{getenv: getenv, stdin: stdin, stdout: stdout, stderr: stderr}
 	cmds := commands()
 
 	if len(args) == 0 {
@@ -94,7 +96,7 @@ func usage(w io.Writer, cmds map[string]command) {
 
 	fmt.Fprint(w, "Beacon is an alerting and on-call platform.\n\nUsage:\n\n  beacon <command> [flags]\n\nCommands:\n\n")
 	for _, name := range names {
-		fmt.Fprintf(w, "  %-10s %s\n", name, cmds[name].summary)
+		fmt.Fprintf(w, "  %-14s %s\n", name, cmds[name].summary)
 	}
 	fmt.Fprint(w, "\nRun \"beacon <command> -h\" for the flags of a command.\n")
 }

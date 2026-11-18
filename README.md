@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, receives alerts through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md) and posts them to a [Slack channel](docs/slack.md), where they can be acknowledged, snoozed and resolved. Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md) and posts them to a [Slack channel](docs/slack.md), where they can be acknowledged, snoozed and resolved. Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -92,17 +92,23 @@ export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmo
 ./bin/beacon migrate            # apply schema migrations without serving
 ./bin/beacon migrate --status   # list migrations and their state
 ./bin/beacon validate --config examples/full   # check configuration files; needs no database
+./bin/beacon hash-password      # hash a password for the bootstrap admin
 ```
 
-The server answers on these endpoints:
+The server answers on these endpoints. Everything that is not listed as open in the [access page](docs/access.md) needs a session, and an address that does not exist answers `401` like one that does:
 
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/v1/ingest/<source>` | Receives alerts from a source. See the [webhook page](docs/webhook.md). |
 | `POST /api/v1/integrations/<name>/interactions` | Receives button presses from Slack. See the [Slack page](docs/slack.md). |
+| `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` | Sign-in through an OpenID Connect identity provider. See the [access page](docs/access.md). |
+| `GET /api/v1/me` | Who is signed in. Needs a session. |
+| `POST /api/v1/config/reload` | Reloads the configuration. Needs the admin role. |
+| `GET`, `POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | API tokens for automation. Needs the admin role. |
+| `POST /auth/bootstrap` | Sign-in of the bootstrap admin, for installs with no identity provider. Off unless configured. |
 | `GET /healthz` | Liveness: the process is running. It does not check the database. |
 | `GET /readyz` | Readiness: the database answers and the server is not shutting down. Returns `503` otherwise. |
-| `GET /metrics` | Prometheus metrics: Go runtime, process and build information, and configuration reloads. |
+| `GET /metrics` | Prometheus metrics: Go runtime, process and build information, configuration reloads, and team members that are not users yet. |
 
 Logs are JSON on standard error (`--log-format text` for reading by eye). Every request gets an identifier, returned in the `X-Request-Id` header and written on each log record for that request. On `SIGTERM` or `SIGINT` the server stops accepting connections and lets in-flight requests finish, for up to `--shutdown-timeout`. On `SIGHUP` it [reloads its configuration](docs/configuration.md#reload-without-a-restart).
 
@@ -111,6 +117,13 @@ Tests that need a database are skipped unless `BEACON_TEST_DATABASE_URL` points 
 ```sh
 export BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable'
 go test -race ./...
+```
+
+The sign-in tests need an identity provider. `compose.yaml` has one, [Dex](https://dexidp.io/), which is started by name and is skipped by the tests unless its address is set:
+
+```sh
+docker compose up -d --wait postgres dex
+export BEACON_TEST_OIDC_ISSUER='http://127.0.0.1:5556/dex'
 ```
 
 The tests in `internal/e2e` build the binary and run it as a process against Postgres and a fake Slack: an alert goes in by webhook, a message comes out to Slack, a button press acknowledges it and the source resolves it. They run with the rest of the tests.

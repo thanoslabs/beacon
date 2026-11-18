@@ -4,7 +4,7 @@ tags: [configuration, reference]
 date: 2026-11-17
 ---
 
-Beacon's provisioned objects are defined in YAML files that live in version control: sources, integrations, teams, schedules, escalation policies and routing. This page is the reference for those files. Why they look the way they do is in [[configuration-and-data-model]].
+Beacon's provisioned objects are defined in YAML files that live in version control: sources, integrations, teams, schedules, escalation policies and routing. So is how people sign in. This page is the reference for those files. Why they look the way they do is in [[configuration-and-data-model]].
 
 > [!warning] Loaded and checked, not all acted on yet
 > Beacon reads and validates every kind described here. What it does with them is still growing: webhook sources and Slack integrations work today, and the other source and integration types, schedules, escalation and routing arrive with later releases. Each section says what is in use.
@@ -82,7 +82,26 @@ An integration is a connection to a notification service.
 | `name` | yes | Identity |
 | `display_name` | no | Shown to people; defaults to `name` |
 | `members` | no | User email addresses |
-| `groups` | no | Identity provider group names whose members belong to the team |
+| `groups` | no | Identity provider group names whose members belong to the team. Applied when a person signs in; see [[access#Roles and teams]]. |
+
+### Team membership
+
+A person belongs to a team when they are in its `members` list **or** in one of its `groups` at the identity provider. Membership is the union of the two, and each is kept apart from the other:
+
+| | From `members` | From `groups` |
+|---|---|---|
+| Set by | The list in the files | The groups in the person's ID token |
+| Applied | When the configuration is applied (start and reload), and when the person signs in | When the person signs in |
+| Removed by | Taking the address off the list | The person leaving the group at the provider, at their next sign-in |
+
+Removing someone from `members` does not remove them while their group still maps to the team, and the reverse.
+
+`members` are email addresses, compared without regard to case. **A listed address that belongs to no user is skipped**: people become users when they first sign in, so a team can list someone who has not arrived yet.
+
+- Each skipped address is logged as an error, `team member skipped`, with the team and the address, every time the configuration is applied. Nothing else is held up: the rest of the team, and the rest of the configuration, is applied.
+- The metric `beacon_team_members_skipped{team="..."}` counts them per team. A value that stays above zero usually means a misspelt address, or someone who has left.
+- The person joins the team by themselves at their first sign-in. No reload is needed.
+- If the identity provider changes someone's email address, the list must be changed too. Until then the old address is skipped, and the person drops out of the team at their next sign-in.
 
 ## Schedules
 
@@ -141,6 +160,24 @@ The first three accept `via`, a list of integration names that narrows how the p
 | `escalation_policy` | yes | Policy to run |
 | `group_by`, `group_wait`, `group_interval` | no | Override the routing settings for this rule |
 
+## Sign-in
+
+The `auth` block says how people sign in: through an identity provider (`oidc`), as the bootstrap admin (`bootstrap_admin`), or both. It is one group of settings, not a list of objects, and must be in a single file. [[access]] describes it and what to set up at the identity provider.
+
+```yaml
+auth:
+  public_url: https://beacon.example.com
+  session_lifetime: 12h
+  oidc:
+    issuer: https://idp.example.com
+    client_id: beacon
+    client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+    groups_claim: groups
+  roles:
+    admin: [beacon-admins]
+    member: [beacon-users]
+```
+
 ## How changes are applied
 
 When Beacon starts, it makes its database match the files. Each provisioned object has a row there, so that alerts and other history have something to refer to.
@@ -166,6 +203,8 @@ kill -HUP "$(pidof beacon)"
 docker compose kill --signal HUP beacon
 kubectl exec deploy/beacon -- kill -HUP 1
 ```
+
+An admin can ask for the same over HTTP, with `POST /api/v1/config/reload` (see [[access]]). It answers `200` with `{"result": "reloaded"}`, or `422` with the list of problems when the configuration is rejected. The request reaches one replica; the signal is the way to reach each of them.
 
 - The files are checked first, exactly as `beacon validate --check-secrets` checks them. If anything is wrong, **nothing** of the new configuration is applied and the previous one stays active. The log has one `configuration problem` record per problem, then `configuration reload failed; the previous configuration stays active`.
 - A valid configuration is applied as a whole, as at start: the database is brought in line, then sources, integrations and notification targets switch over together. Requests in progress finish with what they started with. The log says `configuration reloaded`.

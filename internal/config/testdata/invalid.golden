@@ -23,6 +23,15 @@ testdata/invalid/sources.yaml:10: source "ok": severity.mapping.page: "urgent" i
 testdata/invalid/sources.yaml:11: source "ok": severity.default: "loud" is not critical, warning or info
 testdata/invalid/sources.yaml:12: source "ok": name: the name is used twice; first at testdata/invalid/sources.yaml:4
 testdata/invalid/sources.yaml:12: source "ok": type: is required: alertmanager, grafana or webhook
+testdata/invalid/sources.yaml:15: auth: public_url: must be an http or https address without a path, such as https://beacon.example.com
+testdata/invalid/sources.yaml:16: auth: session_lifetime: must be between 1m and 30d
+testdata/invalid/sources.yaml:17: auth: oidc.client_id: is required
+testdata/invalid/sources.yaml:17: auth: oidc.client_secret: is required
+testdata/invalid/sources.yaml:18: auth: oidc.issuer: must use https; plain http is accepted only for a provider on localhost
+testdata/invalid/sources.yaml:19: auth: oidc.scopes: must include openid
+testdata/invalid/sources.yaml:21: auth: roles.admin[1]: must not be empty
+testdata/invalid/sources.yaml:21: auth: roles.admin[2]: "admins" is listed twice
+testdata/invalid/sources.yaml:24: auth: bootstrap_admin.password_hash: must be a bcrypt hash with a cost of at least 10, as `beacon hash-password` prints it; it must not be the password itself
 testdata/invalid/teams/platform.yaml:3: team "platform": members[1]: "Ada@Example.com" is listed twice
 testdata/invalid/teams/platform.yaml:3: team "platform": members[2]: "not-an-email" is not an email address
 testdata/invalid/teams/platform.yaml:3: team "platform": members[3]: "Grace <grace@example.com>" is not an email address

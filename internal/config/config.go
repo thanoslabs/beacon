@@ -9,6 +9,7 @@ package config
 import (
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/thanoslabs/beacon/internal/alert"
 )
@@ -22,6 +23,8 @@ type Config struct {
 	EscalationPolicies []EscalationPolicy
 	// Routing is nil when no file has a routing block.
 	Routing *Routing
+	// Auth is nil when no file has an auth block. Nobody can sign in then.
+	Auth *Auth
 }
 
 // Origin says where an object was defined. It is empty for objects that did
@@ -273,6 +276,100 @@ type RoutingRule struct {
 	GroupInterval    *Duration         `yaml:"group_interval" json:"group_interval,omitempty"`
 
 	Origin Origin `yaml:"-" json:"-"`
+}
+
+// Auth says how people sign in. It is settings, not an object: it has no
+// name and no row in the database.
+type Auth struct {
+	// PublicURL is the address at which browsers reach Beacon, such as
+	// https://beacon.example.com. The identity provider sends people back
+	// to it, and its scheme decides whether cookies are marked Secure.
+	PublicURL string `yaml:"public_url" json:"public_url"`
+	// SessionLifetime is how long a sign-in lasts. Nil means
+	// DefaultSessionLifetime.
+	SessionLifetime *Duration `yaml:"session_lifetime" json:"session_lifetime,omitempty"`
+	// OIDC is the identity provider. Nil means there is none.
+	OIDC *OIDC `yaml:"oidc" json:"oidc,omitempty"`
+	// Roles maps the provider's roles or groups to Beacon's roles. Nil
+	// means that everyone who can sign in is a member and nobody is an
+	// admin.
+	Roles *RoleMapping `yaml:"roles" json:"roles,omitempty"`
+	// BootstrapAdmin is an admin account that needs no identity provider.
+	// Nil means it is off.
+	BootstrapAdmin *BootstrapAdmin `yaml:"bootstrap_admin" json:"bootstrap_admin,omitempty"`
+
+	Origin Origin `yaml:"-" json:"-"`
+}
+
+// DefaultSessionLifetime is how long a sign-in lasts unless the
+// configuration says otherwise.
+const DefaultSessionLifetime = Duration(12 * time.Hour)
+
+// Lifetime returns how long a sign-in lasts.
+func (a Auth) Lifetime() time.Duration {
+	if a.SessionLifetime != nil {
+		return time.Duration(*a.SessionLifetime)
+	}
+	return time.Duration(DefaultSessionLifetime)
+}
+
+// OIDC is an OpenID Connect identity provider and Beacon's registration
+// with it.
+type OIDC struct {
+	// Issuer is the provider's issuer URL, under which its discovery
+	// document is found.
+	Issuer       string `yaml:"issuer" json:"issuer"`
+	ClientID     string `yaml:"client_id" json:"client_id"`
+	ClientSecret Secret `yaml:"client_secret" json:"client_secret"`
+	// Scopes are requested at sign-in. Empty means DefaultScopes.
+	Scopes []string `yaml:"scopes" json:"scopes,omitempty"`
+	// GroupsClaim names the claim of the ID token that carries the person's
+	// roles or groups. Empty means DefaultGroupsClaim.
+	GroupsClaim string `yaml:"groups_claim" json:"groups_claim,omitempty"`
+}
+
+// Claim returns the name of the claim that carries roles or groups.
+func (o OIDC) Claim() string {
+	if o.GroupsClaim != "" {
+		return o.GroupsClaim
+	}
+	return DefaultGroupsClaim
+}
+
+// BootstrapAdmin is an admin account for an install that has no identity
+// provider yet, or whose provider maps nobody to admin yet. Taking it out of
+// the configuration turns it off.
+type BootstrapAdmin struct {
+	// PasswordHash is the bcrypt hash of the account's password, as
+	// `beacon hash-password` prints it. Beacon never sees the password
+	// except when someone signs in with it.
+	PasswordHash Secret `yaml:"password_hash" json:"password_hash"`
+}
+
+// DefaultGroupsClaim is the claim that carries a person's roles or groups
+// unless the configuration says otherwise.
+const DefaultGroupsClaim = "groups"
+
+// RoleMapping maps the identity provider's roles or groups to Beacon's two
+// roles. The names are compared with the values of the groups claim.
+type RoleMapping struct {
+	// Admin lists the groups whose members are admins.
+	Admin []string `yaml:"admin" json:"admin,omitempty"`
+	// Member lists the groups whose members are members. When it is empty,
+	// everyone who can sign in is a member.
+	Member []string `yaml:"member" json:"member,omitempty"`
+}
+
+// DefaultScopes are the scopes requested at sign-in unless the configuration
+// says otherwise.
+var DefaultScopes = []string{"openid", "profile", "email"}
+
+// RequestedScopes returns the scopes to request at sign-in.
+func (o OIDC) RequestedScopes() []string {
+	if len(o.Scopes) > 0 {
+		return o.Scopes
+	}
+	return DefaultScopes
 }
 
 // ChannelTarget is a shared channel reached through an integration.

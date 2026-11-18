@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 
+	"github.com/thanoslabs/beacon/internal/auth/oidctest"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
 	"github.com/thanoslabs/beacon/internal/slack/slacktest"
@@ -149,6 +152,8 @@ func launch(t *testing.T, dbURL, dir string) *beacon {
 		"BEACON_SOURCE_TOKEN=" + sourceToken,
 		"BEACON_SLACK_BOT_TOKEN=" + botToken,
 		"BEACON_SLACK_API_URL=" + b.slack.URL,
+		"BEACON_OIDC_CLIENT_SECRET=" + oidctest.ClientSecret,
+		"BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH=" + bootstrapHash(t),
 	}
 	stderr, err := b.cmd.StderrPipe()
 	if err != nil {
@@ -369,6 +374,11 @@ func TestFirstPath(t *testing.T) {
 		}
 	}
 
+	// Slack has the message a moment before Beacon has recorded that it was
+	// delivered. The press must come after that, as a person's would, or
+	// the two events can reach the timeline in either order.
+	b.timeline(alertID, 2)
+
 	// 3. Someone acknowledges it from Slack.
 	if code := b.click(msg, "beacon_acknowledge", alice); code != http.StatusOK {
 		t.Fatalf("acknowledge from Slack = %d, want 200", code)
@@ -392,7 +402,9 @@ func TestFirstPath(t *testing.T) {
 		t.Errorf("answer to the second acknowledge = %v", notes)
 	}
 
-	// 4. The source reports that the problem is over.
+	// 4. The source reports that the problem is over, once the delivery of
+	// the acknowledgement is on record too.
+	b.timeline(alertID, 4)
 	code, res = b.webhook(diskFullResolved)
 	if code != http.StatusOK || res["result"] != "resolved" || res["alert_id"] != alertID {
 		t.Fatalf("resolve webhook = %d %v, want the alert resolved", code, res)
@@ -747,5 +759,410 @@ func TestReloadReadsSecretFilesAgain(t *testing.T) {
 	}
 	if strings.Contains(b.output(), rotated) {
 		t.Error("the logs contain the rotated secret")
+	}
+}
+
+// signInConfiguration adds sign-in through the Dex of compose.yaml to the
+// configuration.
+func signInConfiguration(t *testing.T) string {
+	t.Helper()
+	return configuration + `auth:
+  public_url: ` + oidctest.PublicURL + `
+  session_lifetime: 1h
+  oidc:
+    issuer: ` + oidctest.Issuer(t) + `
+    client_id: ` + oidctest.ClientID + `
+    client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+    scopes: [openid, profile, email, groups]
+  roles:
+    admin: [beacon-admins]
+    member: [platform-engineers]
+teams:
+  - name: platform
+    groups: [platform-engineers]
+`
+}
+
+// do sends a request to Beacon with the browser and returns the status and
+// the body.
+func do(t *testing.T, browser *http.Client, method, path string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, oidctest.PublicURL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := browser.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return resp.StatusCode, string(body)
+}
+
+// TestSignIn signs a person in to the real binary through a real identity
+// provider, uses the session, and signs out.
+func TestSignIn(t *testing.T) {
+	issuer := oidctest.Issuer(t)
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, signInConfiguration(t)))
+	b.waitUntilServing()
+	browser := oidctest.Browser(t, strings.TrimPrefix(b.url, "http://"))
+
+	if code, body := do(t, browser, http.MethodGet, "/api/v1/me"); code != http.StatusUnauthorized {
+		t.Fatalf("GET /api/v1/me before sign-in = %d %s, want 401", code, body)
+	}
+	code, body := oidctest.SignIn(t, browser, oidctest.Grace, oidctest.Password)
+	if code != http.StatusOK || !strings.Contains(body, `"email":"grace@example.com"`) || !strings.Contains(body, `"role":"member"`) {
+		t.Fatalf("after sign-in = %d %s", code, body)
+	}
+	var stored string
+	err := b.db.QueryRow(context.Background(), `SELECT oidc_issuer FROM users WHERE email = 'grace@example.com' AND last_sign_in_at IS NOT NULL`).Scan(&stored)
+	if err != nil || stored != issuer {
+		t.Errorf("the stored user has issuer %q, %v; want %q", stored, err, issuer)
+	}
+
+	// Roles and teams follow the groups that Dex puts in the token: Ada is
+	// in beacon-admins and platform-engineers, Grace in platform-engineers,
+	// and Linus in neither, so he has no access.
+	if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), oidctest.Ada, oidctest.Password); code != http.StatusOK || !strings.Contains(body, `"role":"admin"`) {
+		t.Errorf("Ada after sign-in = %d %s, want an admin", code, body)
+	}
+	if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), oidctest.Linus, oidctest.Password); code != http.StatusForbidden {
+		t.Errorf("Linus after sign-in = %d %s, want 403", code, body)
+	}
+	var members string
+	err = b.db.QueryRow(context.Background(), `
+		SELECT coalesce(string_agg(u.email || ' ' || m.origin, ', ' ORDER BY u.email), '')
+		FROM team_members m JOIN teams t ON t.id = m.team_id JOIN users u ON u.id = m.user_id WHERE t.name = 'platform'`).Scan(&members)
+	if err != nil || members != "ada@example.com group, grace@example.com group" {
+		t.Errorf("members of the team = %q, %v", members, err)
+	}
+
+	// The session survives a reload of the same configuration, and the
+	// webhook still needs no session, only its token.
+	b.reload(signInConfiguration(t), 1)
+	if code, body := do(t, browser, http.MethodGet, "/api/v1/me"); code != http.StatusOK {
+		t.Errorf("GET /api/v1/me after a reload = %d %s", code, body)
+	}
+	if code, res := b.webhook(diskFull); code != http.StatusCreated {
+		t.Errorf("webhook = %d %v", code, res)
+	}
+
+	if code, body := do(t, browser, http.MethodPost, "/auth/logout"); code != http.StatusNoContent {
+		t.Errorf("sign-out = %d %s, want 204", code, body)
+	}
+	if code, _ := do(t, browser, http.MethodGet, "/api/v1/me"); code != http.StatusUnauthorized {
+		t.Errorf("GET /api/v1/me after sign-out = %d, want 401", code)
+	}
+
+	// Taking sign-in out of the configuration turns it off.
+	b.reload(configuration, 2)
+	if code, _ := do(t, browser, http.MethodGet, "/auth/login"); code != http.StatusNotFound {
+		t.Errorf("GET /auth/login without an auth block = %d, want 404", code)
+	}
+
+	if code := b.terminate(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+	logs := b.output()
+	for _, secret := range []string{oidctest.ClientSecret, sourceToken, botToken, signingSecret} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("the logs contain the credential %q", secret)
+		}
+	}
+	for _, cookie := range browser.Jar.Cookies(&url.URL{Scheme: "http", Host: "127.0.0.1"}) {
+		if cookie.Value != "" && strings.Contains(logs, cookie.Value) {
+			t.Errorf("the logs contain the value of the cookie %s", cookie.Name)
+		}
+	}
+}
+
+// TestTeamMembersFromConfiguration lists people in a team before they have
+// ever signed in. They are skipped, logged and counted, and nothing else is
+// held up; each joins the team at their first sign-in.
+func TestTeamMembersFromConfiguration(t *testing.T) {
+	withMembers := strings.Replace(signInConfiguration(t), "  - name: platform\n", "  - name: platform\n    members: [grace@example.com, nobody@example.com]\n", 1)
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, withMembers))
+	b.waitUntilServing()
+
+	// Both are unknown at the start. That is logged as an error for each,
+	// and the rest of the configuration works.
+	logs := b.output()
+	for _, email := range []string{"grace@example.com", "nobody@example.com"} {
+		if want := `"level":"ERROR","msg":"team member skipped: no user has this email address; they join the team when they first sign in","team":"platform","email":"` + email + `"`; !strings.Contains(logs, want) {
+			t.Errorf("the logs do not contain %s", want)
+		}
+	}
+	if got := b.metrics("beacon_team_members_skipped"); got != `beacon_team_members_skipped{team="platform"} 2` {
+		t.Errorf("metric at start: %s", got)
+	}
+	if code, res := b.webhook(diskFull); code != http.StatusCreated {
+		t.Errorf("webhook = %d %v", code, res)
+	}
+
+	// Grace signs in for the first time, and is a member at once.
+	browser := oidctest.Browser(t, strings.TrimPrefix(b.url, "http://"))
+	if code, body := oidctest.SignIn(t, browser, oidctest.Grace, oidctest.Password); code != http.StatusOK {
+		t.Fatalf("sign-in = %d %s", code, body)
+	}
+	members := func() string {
+		t.Helper()
+		var out string
+		err := b.db.QueryRow(context.Background(), `
+			SELECT coalesce(string_agg(u.email || ' ' || m.origin, ', ' ORDER BY u.email, m.origin), '')
+			FROM team_members m JOIN teams t ON t.id = m.team_id JOIN users u ON u.id = m.user_id WHERE t.name = 'platform'`).Scan(&out)
+		if err != nil {
+			t.Fatalf("read members: %v", err)
+		}
+		return out
+	}
+	// From the list, and from her identity provider group as well.
+	if got := members(); got != "grace@example.com config, grace@example.com group" {
+		t.Errorf("members after Grace signed in = %q", got)
+	}
+	if got := b.metrics("beacon_team_members_skipped"); got != `beacon_team_members_skipped{team="platform"} 1` {
+		t.Errorf("metric after Grace signed in: %s", got)
+	}
+
+	// Taking her off the list removes that membership at the next reload,
+	// and leaves the one from her group.
+	b.reload(strings.Replace(withMembers, "grace@example.com, ", "", 1), 1)
+	if got := members(); got != "grace@example.com group" {
+		t.Errorf("members after the list changed = %q", got)
+	}
+}
+
+// TestRolesAreEnforced signs in a member and an admin through the identity
+// provider and sends both to a route that only an admin may use.
+func TestRolesAreEnforced(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, signInConfiguration(t)))
+	b.waitUntilServing()
+	addr := strings.TrimPrefix(b.url, "http://")
+	const reload = "/api/v1/config/reload"
+
+	stranger := oidctest.Browser(t, addr)
+	if code, body := do(t, stranger, http.MethodPost, reload); code != http.StatusUnauthorized {
+		t.Errorf("reload without a session = %d %s, want 401", code, body)
+	}
+
+	// Grace is a member: she may ask who she is, and may not reload.
+	member := oidctest.Browser(t, addr)
+	if code, body := oidctest.SignIn(t, member, oidctest.Grace, oidctest.Password); code != http.StatusOK || !strings.Contains(body, `"role":"member"`) {
+		t.Fatalf("Grace after sign-in = %d %s", code, body)
+	}
+	if code, body := do(t, member, http.MethodPost, reload); code != http.StatusForbidden || !strings.Contains(body, "needs the admin role") {
+		t.Errorf("reload as a member = %d %s, want 403", code, body)
+	}
+	if strings.Contains(b.output(), `"msg":"configuration reloaded"`) {
+		t.Error("a member reloaded the configuration")
+	}
+
+	// Ada is an admin.
+	admin := oidctest.Browser(t, addr)
+	if code, body := oidctest.SignIn(t, admin, oidctest.Ada, oidctest.Password); code != http.StatusOK || !strings.Contains(body, `"role":"admin"`) {
+		t.Fatalf("Ada after sign-in = %d %s", code, body)
+	}
+	if code, body := do(t, admin, http.MethodPost, reload); code != http.StatusOK || !strings.Contains(body, `"result":"reloaded"`) {
+		t.Errorf("reload as an admin = %d %s, want 200", code, body)
+	}
+	if !strings.Contains(b.output(), `"msg":"configuration reloaded","trigger":"api"`) {
+		t.Error("the reload by the admin is not in the logs")
+	}
+
+	// An invalid configuration is refused through the endpoint as it is by
+	// the signal, and the answer says what is wrong.
+	broken := strings.Replace(signInConfiguration(t), "escalation_policy: default", "escalation_policy: missing", 1)
+	if err := os.WriteFile(filepath.Join(b.dir, "beacon.yaml"), []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, body := do(t, admin, http.MethodPost, reload)
+	if code != http.StatusUnprocessableEntity || !strings.Contains(body, `"field":"default.escalation_policy"`) || !strings.Contains(body, "the previous configuration stays active") {
+		t.Errorf("reload of an invalid configuration = %d %s, want 422 with the problem", code, body)
+	}
+	if code, res := b.webhook(diskFull); code != http.StatusCreated {
+		t.Errorf("webhook after the rejected reload = %d %v", code, res)
+	}
+	// The admin's session is still good, and a member still cannot reload.
+	if code, _ := do(t, admin, http.MethodGet, "/api/v1/me"); code != http.StatusOK {
+		t.Errorf("GET /api/v1/me as the admin = %d", code)
+	}
+}
+
+// bootstrapPassword is the password of the bootstrap admin in these tests.
+const bootstrapPassword = "e2e-bootstrap-password-marker-7f3c"
+
+var (
+	hashOnce     sync.Once
+	hashedSecret string
+)
+
+// bootstrapHash returns the bcrypt hash of bootstrapPassword, which is what
+// Beacon is given.
+func bootstrapHash(t *testing.T) string {
+	t.Helper()
+	hashOnce.Do(func() {
+		hash, err := bcrypt.GenerateFromPassword([]byte(bootstrapPassword), 10)
+		if err != nil {
+			t.Fatalf("hash the bootstrap password: %v", err)
+		}
+		hashedSecret = string(hash)
+	})
+	return hashedSecret
+}
+
+// api sends a request with a JSON body and an optional API token, and
+// returns the status and the decoded body.
+func (b *beacon) api(client *http.Client, method, path, token, body string) (int, map[string]any) {
+	b.t.Helper()
+	req, err := http.NewRequest(method, oidctest.PublicURL+path, strings.NewReader(body))
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		b.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		b.t.Fatalf("read %s: %v", path, err)
+	}
+	var decoded map[string]any
+	_ = json.Unmarshal(raw, &decoded)
+	return resp.StatusCode, decoded
+}
+
+// TestBootstrapAdminAndTokens is the path of a new install with no identity
+// provider: the bootstrap admin signs in, creates tokens for automation, and
+// is then turned off. A member token must not be able to do what only an
+// admin may.
+func TestBootstrapAdminAndTokens(t *testing.T) {
+	withBootstrap := configuration + `auth:
+  public_url: ` + oidctest.PublicURL + `
+  bootstrap_admin:
+    password_hash: {env: BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH}
+`
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, withBootstrap))
+	b.waitUntilServing()
+	addr := strings.TrimPrefix(b.url, "http://")
+	browser := oidctest.Browser(t, addr)
+	// A client with no cookies, for requests that carry only a token.
+	bare := oidctest.Browser(t, addr)
+	bare.Jar = nil
+
+	// There is no identity provider, and the wrong password gets nowhere.
+	if code, _ := b.api(browser, "GET", "/auth/login", "", ""); code != http.StatusNotFound {
+		t.Errorf("GET /auth/login without a provider = %d, want 404", code)
+	}
+	if code, _ := b.api(browser, "POST", "/auth/bootstrap", "", `{"password": "not-the-password"}`); code != http.StatusUnauthorized {
+		t.Errorf("bootstrap sign-in with a wrong password = %d, want 401", code)
+	}
+	code, who := b.api(browser, "POST", "/auth/bootstrap", "", `{"password": "`+bootstrapPassword+`"}`)
+	if code != http.StatusOK || who["role"] != "admin" {
+		t.Fatalf("bootstrap sign-in = %d %v", code, who)
+	}
+
+	// The admin creates a token of each role.
+	create := func(name, role string) string {
+		t.Helper()
+		code, created := b.api(browser, "POST", "/api/v1/tokens", "", `{"name": "`+name+`", "role": "`+role+`"}`)
+		token, _ := created["token"].(string)
+		if code != http.StatusCreated || token == "" {
+			t.Fatalf("create the %s token = %d %v", role, code, created)
+		}
+		return token
+	}
+	memberToken, adminToken := create("dashboard", "member"), create("deploy", "admin")
+
+	// The member token is good for what a member may do, and for nothing
+	// that needs an admin.
+	if code, who := b.api(bare, "GET", "/api/v1/me", memberToken, ""); code != http.StatusOK || who["role"] != "member" || who["display_name"] != "dashboard" {
+		t.Errorf("GET /api/v1/me with the member token = %d %v", code, who)
+	}
+	for _, denied := range [][3]string{
+		{"POST", "/api/v1/config/reload", ""},
+		{"GET", "/api/v1/tokens", ""},
+		{"POST", "/api/v1/tokens", `{"name": "more", "role": "admin"}`},
+	} {
+		if code, body := b.api(bare, denied[0], denied[1], memberToken, denied[2]); code != http.StatusForbidden {
+			t.Errorf("%s %s with the member token = %d %v, want 403", denied[0], denied[1], code, body)
+		}
+	}
+	// The admin token does all of it.
+	if code, body := b.api(bare, "POST", "/api/v1/config/reload", adminToken, ""); code != http.StatusOK {
+		t.Errorf("reload with the admin token = %d %v", code, body)
+	}
+	code, list := b.api(bare, "GET", "/api/v1/tokens", adminToken, "")
+	tokens, _ := list["tokens"].([]any)
+	if code != http.StatusOK || len(tokens) != 2 {
+		t.Fatalf("list with the admin token = %d %v", code, list)
+	}
+	// No credential at all, and one that was never issued.
+	for _, token := range []string{"", "bcn_never-issued"} {
+		if code, _ := b.api(bare, "POST", "/api/v1/config/reload", token, ""); code != http.StatusUnauthorized {
+			t.Errorf("reload with the token %q = %d, want 401", token, code)
+		}
+	}
+
+	// Revoking the member token ends its access.
+	var memberID string
+	for _, item := range tokens {
+		if tok := item.(map[string]any); tok["name"] == "dashboard" {
+			memberID, _ = tok["id"].(string)
+		}
+	}
+	if code, _ := b.api(bare, "DELETE", "/api/v1/tokens/"+memberID, adminToken, ""); code != http.StatusNoContent {
+		t.Errorf("revoke = %d, want 204", code)
+	}
+	if code, _ := b.api(bare, "GET", "/api/v1/me", memberToken, ""); code != http.StatusUnauthorized {
+		t.Errorf("GET /api/v1/me with the revoked token = %d, want 401", code)
+	}
+
+	// The bootstrap admin is taken out of the configuration, and the admin
+	// token reloads it. The account's session ends, signing in is gone, and
+	// the token keeps working: automation does not depend on the account.
+	if err := os.WriteFile(filepath.Join(b.dir, "beacon.yaml"), []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := b.api(bare, "POST", "/api/v1/config/reload", adminToken, ""); code != http.StatusOK {
+		t.Fatalf("reload without the bootstrap admin = %d %v", code, body)
+	}
+	if code, _ := b.api(browser, "GET", "/api/v1/me", "", ""); code != http.StatusUnauthorized {
+		t.Errorf("GET /api/v1/me with the bootstrap admin's session after it was turned off = %d, want 401", code)
+	}
+	if code, _ := b.api(browser, "POST", "/auth/bootstrap", "", `{"password": "`+bootstrapPassword+`"}`); code != http.StatusNotFound {
+		t.Errorf("bootstrap sign-in after it was turned off = %d, want 404", code)
+	}
+	if code, _ := b.api(bare, "GET", "/api/v1/me", adminToken, ""); code != http.StatusOK {
+		t.Errorf("GET /api/v1/me with the admin token after the reload = %d, want 200", code)
+	}
+
+	// The tokens are stored as hashes, and nothing secret was logged.
+	var stored int
+	if err := b.db.QueryRow(context.Background(), `SELECT count(*) FROM api_tokens WHERE token_hash IN ($1, $2)`, memberToken, adminToken).Scan(&stored); err != nil || stored != 0 {
+		t.Errorf("%d tokens are stored as they are, %v", stored, err)
+	}
+	if code := b.terminate(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+	logs := b.output()
+	for name, secret := range map[string]string{"the member token": memberToken, "the admin token": adminToken, "the bootstrap password": bootstrapPassword,
+		"the bootstrap password hash": bootstrapHash(t), "a wrong password": "not-the-password", "the source token": sourceToken} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("the logs contain %s", name)
+		}
 	}
 }

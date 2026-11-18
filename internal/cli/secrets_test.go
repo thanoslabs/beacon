@@ -17,6 +17,10 @@ var secretSettings = map[string]string{
 	"BEACON_SMTP_PASSWORD":        "smtp-password-marker-6a3d",
 	"BEACON_DISCORD_BOT_TOKEN":    "discord-token-marker-0c8f",
 	"BEACON_HOOK_AUTHORIZATION":   "Bearer hook-marker-b7e2",
+	"BEACON_OIDC_CLIENT_SECRET":   "client-secret-marker-93fa",
+	// A bcrypt hash of a password that is used nowhere. The hash is a
+	// credential too: it must not be printed either.
+	"BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH": "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W",
 }
 
 // secretsConfig refers to every secret a configuration can hold.
@@ -36,7 +40,7 @@ const secretsConfig = slackConfig + `  - name: email
 
 // secretMarkers are the substrings that must never be printed.
 var secretMarkers = []string{"db-pass-marker-1f9a", "source-token-marker-7c2e41d0", "bot-token-marker-55d1", "signing-secret-marker-e07b",
-	"smtp-password-marker-6a3d", "discord-token-marker-0c8f", "hook-marker-b7e2"}
+	"smtp-password-marker-6a3d", "discord-token-marker-0c8f", "hook-marker-b7e2", "client-secret-marker-93fa", "2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"}
 
 func assertNoSecrets(t *testing.T, what, out string, markers ...string) {
 	t.Helper()
@@ -55,6 +59,13 @@ func TestSecretsAreNeverPrinted(t *testing.T) {
 	// ones are spliced in after the Slack integration.
 	head, tail, _ := strings.Cut(slackConfig, "escalation_policies:")
 	extra := strings.TrimPrefix(secretsConfig, slackConfig)
+	// Sign-in is pointed at a provider that does not answer, so the client
+	// secret is in use while the start fails.
+	tail += `auth:
+  public_url: https://beacon.example.com
+  oidc: {issuer: "http://127.0.0.1:1/idp", client_id: beacon, client_secret: {env: BEACON_OIDC_CLIENT_SECRET}}
+  bootstrap_admin: {password_hash: {env: BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH}}
+`
 	good := writeConfig(t, head+extra+"escalation_policies:"+tail)
 	// A configuration with mistakes next to its secrets.
 	bad := writeConfig(t, head+extra+"  - name: slack\n    type: pager\nescalation_policies:"+tail)

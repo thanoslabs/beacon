@@ -11,3 +11,14 @@ sources:
       default: loud
   - name: ok
     token: {env: GOOD_TOKEN}
+auth:
+  public_url: http://beacon.example.com/app
+  session_lifetime: 10s
+  oidc:
+    issuer: http://idp.example.com
+    scopes: [profile, email]
+  roles:
+    admin: [admins, "", admins]
+    member: []
+  bootstrap_admin:
+    password_hash: {env: SHORT_TOKEN}
