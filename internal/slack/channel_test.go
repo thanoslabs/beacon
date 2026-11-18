@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -180,6 +181,7 @@ type pipelineFixture struct {
 	alerts *alert.Store
 	fake   *slacktest.Server
 	source string
+	policy string
 }
 
 func newPipelineFixture(t *testing.T) *pipelineFixture {
@@ -194,17 +196,17 @@ func newPipelineFixture(t *testing.T) *pipelineFixture {
 		PollInterval: 10 * time.Millisecond, MaxAttempts: 3, BackoffBase: 20 * time.Millisecond, BackoffMax: 40 * time.Millisecond,
 	})
 	p.Register(integration, newChannel(f.fake.URL))
-	f.alerts.Observe(p.NotifyAll([]notify.Target{{IntegrationID: integration, Destination: "#alerts"}}))
+	f.policy = provisiontest.Row(t, pool, provision.EscalationPolicies, "default")
+	p.SetPolicies(map[string]notify.Policy{f.policy: {Name: "default", FirstStep: []notify.Target{{IntegrationID: integration, Destination: "#alerts"}}}})
+	f.alerts.Observe(p.Observe)
 
 	runCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		p.Run(runCtx)
-	}()
+	var running sync.WaitGroup
+	running.Go(func() { p.Run(runCtx) })
+	running.Go(func() { p.RunGroups(runCtx, 10*time.Millisecond) })
 	t.Cleanup(func() {
 		cancel()
-		<-done
+		running.Wait()
 	})
 	return f
 }
@@ -215,6 +217,7 @@ func (f *pipelineFixture) fire(t *testing.T) alert.Alert {
 		SourceID: f.source, Fingerprint: "fp", Severity: alert.SeverityCritical,
 		Labels:      map[string]string{"alertname": "DiskFull", "host": "db1"},
 		Annotations: map[string]string{"summary": "Disk is full", "runbook_url": "https://runbooks.example.com/disk"},
+		Group:       alert.Grouping{Key: "fp", EscalationPolicyID: f.policy},
 	})
 	if err != nil {
 		t.Fatalf("Fire: %v", err)
@@ -223,14 +226,17 @@ func (f *pipelineFixture) fire(t *testing.T) alert.Alert {
 }
 
 // attempts returns the outcome and error of every attempt, in order, once
-// there are no pending notifications left.
+// no notification is due or pending any more.
 func (f *pipelineFixture) attempts(t *testing.T) []string {
 	t.Helper()
 	ctx := context.Background()
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		var pending int
-		if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM notifications WHERE status = 'pending'`).Scan(&pending); err != nil {
+		// Nothing is waiting in the queue, and no group is waiting to be put
+		// into it.
+		if err := f.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM notifications WHERE status = 'pending') +
+			(SELECT count(*) FROM alert_groups WHERE notify_at IS NOT NULL)`).Scan(&pending); err != nil {
 			t.Fatalf("count: %v", err)
 		}
 		if pending == 0 {

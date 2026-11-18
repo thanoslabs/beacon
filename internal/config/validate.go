@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -23,6 +24,9 @@ const minTokenLength = 16
 
 // maxRepeat bounds how often an escalation policy runs again.
 const maxRepeat = 100
+
+// maxServiceLength bounds the name of a service.
+const maxServiceLength = 100
 
 const nameRule = "must be lowercase letters, digits and hyphens, start with a letter and be at most 63 characters"
 
@@ -154,10 +158,16 @@ func (o object) groups(field string, list []string) {
 
 // labelNames checks a list of label names.
 func (o object) labelNames(field string, names []string) {
+	seen := map[string]bool{}
 	for i, n := range names {
-		if !labelNameRE.MatchString(n) {
-			o.errorf(fmt.Sprintf("%s[%d]", field, i), "%q is not a label name", n)
+		at := fmt.Sprintf("%s[%d]", field, i)
+		switch {
+		case !labelNameRE.MatchString(n):
+			o.errorf(at, "%q is not a label name", n)
+		case seen[n]:
+			o.errorf(at, "%q is listed twice", n)
 		}
+		seen[n] = true
 	}
 }
 
@@ -166,6 +176,12 @@ func (o object) positive(field string, d *Duration) {
 	if d != nil && *d <= 0 {
 		o.errorf(field, "must be longer than zero")
 	}
+}
+
+// ValidLabelName reports whether name can be the name of a label: letters,
+// digits and underscores, not starting with a digit, as in Prometheus.
+func ValidLabelName(name string) bool {
+	return labelNameRE.MatchString(name)
 }
 
 // NormalizeEmail returns the form in which email addresses are compared and
@@ -279,7 +295,8 @@ func (c Config) validate(v *validator) {
 	if r := c.Routing; r != nil {
 		o := object{v: v, origin: r.Origin, label: kindRouting}
 		o.labelNames("group_by", r.GroupBy)
-		o.positive("group_wait", r.GroupWait)
+		// group_wait may be zero: the first notification is then sent at
+		// once.
 		o.positive("group_interval", r.GroupInterval)
 		if r.Default.Team != "" {
 			o.ref("default.team", kindTeam, r.Default.Team, teams)
@@ -296,21 +313,30 @@ func (c Config) validate(v *validator) {
 			if len(rule.Match) == 0 && len(rule.MatchRE) == 0 {
 				o.errorf("match", "a rule needs match, match_re or both")
 			}
-			for name := range rule.Match {
+			for name, value := range rule.Match {
 				if !labelNameRE.MatchString(name) {
 					o.errorf("match", "%q is not a label name", name)
+				}
+				if len(value) > MaxMatcherLength {
+					o.errorf("match."+name, "is longer than %d characters", MaxMatcherLength)
+				}
+				if _, both := rule.MatchRE[name]; both {
+					o.errorf("match."+name, "the label is in match and in match_re; use one of them")
 				}
 			}
 			for name, expr := range rule.MatchRE {
 				if !labelNameRE.MatchString(name) {
 					o.errorf("match_re", "%q is not a label name", name)
 				}
-				if _, err := regexp.Compile("^(?:" + expr + ")$"); err != nil {
-					o.errorf("match_re."+name, "is not a regular expression: %s", strings.TrimPrefix(err.Error(), "error parsing regexp: "))
+				if _, err := CompileMatcher(expr); err != nil {
+					o.errorf("match_re."+name, "%s", err)
 				}
 			}
 			if rule.Team != "" {
 				o.ref("team", kindTeam, rule.Team, teams)
+			}
+			if len(rule.Service) > maxServiceLength || strings.ContainsFunc(rule.Service, unicode.IsControl) {
+				o.errorf("service", "must be at most %d characters, without control characters", maxServiceLength)
 			}
 			if rule.EscalationPolicy == "" {
 				o.errorf("escalation_policy", "is required")
@@ -318,7 +344,6 @@ func (c Config) validate(v *validator) {
 				o.ref("escalation_policy", kindPolicy, rule.EscalationPolicy, policies)
 			}
 			o.labelNames("group_by", rule.GroupBy)
-			o.positive("group_wait", rule.GroupWait)
 			o.positive("group_interval", rule.GroupInterval)
 		}
 	}

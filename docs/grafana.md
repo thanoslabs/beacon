@@ -126,7 +126,7 @@ The body may be up to 4 MiB. The responses are the ones described for [[alertman
 
 ## How Grafana and Beacon work together
 
-Grafana's notifications come from an Alertmanager that is built into it, so what [[alertmanager#How Alertmanager and Beacon work together]] says applies here too: repeats change nothing, firing and resolved alerts may arrive together, and a resolved alert is sent once. In addition:
+Grafana's notifications come from an Alertmanager that is built into it, so what [[alertmanager#How Alertmanager and Beacon work together]] says applies here too: Beacon groups the alerts by its own `group_by`, repeats change nothing, firing and resolved alerts may arrive together, and a resolved alert is sent once. In addition:
 
 - **No data and errors.** When a rule has no data or cannot be evaluated, Grafana sends alerts named `DatasourceNoData` and `DatasourceError`, unless the rule says otherwise. Beacon treats them like any alert.
 - **A paused rule** resolves its alerts in Grafana, and Grafana sends the resolution.

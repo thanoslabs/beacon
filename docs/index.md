@@ -16,5 +16,6 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[alertmanager]]: put Beacon behind an existing Alertmanager
 - [[grafana]]: send the alerts of Grafana alerting to Beacon
 - [[webhook]]: send alerts to Beacon as JSON over HTTP
+- [[silences]]: keep Beacon quiet about matching alerts for a period, through the API
 - [[notifications]]: how notifications are queued, retried and recorded
 - [[slack]]: set up the Slack app and send alerts to a channel

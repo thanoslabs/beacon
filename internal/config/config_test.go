@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanoslabs/beacon/internal/alert"
 )
@@ -222,21 +224,56 @@ func TestIntegrationSecretsAreNeverPrinted(t *testing.T) {
 	}
 }
 
-func TestEveryAlertTargets(t *testing.T) {
+func TestGrouping(t *testing.T) {
+	// Without a routing block, and with one that says nothing: the defaults.
+	want := Grouping{By: []string{"alertname"}, Wait: 30 * time.Second, Interval: 5 * time.Minute}
+	for name, r := range map[string]*Routing{"no block": nil, "an empty block": {}} {
+		if got := r.Grouping(); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: Grouping = %+v, want %+v", name, got, want)
+		}
+	}
+
 	cfg, err := Read("testdata/example", LoadOptions{})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	// Only the channel targets of the first step of the default policy.
-	got := cfg.EveryAlertTargets()
-	if len(got) != 1 || got[0] != (ChannelTarget{Channel: "#platform-alerts", Integration: "slack"}) {
-		t.Errorf("EveryAlertTargets = %+v", got)
+	block := Grouping{By: []string{"alertname", "cluster"}, Wait: 30 * time.Second, Interval: 5 * time.Minute}
+	if got := cfg.Routing.Grouping(); !reflect.DeepEqual(got, block) {
+		t.Errorf("Grouping = %+v, want %+v", got, block)
 	}
-	if got := (Config{}).EveryAlertTargets(); got != nil {
-		t.Errorf("without routing: %+v", got)
+	// A rule replaces what it sets and keeps the rest.
+	rule := cfg.Routing.Rules[0]
+	if got, want := cfg.Routing.GroupingFor(rule), (Grouping{By: block.By, Wait: 10 * time.Second, Interval: block.Interval}); !reflect.DeepEqual(got, want) {
+		t.Errorf("GroupingFor(%s) = %+v, want %+v", rule.Name, got, want)
 	}
-	cfg.Routing.Default.EscalationPolicy = "another"
-	if got := cfg.EveryAlertTargets(); got != nil {
-		t.Errorf("with another default policy: %+v", got)
+	zero := Duration(0)
+	rule.GroupBy, rule.GroupWait = []string{}, &zero
+	if got := cfg.Routing.GroupingFor(rule); len(got.By) != 0 || got.Wait != 0 {
+		t.Errorf("a rule that groups by nothing and does not wait: %+v", got)
+	}
+}
+
+func TestCompileMatcher(t *testing.T) {
+	re, err := CompileMatcher("critical|page")
+	if err != nil {
+		t.Fatalf("CompileMatcher: %v", err)
+	}
+	for value, want := range map[string]bool{"critical": true, "page": true, "pager": false, "non-critical": false, "": false} {
+		if got := re.MatchString(value); got != want {
+			t.Errorf("critical|page matches %q = %v, want %v", value, got, want)
+		}
+	}
+	if _, err := CompileMatcher("(critical"); err == nil || !strings.Contains(err.Error(), "is not a regular expression: missing closing )") {
+		t.Errorf("an unbalanced pattern: %v", err)
+	}
+	if _, err := CompileMatcher(strings.Repeat("a", MaxMatcherLength)); err != nil {
+		t.Errorf("a pattern of the greatest length: %v", err)
+	}
+	if _, err := CompileMatcher(strings.Repeat("a", MaxMatcherLength+1)); err == nil || !strings.Contains(err.Error(), "is longer than 1024 characters") {
+		t.Errorf("a pattern that is too long: %v", err)
+	}
+	// Go refuses a pattern whose repetitions would make a huge program.
+	if _, err := CompileMatcher("((a{1000}){1000}){1000}"); err == nil {
+		t.Error("a pattern with nested large repetitions compiled")
 	}
 }

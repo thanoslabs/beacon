@@ -1,4 +1,4 @@
-# One webhook source, and every alert posted to one Slack channel.
+# One webhook source, and every alert group posted to one Slack channel.
 # docs/slack.md explains how to create the Slack app and where the values
 # come from. Copy this directory, put your channel ID in place of
 # C0123456789, and point Beacon at the copy:
@@ -20,8 +20,9 @@ integrations:
       bot_token: {env: BEACON_SLACK_BOT_TOKEN}
       signing_secret: {env: BEACON_SLACK_SIGNING_SECRET}
 
-# Until routing and escalation are implemented, Beacon posts every alert to
-# the channels named in the first step of the default escalation policy.
+# An alert group is posted to the channels named in the first step of its
+# escalation policy. This is the only policy, so every group goes here; add
+# rules to the routing block to send some alerts to other policies.
 escalation_policies:
   - name: default
     steps:
@@ -30,6 +31,12 @@ escalation_policies:
             integration: slack
         timeout: 5m
 
+# Alerts with the same alertname share one message. It is posted ten seconds
+# after the first of them arrives, and updated at most once a minute as
+# alerts join or resolve. Without these lines the waits are 30s and 5m.
 routing:
+  group_by: [alertname]
+  group_wait: 10s
+  group_interval: 1m
   default:
     escalation_policy: default

@@ -21,9 +21,11 @@ type Reason string
 const (
 	// ReasonEscalationStep is a notification that asks someone to respond.
 	ReasonEscalationStep Reason = "escalation_step"
-	// ReasonGroupUpdate tells the destination that the state changed.
+	// ReasonGroupUpdate tells the destination that the group changed: an
+	// alert joined it or resolved, or someone acted on it.
 	ReasonGroupUpdate Reason = "group_update"
-	// ReasonResolved tells the destination that the problem is over.
+	// ReasonResolved tells the destination that every alert of the group is
+	// resolved.
 	ReasonResolved Reason = "resolved"
 )
 
@@ -61,6 +63,8 @@ type Notification struct {
 // queued, so a late delivery never shows a stale state.
 type Message struct {
 	Notification Notification
+	// Group is the group the message is about.
+	Group alert.Group
 	// Alerts are the alerts of the group, oldest first.
 	Alerts []alert.Alert
 	// Events is the timeline of the group, oldest first.
