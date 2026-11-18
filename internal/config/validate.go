@@ -178,6 +178,12 @@ func (o object) positive(field string, d *Duration) {
 	}
 }
 
+// ValidLabelName reports whether name can be the name of a label: letters,
+// digits and underscores, not starting with a digit, as in Prometheus.
+func ValidLabelName(name string) bool {
+	return labelNameRE.MatchString(name)
+}
+
 // NormalizeEmail returns the form in which email addresses are compared and
 // stored: lowercase, without surrounding space.
 func NormalizeEmail(email string) string {
