@@ -11,6 +11,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
 	"github.com/thanoslabs/beacon/internal/server"
+	"github.com/thanoslabs/beacon/internal/silence"
 )
 
 // wantRoutes is every route of beacon serve and who may use it. It is
@@ -43,6 +44,10 @@ var wantRoutes = []string{
 	"admin  GET /api/v1/tokens",
 	"admin  POST /api/v1/tokens",
 	"admin  DELETE /api/v1/tokens/{id}",
+	"member GET /api/v1/silences",
+	"member POST /api/v1/silences",
+	"member GET /api/v1/silences/{id}",
+	"member DELETE /api/v1/silences/{id}",
 }
 
 var pathParamRE = regexp.MustCompile(`\{[a-z]+\}`)
@@ -51,7 +56,7 @@ func TestRoutes(t *testing.T) {
 	// The routes, registered as beacon serve registers them.
 	logger := slog.New(slog.DiscardHandler)
 	srv := server.New(server.Config{}, logger, nil, server.NewRegistry())
-	for _, route := range (&provisioner{auth: auth.NewHandler(logger, nil)}).routes() {
+	for _, route := range (&provisioner{auth: auth.NewHandler(logger, nil), silences: silence.NewHandler(logger, nil)}).routes() {
 		srv.Handle(route)
 	}
 	var got []string
@@ -95,8 +100,8 @@ func TestRoutes(t *testing.T) {
 			closed++
 		}
 	}
-	if closed != 6 {
-		t.Errorf("%d routes refused a stranger, want 6", closed)
+	if closed != 10 {
+		t.Errorf("%d routes refused a stranger, want 10", closed)
 	}
 	for _, probe := range []string{"GET /", "GET /api/v1/alerts", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
 		method, path, _ := strings.Cut(probe, " ")

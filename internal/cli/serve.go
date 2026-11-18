@@ -21,6 +21,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/server"
+	"github.com/thanoslabs/beacon/internal/silence"
 	"github.com/thanoslabs/beacon/internal/slack"
 	"github.com/thanoslabs/beacon/internal/version"
 )
@@ -136,6 +137,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 		interactions: slack.NewInteractions(logger, alerts, nil),
 		pipeline:     pipeline,
 		auth:         signIn,
+		silences:     silence.NewHandler(logger, silence.NewStore(pool)),
 	}
 	prov.registerMetrics(registry)
 	prov.ingest.RegisterMetrics(registry)

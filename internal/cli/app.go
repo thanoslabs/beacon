@@ -21,6 +21,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/provision"
 	"github.com/thanoslabs/beacon/internal/routing"
+	"github.com/thanoslabs/beacon/internal/silence"
 	"github.com/thanoslabs/beacon/internal/slack"
 )
 
@@ -40,6 +41,7 @@ type provisioner struct {
 	interactions *slack.Interactions
 	pipeline     *notify.Pipeline
 	auth         *auth.Handler
+	silences     *silence.Handler
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -73,7 +75,9 @@ func (p *provisioner) routes() []access.Route {
 		{Pattern: "POST " + slack.InteractionsPath, Level: access.Public, Handler: p.interactions},
 		{Pattern: "POST " + ReloadPath, Level: access.Admin, Handler: http.HandlerFunc(p.handleReload)},
 	}
-	return append(routes, p.auth.Routes()...)
+	routes = append(routes, p.auth.Routes()...)
+	// Silences are runtime state that members create and end.
+	return append(routes, p.silences.Routes()...)
 }
 
 // handleReload reloads the configuration for an admin. It does what SIGHUP

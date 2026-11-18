@@ -1761,3 +1761,108 @@ func TestBootstrapAdminAndTokens(t *testing.T) {
 		}
 	}
 }
+
+// bootstrapConfiguration is the test configuration with the bootstrap admin
+// as the way to sign in.
+const bootstrapConfiguration = configuration + `auth:
+  public_url: ` + oidctest.PublicURL + `
+  bootstrap_admin:
+    password_hash: {env: BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH}
+`
+
+// signedIn starts Beacon with the bootstrap admin and returns a browser that
+// is signed in as that admin, a client without cookies, and a member token.
+func signedIn(t *testing.T) (b *beacon, admin, bare *http.Client, memberToken string) {
+	t.Helper()
+	dbURL := postgrestest.NewURL(t)
+	b = launch(t, dbURL, writeConfig(t, bootstrapConfiguration))
+	b.waitUntilServing()
+	addr := strings.TrimPrefix(b.url, "http://")
+	admin = oidctest.Browser(t, addr)
+	bare = oidctest.Browser(t, addr)
+	bare.Jar = nil
+	if code, who := b.api(admin, "POST", "/auth/bootstrap", "", `{"password": "`+bootstrapPassword+`"}`); code != http.StatusOK || who["role"] != "admin" {
+		t.Fatalf("bootstrap sign-in = %d %v", code, who)
+	}
+	code, created := b.api(admin, "POST", "/api/v1/tokens", "", `{"name": "responder", "role": "member"}`)
+	memberToken, _ = created["token"].(string)
+	if code != http.StatusCreated || memberToken == "" {
+		t.Fatalf("create the member token = %d %v", code, created)
+	}
+	return b, admin, bare, memberToken
+}
+
+// TestSilencesAPI creates, reads and expires silences through the real
+// binary, as a member with a token and as an admin with a session.
+func TestSilencesAPI(t *testing.T) {
+	b, admin, bare, memberToken := signedIn(t)
+	const request = `{"matchers": [{"label": "alertname", "operator": "=", "value": "DiskFull"}], "duration": "1h", "comment": "replacing the disk"}`
+
+	// Nobody without a credential, and nobody with one that was never issued.
+	for _, probe := range [][2]string{{"GET", "/api/v1/silences"}, {"POST", "/api/v1/silences"}, {"GET", "/api/v1/silences/x"}, {"DELETE", "/api/v1/silences/x"}} {
+		for _, token := range []string{"", "bcn_never-issued"} {
+			if code, body := b.api(bare, probe[0], probe[1], token, request); code != http.StatusUnauthorized {
+				t.Errorf("%s %s with the token %q = %d %v, want 401", probe[0], probe[1], token, code, body)
+			}
+		}
+	}
+	// The token of a source is not a credential for the API.
+	if code, _ := b.api(bare, "POST", "/api/v1/silences", sourceToken, request); code != http.StatusUnauthorized {
+		t.Errorf("create with the source token = %d, want 401", code)
+	}
+
+	// A member creates one with a token: the token is the author.
+	code, byMember := b.api(bare, "POST", "/api/v1/silences", memberToken, request)
+	if code != http.StatusCreated || byMember["created_by_token"] != "responder" || byMember["created_by"] != nil || byMember["state"] != "active" {
+		t.Fatalf("create as a member = %d %v", code, byMember)
+	}
+	// An admin creates one in the browser: the user is the author.
+	code, byAdmin := b.api(admin, "POST", "/api/v1/silences", "", `{"matchers": [{"label": "team", "operator": "=~", "value": "dba|storage"}], "duration": "30m", "comment": "migration"}`)
+	if code != http.StatusCreated || byAdmin["created_by"] != "bootstrap-admin@beacon.invalid" || byAdmin["created_by_token"] != nil {
+		t.Fatalf("create as an admin = %d %v", code, byAdmin)
+	}
+	// A request that is not a silence is refused, with the field at fault.
+	if code, body := b.api(bare, "POST", "/api/v1/silences", memberToken, `{"matchers": [{"label": "a", "operator": "=~", "value": "(x"}], "duration": "1h", "comment": "x"}`); code != http.StatusBadRequest || body["field"] != "matchers[0].value" {
+		t.Errorf("a broken pattern = %d %v, want 400 at matchers[0].value", code, body)
+	}
+
+	// Both see both, and the member may end the admin's.
+	for who, client := range map[string]*http.Client{"member": bare, "admin": admin} {
+		token := map[string]string{"member": memberToken}[who]
+		code, list := b.api(client, "GET", "/api/v1/silences", token, "")
+		if silences, _ := list["silences"].([]any); code != http.StatusOK || len(silences) != 2 {
+			t.Errorf("list as the %s = %d %v, want both silences", who, code, list)
+		}
+	}
+	adminsID, _ := byAdmin["id"].(string)
+	if code, body := b.api(bare, "DELETE", "/api/v1/silences/"+adminsID, memberToken, ""); code != http.StatusNoContent {
+		t.Fatalf("a member expires the admin's silence = %d %v, want 204", code, body)
+	}
+	if code, got := b.api(admin, "GET", "/api/v1/silences/"+adminsID, "", ""); code != http.StatusOK || got["state"] != "expired" {
+		t.Errorf("the expired silence = %d %v", code, got)
+	}
+	code, list := b.api(bare, "GET", "/api/v1/silences", memberToken, "")
+	if silences, _ := list["silences"].([]any); code != http.StatusOK || len(silences) != 1 {
+		t.Errorf("list after the expiry = %d %v, want the one that is left", code, list)
+	}
+
+	// What is stored: the matchers, the period, and exactly one author each.
+	rows, err := b.db.Query(context.Background(), `SELECT comment || ': ' || matchers::text || ' user=' || (created_by IS NOT NULL)::text || ' token=' || (created_by_token IS NOT NULL)::text ||
+		' over=' || (ends_at <= now())::text FROM silences ORDER BY created_at`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	want := []string{
+		`replacing the disk: [{"label": "alertname", "value": "DiskFull", "operator": "="}] user=false token=true over=false`,
+		`migration: [{"label": "team", "value": "dba|storage", "operator": "=~"}] user=true token=false over=true`,
+	}
+	if err != nil || strings.Join(stored, "\n") != strings.Join(want, "\n") {
+		t.Errorf("stored:\n%s\n%v\nwant:\n%s", strings.Join(stored, "\n"), err, strings.Join(want, "\n"))
+	}
+	for _, secret := range []string{memberToken, sourceToken} {
+		if strings.Contains(b.output(), secret) {
+			t.Errorf("the logs contain a credential")
+		}
+	}
+}
