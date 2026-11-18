@@ -312,6 +312,19 @@ func (p *provisioner) reportSchedules(ctx context.Context, cfg config.Config, ap
 	for _, name := range applied.Ended {
 		p.logger.InfoContext(ctx, "schedule ended: it left the configuration; its recorded shifts are kept", slog.String("schedule", name))
 	}
+	// A changed definition never moves the shift in progress. It is said
+	// once when it is stored, with when it takes over.
+	for _, c := range applied.Changed {
+		if !c.New {
+			continue
+		}
+		when := "at the next handoff"
+		if c.Stated {
+			when = "at the time that effective_from states"
+		}
+		p.logger.InfoContext(ctx, "schedule definition changed: the rotation in force runs until the change takes over, "+when,
+			slog.String("schedule", c.Schedule), slog.Time("takes_over_at", c.At))
+	}
 	// Reset first, so that a schedule that left the configuration leaves
 	// the metric too.
 	p.rotationSkipped.Reset()

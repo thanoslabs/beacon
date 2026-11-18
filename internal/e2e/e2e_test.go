@@ -1620,8 +1620,25 @@ func TestScheduleRotation(t *testing.T) {
 		t.Errorf("metric after the restart: %s", got)
 	}
 
+	// The definition changes in the files while Ada is on call. The reload
+	// stores the change and moves nothing: it waits for the handoff.
+	changed := strings.Replace(scheduleConfiguration(t), "members: [grace@example.com, ada@example.com]", "members: [ada@example.com, linus@example.com]", 1)
+	logs = b.reload(changed, 1)
+	if !strings.Contains(logs, `"msg":"schedule definition changed: the rotation in force runs until the change takes over, at the next handoff","schedule":"primary","takes_over_at":"`) {
+		t.Errorf("the logs do not say that the definition changed:\n%s", logs)
+	}
+	var inForce, pending string
+	err = b.db.QueryRow(context.Background(), `SELECT definition->'members'->>0, COALESCE(pending_definition->'members'->>1, '') FROM schedule_positions`).Scan(&inForce, &pending)
+	if err != nil || inForce != "grace@example.com" || pending != "linus@example.com" {
+		t.Errorf("in force begins with %q and the pending rotation has %q second (%v); want the old one in force and the new one pending", inForce, pending, err)
+	}
+	err = b.db.QueryRow(context.Background(), `SELECT starts_at FROM shifts WHERE ends_at IS NULL`).Scan(&again)
+	if who, shifts := b.onCall("primary"); err != nil || who != oidctest.Ada || shifts != 1 || !again.Equal(started) {
+		t.Errorf("after the definition changed %q is on call with %d shifts, the open one since %s (%v)", who, shifts, again, err)
+	}
+
 	// The schedule leaves the configuration: its shift ends and is kept.
-	logs = b.reload(signInConfiguration(t), 1)
+	logs = b.reload(signInConfiguration(t), 2)
 	if !strings.Contains(logs, `"msg":"schedule ended: it left the configuration; its recorded shifts are kept","schedule":"primary"`) {
 		t.Errorf("the logs do not say that the schedule ended:\n%s", logs)
 	}

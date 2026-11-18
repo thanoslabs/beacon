@@ -470,3 +470,169 @@ func TestRotationAcrossDaylightSavingInTheDatabase(t *testing.T) {
 		})
 	}
 }
+
+func day(d, h, m int) time.Time { return time.Date(2026, 1, d, h, m, 0, 0, time.UTC) }
+
+// at returns a schedule that states when its definition takes over.
+func at(s config.Schedule, when time.Time) config.Schedule {
+	ts := config.Timestamp(when)
+	s.EffectiveFrom = &ts
+	return s
+}
+
+// TestDefinitionChangeLeavesTheShiftAlone edits a running schedule in the
+// middle of a shift. Applying the change moves nothing: the person, the
+// start of the shift and its end are as they were, and the rotation in
+// force is still the old one. At the handoff the new order takes over,
+// continued from the person who was on call, also across a restart.
+func TestDefinitionChangeLeavesTheShiftAlone(t *testing.T) {
+	f := newFixture(t)
+	f.users(ada, grace, linus)
+	f.apply(rota("primary", "UTC", ada, grace, linus))
+	f.advance(day(3, 9, 0))
+	before := f.position("primary")
+
+	f.clock.Set(day(3, 15, 0))
+	reversed := rota("primary", "UTC", linus, grace, ada)
+	applied := f.apply(reversed)
+	if c := applied.Changed; len(c) != 1 || c[0].Schedule != "primary" || !c[0].At.Equal(day(4, 9, 0)) || c[0].Stated || !c[0].New {
+		t.Fatalf("Changed = %+v, want the change waiting for the handoff of the 4th", applied.Changed)
+	}
+	after := f.position("primary")
+	if after.Email != grace || !after.ShiftStartedAt.Equal(before.ShiftStartedAt) || !after.NextHandoffAt.Equal(before.NextHandoffAt) ||
+		!after.Definition.Equal(before.Definition) {
+		t.Errorf("applying the change moved the position:\nbefore %+v\n after %+v", before, after)
+	}
+	if after.Pending == nil || after.Pending.Members[0] != linus || after.PendingAt != nil {
+		t.Errorf("pending = %+v at %v, want the reversed rotation at the next handoff", after.Pending, after.PendingAt)
+	}
+	equal(t, "shifts after the change was applied", f.shifts("primary", time.UTC), []string{"ada Jan 1 12:00..Jan 3 09:00", "grace Jan 3 09:00.."})
+
+	// Applying it again, as every reload and every replica does, is not news.
+	if applied := f.apply(reversed); len(applied.Changed) != 1 || applied.Changed[0].New {
+		t.Errorf("Changed on a second application = %+v, want it reported and not new", applied.Changed)
+	}
+	if done := f.advance(day(4, 8, 59)); len(done) != 0 {
+		t.Errorf("the change took over early: %+v", done)
+	}
+
+	// The process restarts before the handoff. In the old order Linus
+	// follows Grace; in the new one Ada does.
+	f.store = f.restart()
+	done := f.advance(day(4, 9, 0))
+	if len(done) != 1 || !done[0].TookOver || done[0].From != grace || done[0].To != ada {
+		t.Fatalf("handoff = %+v, want Grace to Ada with the new definition", done)
+	}
+	f.advance(day(6, 9, 0))
+	equal(t, "shifts", f.shifts("primary", time.UTC), []string{
+		"ada Jan 1 12:00..Jan 3 09:00",
+		"grace Jan 3 09:00..Jan 4 09:00",
+		"ada Jan 4 09:00..Jan 5 09:00",
+		"linus Jan 5 09:00..Jan 6 09:00",
+		"grace Jan 6 09:00..",
+	})
+	if p := f.position("primary"); p.Pending != nil || p.Definition.Members[0] != linus {
+		t.Errorf("after the handoff, in force %v and pending %v", p.Definition.Members, p.Pending)
+	}
+	if applied := f.apply(reversed); len(applied.Changed) != 0 {
+		t.Errorf("Changed after the change took over = %+v", applied.Changed)
+	}
+}
+
+// TestDefinitionChangeTakenBack applies a change and then the original
+// definition again before the handoff. The rotation goes on as if nothing
+// had been changed.
+func TestDefinitionChangeTakenBack(t *testing.T) {
+	f := newFixture(t)
+	f.users(ada, grace, linus)
+	original := rota("primary", "UTC", ada, grace, linus)
+	f.apply(original)
+	f.advance(day(3, 9, 0))
+	f.apply(rota("primary", "UTC", linus, grace, ada))
+	if applied := f.apply(original); len(applied.Changed) != 0 {
+		t.Errorf("Changed = %+v after the change was taken back", applied.Changed)
+	}
+	if p := f.position("primary"); p.Pending != nil {
+		t.Errorf("%+v is still pending", p.Pending)
+	}
+	if done := f.advance(day(4, 9, 0)); len(done) != 1 || done[0].To != linus || done[0].TookOver {
+		t.Errorf("handoff = %+v, want Grace to Linus under the old order", done)
+	}
+}
+
+// TestDefinitionChangeAtAStatedTime gives a change a time. Until then the
+// old rotation runs. At that time the new one takes over, and whoever is on
+// call stays on call; only someone the new rotation no longer has is
+// relieved, at exactly the stated time however late the worker runs.
+func TestDefinitionChangeAtAStatedTime(t *testing.T) {
+	f := newFixture(t)
+	f.users(ada, grace, linus)
+	f.apply(rota("primary", "UTC", ada, grace, linus))
+	f.advance(day(3, 9, 0))
+
+	// From the 5th at 18:00 the handoff is at 20:00 and Linus has left.
+	evening := rota("primary", "UTC", ada, grace)
+	evening.Rotation.Handoff.Time = "20:00"
+	f.clock.Set(day(3, 10, 0))
+	applied := f.apply(at(evening, day(5, 18, 0)))
+	if len(applied.Changed) != 1 || !applied.Changed[0].Stated || !applied.Changed[0].At.Equal(day(5, 18, 0)) {
+		t.Fatalf("Changed = %+v, want a change stated for the 5th at 18:00", applied.Changed)
+	}
+	// Two ordinary handoffs come first; Linus is on call on the 5th.
+	f.advance(day(5, 17, 59))
+	equal(t, "before the stated time", f.shifts("primary", time.UTC), []string{
+		"ada Jan 1 12:00..Jan 3 09:00", "grace Jan 3 09:00..Jan 4 09:00", "linus Jan 4 09:00..Jan 5 09:00", "ada Jan 5 09:00..",
+	})
+
+	// Ada is in the new rotation: she stays, and her shift now ends at
+	// 20:00, the first handoff of the new rotation.
+	done := f.advance(day(5, 18, 0))
+	if len(done) != 1 || !done[0].TookOver || done[0].ShiftBegan {
+		t.Fatalf("at the stated time: %+v, want the definition to take over and no shift to begin", done)
+	}
+	if p := f.position("primary"); p.Email != ada || !p.ShiftStartedAt.Equal(day(5, 9, 0)) || !p.NextHandoffAt.Equal(day(5, 20, 0)) || p.Pending != nil {
+		t.Errorf("position = %s since %s until %s, pending %v", p.Email, p.ShiftStartedAt, p.NextHandoffAt, p.Pending)
+	}
+	f.advance(day(6, 20, 0))
+
+	// Ada is on call when a change that removes her takes over, and the
+	// worker is half an hour late. Grace followed Ada, so Grace takes the
+	// rest of the shift.
+	without := rota("primary", "UTC", grace, linus)
+	without.Rotation.Handoff.Time = "20:00"
+	f.apply(at(without, day(7, 12, 0)))
+	f.advance(day(7, 12, 30))
+	equal(t, "shifts", f.shifts("primary", time.UTC), []string{
+		"ada Jan 1 12:00..Jan 3 09:00",
+		"grace Jan 3 09:00..Jan 4 09:00",
+		"linus Jan 4 09:00..Jan 5 09:00",
+		"ada Jan 5 09:00..Jan 5 20:00",
+		"grace Jan 5 20:00..Jan 6 20:00",
+		"ada Jan 6 20:00..Jan 7 12:00",
+		"grace Jan 7 12:00..",
+	})
+}
+
+// TestStatedTimeInThePast applies a change whose stated time has passed. It
+// takes over at once, and no shift is given a start in the past.
+func TestStatedTimeInThePast(t *testing.T) {
+	f := newFixture(t)
+	f.users(ada, grace, linus)
+	f.apply(rota("primary", "UTC", ada, grace, linus))
+	f.advance(day(3, 9, 0))
+
+	f.clock.Set(day(3, 15, 0))
+	applied := f.apply(at(rota("primary", "UTC", ada, linus), day(2, 0, 0)))
+	if len(applied.Changed) != 1 || !applied.Changed[0].At.Equal(day(3, 15, 0)) {
+		t.Fatalf("Changed = %+v, want the change due now", applied.Changed)
+	}
+	// Later applications do not push the time further out.
+	f.clock.Set(day(3, 15, 1))
+	if applied := f.apply(at(rota("primary", "UTC", ada, linus), day(2, 0, 0))); len(applied.Changed) != 1 || applied.Changed[0].New || !applied.Changed[0].At.Equal(day(3, 15, 0)) {
+		t.Errorf("Changed on a second application = %+v", applied.Changed)
+	}
+	f.advance(day(3, 15, 2))
+	equal(t, "shifts", f.shifts("primary", time.UTC), []string{
+		"ada Jan 1 12:00..Jan 3 09:00", "grace Jan 3 09:00..Jan 3 15:00", "linus Jan 3 15:00..",
+	})
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -59,8 +60,23 @@ type Applied struct {
 	Started []string
 	// Ended names the schedules that left the configuration.
 	Ended []string
+	// Changed lists the schedules whose definition in the files is not the
+	// rotation in force, with when it takes over.
+	Changed []Change
 	// Skipped lists the rotation members that no user has the address of.
 	Skipped []Skipped
+}
+
+// Change is a definition that is waiting to take over.
+type Change struct {
+	Schedule string
+	// At is when it takes over: the next handoff, unless the files state a
+	// time.
+	At time.Time
+	// Stated says that the files state the time.
+	Stated bool
+	// New says that this application of the configuration stored it.
+	New bool
 }
 
 // Position is where a schedule is in its rotation.
@@ -74,10 +90,15 @@ type Position struct {
 	NextHandoffAt  time.Time
 	// Definition is the rotation in force.
 	Definition Definition
+	// Pending is a changed rotation that has not taken over yet, or nil, and
+	// PendingAt when it does; nil means at the next handoff.
+	Pending   *Definition
+	PendingAt *time.Time
 }
 
 func (p Position) state() State {
-	return State{Member: p.Email, ShiftStart: p.ShiftStartedAt, NextHandoff: p.NextHandoffAt, Definition: p.Definition}
+	return State{Member: p.Email, ShiftStart: p.ShiftStartedAt, NextHandoff: p.NextHandoffAt, Definition: p.Definition,
+		Pending: p.Pending, PendingAt: p.PendingAt}
 }
 
 // Shift is one recorded shift.
@@ -97,6 +118,10 @@ type Shift struct {
 // schedule that left the configuration ends: its shift in progress is closed
 // and its position dropped, so that it starts afresh if it ever returns. The
 // shifts it recorded stay.
+//
+// A schedule whose definition changed keeps running as it was: the new
+// rotation is stored beside the position and takes over later, when Advance
+// finds its time has come. See State.WithDefinition and State.Next.
 //
 // It is safe to repeat and safe from several replicas at once.
 func (s *Store) Apply(ctx context.Context, schedules []Provisioned) (Applied, error) {
@@ -145,6 +170,14 @@ func (s *Store) Apply(ctx context.Context, schedules []Provisioned) (Applied, er
 			}
 			if started {
 				out.Started = append(out.Started, p.Schedule.Name)
+				continue
+			}
+			change, err := s.change(ctx, tx, p, def, now)
+			if err != nil {
+				return fmt.Errorf("schedule %q: %w", p.Schedule.Name, err)
+			}
+			if change != nil {
+				out.Changed = append(out.Changed, *change)
 			}
 		}
 		return nil
@@ -175,6 +208,51 @@ func (s *Store) start(ctx context.Context, tx pgx.Tx, scheduleID string, def Def
 	return true, openShift(ctx, tx, scheduleID, users[state.Member], state.ShiftStart)
 }
 
+// change stores the definition of a running schedule as pending when it is
+// not the rotation in force, and clears what was pending when it is.
+func (s *Store) change(ctx context.Context, tx pgx.Tx, p Provisioned, def Definition, now time.Time) (*Change, error) {
+	pos, err := scanPosition(tx.QueryRow(ctx, `SELECT `+positionColumns+` FROM schedule_positions p WHERE schedule_id = $1 FOR UPDATE`, p.ID))
+	if err != nil {
+		return nil, fmt.Errorf("read position: %w", err)
+	}
+	var effective *time.Time
+	if p.Schedule.EffectiveFrom != nil {
+		at := time.Time(*p.Schedule.EffectiveFrom)
+		effective = &at
+	}
+	before := pos.state()
+	after := before.WithDefinition(def, effective, now)
+	same := samePending(before, after, now)
+	if !same {
+		_, err := tx.Exec(ctx, `UPDATE schedule_positions SET pending_definition = $2, pending_effective_at = $3, updated_at = $4 WHERE schedule_id = $1`,
+			p.ID, after.Pending, after.PendingAt, now)
+		if err != nil {
+			return nil, fmt.Errorf("store the changed definition: %w", err)
+		}
+	} else {
+		after = before
+	}
+	if after.Pending == nil {
+		return nil, nil
+	}
+	return &Change{Schedule: p.Schedule.Name, At: after.takeover(), Stated: after.PendingAt != nil, New: !same}, nil
+}
+
+// samePending reports whether two states wait for the same change. A stated
+// time that has passed means now, and now moves, so two times that have both
+// come are the same time.
+func samePending(a, b State, now time.Time) bool {
+	switch {
+	case a.Pending == nil || b.Pending == nil:
+		return a.Pending == nil && b.Pending == nil
+	case !a.Pending.Equal(*b.Pending):
+		return false
+	case a.PendingAt == nil || b.PendingAt == nil:
+		return a.PendingAt == nil && b.PendingAt == nil
+	}
+	return a.PendingAt.Equal(*b.PendingAt) || (!a.PendingAt.After(now) && !b.PendingAt.After(now))
+}
+
 // openShift records that a rotation shift began. With no user it records
 // nothing: nobody is on call.
 func openShift(ctx context.Context, tx pgx.Tx, scheduleID, userID string, at time.Time) error {
@@ -198,12 +276,17 @@ type Handoff struct {
 	At       time.Time
 	// Next is when the shift that began ends.
 	Next time.Time
+	// TookOver says that a changed definition came into force.
+	TookOver bool
+	// ShiftBegan is false only when a definition took over in the middle of
+	// a shift and the person on call stayed.
+	ShiftBegan bool
 }
 
 // Advance brings every schedule up to date: each handoff that has fallen due
-// closes the shift in progress and opens the next one, and a schedule on
-// which nobody is on call gets its first member who has become a user. It
-// returns what it did.
+// closes the shift in progress and opens the next one, a changed definition
+// whose time has come takes over, and a schedule on which nobody is on call
+// gets its first member who has become a user. It returns what it did.
 //
 // A handoff happens at the moment it was due, also when it is carried out
 // late: after a restart, the shifts that began while no process ran are
@@ -235,14 +318,19 @@ func (s *Store) Advance(ctx context.Context) ([]Handoff, error) {
 // transaction left it, but would pair it with the rows of joined tables as
 // they were before: the person on call would be the one who has just been
 // relieved.
-const positionColumns = `schedule_id::text, COALESCE(user_id::text, ''), shift_started_at, next_handoff_at, definition`
+const positionColumns = `schedule_id::text, COALESCE(user_id::text, ''), shift_started_at, next_handoff_at, definition,
+	pending_definition, pending_effective_at`
+
+// due is when a position next changes: its handoff, or sooner when a
+// pending definition takes over at a stated time. It is State.Due in SQL.
+const due = `LEAST(next_handoff_at, COALESCE(pending_effective_at, 'infinity'))`
 
 // live limits a read of schedule_positions p to schedules that are in the
 // configuration.
 const live = `NOT EXISTS (SELECT 1 FROM schedules s WHERE s.id = p.schedule_id AND s.removed_at IS NOT NULL)`
 
 func scanPosition(row pgx.Row) (p Position, err error) {
-	err = row.Scan(&p.ScheduleID, &p.UserID, &p.ShiftStartedAt, &p.NextHandoffAt, &p.Definition)
+	err = row.Scan(&p.ScheduleID, &p.UserID, &p.ShiftStartedAt, &p.NextHandoffAt, &p.Definition, &p.Pending, &p.PendingAt)
 	return p, err
 }
 
@@ -264,8 +352,8 @@ func describe(ctx context.Context, q querier, p *Position) (name string, err err
 func (s *Store) handOver(ctx context.Context) (h Handoff, found bool, err error) {
 	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		pos, err := scanPosition(tx.QueryRow(ctx, `SELECT `+positionColumns+` FROM schedule_positions p
-			WHERE next_handoff_at <= $1 AND `+live+`
-			ORDER BY next_handoff_at LIMIT 1 FOR UPDATE SKIP LOCKED`, s.now()))
+			WHERE `+due+` <= $1 AND `+live+`
+			ORDER BY `+due+` LIMIT 1 FOR UPDATE SKIP LOCKED`, s.now()))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -276,19 +364,28 @@ func (s *Store) handOver(ctx context.Context) (h Handoff, found bool, err error)
 		if err != nil {
 			return err
 		}
-		users, err := usersByEmail(ctx, tx, pos.Definition.Members)
+		members := pos.Definition.Members
+		if pos.Pending != nil {
+			members = slices.Concat(members, pos.Pending.Members)
+		}
+		users, err := usersByEmail(ctx, tx, members)
 		if err != nil {
 			return err
 		}
 		before := pos.state()
-		after, err := before.Handoff(func(email string) bool { return users[email] != "" })
+		after, ended, err := before.Next(func(email string) bool { return users[email] != "" })
 		if err != nil {
 			return fmt.Errorf("schedule %q: %w", name, err)
 		}
-		if err := s.move(ctx, tx, pos.ScheduleID, users[after.Member], after, true); err != nil {
+		userID := pos.UserID
+		if ended {
+			userID = users[after.Member]
+		}
+		if err := s.move(ctx, tx, pos.ScheduleID, userID, after, ended); err != nil {
 			return fmt.Errorf("schedule %q: %w", name, err)
 		}
-		h, found = Handoff{Schedule: name, From: before.Member, To: after.Member, At: after.ShiftStart, Next: after.NextHandoff}, true
+		h, found = Handoff{Schedule: name, From: before.Member, To: after.Member, At: before.Due(), Next: after.NextHandoff,
+			TookOver: before.Pending != nil && after.Pending == nil, ShiftBegan: ended}, true
 		return nil
 	})
 	return h, found, err
@@ -307,8 +404,9 @@ func (s *Store) move(ctx context.Context, tx pgx.Tx, scheduleID, userID string, 
 			return err
 		}
 	}
-	_, err := tx.Exec(ctx, `UPDATE schedule_positions SET user_id = $2, shift_started_at = $3, next_handoff_at = $4, definition = $5, updated_at = $6
-		WHERE schedule_id = $1`, scheduleID, nullable(userID), to.ShiftStart, to.NextHandoff, to.Definition, s.now())
+	_, err := tx.Exec(ctx, `UPDATE schedule_positions SET user_id = $2, shift_started_at = $3, next_handoff_at = $4, definition = $5,
+			pending_definition = $6, pending_effective_at = $7, updated_at = $8
+		WHERE schedule_id = $1`, scheduleID, nullable(userID), to.ShiftStart, to.NextHandoff, to.Definition, to.Pending, to.PendingAt, s.now())
 	if err != nil {
 		return fmt.Errorf("move position: %w", err)
 	}
@@ -350,7 +448,7 @@ func (s *Store) fill(ctx context.Context) ([]Handoff, error) {
 			if err := s.move(ctx, tx, e.ScheduleID, users[to.Member], to, true); err != nil {
 				return fmt.Errorf("schedule %q: %w", name, err)
 			}
-			done = append(done, Handoff{Schedule: name, To: to.Member, At: now, Next: to.NextHandoff})
+			done = append(done, Handoff{Schedule: name, To: to.Member, At: now, Next: to.NextHandoff, ShiftBegan: true})
 		}
 		return nil
 	})
@@ -370,6 +468,12 @@ func (s *Store) Run(ctx context.Context, logger *slog.Logger, interval time.Dura
 		}
 		done, err := s.Advance(ctx)
 		for _, h := range done {
+			if h.TookOver {
+				logger.InfoContext(ctx, "changed schedule definition took over", slog.String("schedule", h.Schedule), slog.Time("at", h.At))
+			}
+			if !h.ShiftBegan {
+				continue
+			}
 			logger.InfoContext(ctx, "on-call shift began", slog.String("schedule", h.Schedule),
 				slog.String("from", h.From), slog.String("to", h.To), slog.Time("at", h.At), slog.Time("next_handoff", h.Next))
 			if h.To == "" {
