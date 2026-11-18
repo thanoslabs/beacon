@@ -42,6 +42,7 @@ Notifications are about a group of alerts, not about each alert; [[configuration
 - **A group that resolves during its wait tells nobody.** A problem that came and went within `group_wait` produces no notification at all. The alerts and their timelines are stored.
 - **An alert that joins an acknowledged group fires.** It is new, and nobody has taken it; the message shows the group as firing again, with one alert firing and the others acknowledged.
 - **Acting on a message acts on the group.** *Acknowledge* acknowledges every alert of the group that can be acknowledged, and so on. Fifty alerts acknowledged at once are one update.
+- **Silenced alerts are left out.** When a group falls due, Beacon looks at the silences in force ([[silences]]). A first notification needs an open alert that is not silenced, and an update needs news about an alert that is not hidden by a silence. A group with open alerts under a silence falls due again when the silence that ends first ends, and at once when that silence is expired.
 - **The timers are rows in Postgres**, not timers in a process: `alert_groups.notify_at` holds when the next notification of a group is due. Every replica looks for due groups once a second, and a group is handed to exactly one of them. A restart loses nothing: whatever became due while no process ran is sent when one starts.
 
 ## Delivery
@@ -72,5 +73,7 @@ Every attempt is recorded with its time, its outcome (`success`, `retryable_erro
 |---|---|
 | `notification_sent` | An attempt delivered the message |
 | `notification_failed` | An attempt failed. The event holds the error and whether another attempt will follow. |
+| `not_notified` | The first notification of a group had nowhere to go. The event holds the reason. |
+| `notification_silenced` | A silence kept a group's notification back. The event holds the silence and when it ends. It is written once per silence the group waits for. |
 
 Both hold the destination, the reason and the attempt number, and their actor is `system`.

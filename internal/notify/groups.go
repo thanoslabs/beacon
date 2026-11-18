@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/thanoslabs/beacon/internal/alert"
+	"github.com/thanoslabs/beacon/internal/silence"
 )
 
 // DefaultGroupPollInterval is how often a process looks for groups whose
@@ -63,17 +64,132 @@ func (p *Pipeline) NotifyDueGroups(ctx context.Context) (n int, err error) {
 	return n, ctx.Err()
 }
 
-// notifyGroup queues what is due for g: the first notification of a group
-// that has had none, and otherwise an update for everyone who was told.
-func (p *Pipeline) notifyGroup(ctx context.Context, tx pgx.Tx, g alert.Group) error {
-	if g.NotifiedAt == nil {
-		return p.startEscalation(ctx, tx, g)
+// Silences is what the pipeline needs from the store of silences.
+type Silences interface {
+	// Active returns the silences in force at a time, read through q.
+	Active(ctx context.Context, q silence.Querier, at time.Time) ([]silence.Silence, error)
+}
+
+// EventSilenced is written on the timeline of a group when a silence keeps
+// its notification back, with the silence and when it ends.
+const EventSilenced alert.EventType = "notification_silenced"
+
+// quiet returns, for each alert that an active silence matches, the silence
+// among them that ends first. It reads through q, which may be a
+// transaction.
+func (p *Pipeline) quiet(ctx context.Context, q silence.Querier, alerts []alert.Alert, at time.Time) (map[string]silence.Silence, error) {
+	silences := *p.silences.Load()
+	if silences == nil || len(alerts) == 0 {
+		return nil, nil
 	}
-	reason := ReasonGroupUpdate
-	if g.Status == alert.GroupResolved {
-		reason = ReasonResolved
+	active, err := silences.Active(ctx, q, at)
+	if err != nil || len(active) == 0 {
+		return nil, err
 	}
-	return p.enqueueUpdate(ctx, tx, g.ID, reason)
+	out := map[string]silence.Silence{}
+	for _, a := range alerts {
+		// Active returns the silence that ends first at the top.
+		for _, s := range active {
+			if s.Silences(a.Labels) {
+				out[a.ID] = s
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// hidden reports whether an alert is kept out of notifications: a silence
+// matches it, and no notification has shown it. An alert that people were
+// told about before it was silenced stays in the group's message, so that
+// the message does not keep showing it as it was.
+func hidden(g alert.Group, a alert.Alert, quiet map[string]silence.Silence) bool {
+	_, silenced := quiet[a.ID]
+	_, shown := g.NotifiedAlerts[a.ID]
+	return silenced && !shown
+}
+
+// notifyGroup decides what a due group gets, with silences taken into
+// account, and queues it.
+//
+//   - A group that has had no notification gets its first when at least one
+//     of its open alerts is not silenced.
+//   - A group that has had one gets an update when there is news: an alert
+//     that is not hidden and has not been shown, or has not been shown as it
+//     is now. An alert that joins or resolves under a silence is no news.
+//   - Whenever a silence keeps an open alert of the group quiet, the group
+//     is due again when the silence that ends first ends, to see what there
+//     is to tell then.
+func (p *Pipeline) notifyGroup(ctx context.Context, tx pgx.Tx, g alert.Group, alerts []alert.Alert) (alert.Outcome, error) {
+	now := p.now()
+	quiet, err := p.quiet(ctx, tx, alerts, now)
+	if err != nil {
+		return alert.Outcome{}, err
+	}
+	var (
+		out   alert.Outcome
+		loud  bool
+		news  bool
+		shown = map[string]string{}
+		wait  *silence.Silence
+	)
+	for _, a := range alerts {
+		open := a.Status != alert.StatusResolved
+		if s, silenced := quiet[a.ID]; silenced && open && (wait == nil || s.EndsAt.Before(wait.EndsAt)) {
+			wait = &s
+		}
+		if hidden(g, a, quiet) {
+			continue
+		}
+		loud = loud || open
+		shown[a.ID] = alert.ShownAs(a)
+		news = news || g.NotifiedAlerts[a.ID] != shown[a.ID]
+	}
+	if wait != nil {
+		out.RetryAt, out.SilenceID = wait.EndsAt, wait.ID
+	}
+
+	switch {
+	case g.NotifiedAt == nil && loud:
+		err = p.startEscalation(ctx, tx, g)
+	case g.NotifiedAt != nil && news:
+		reason := ReasonGroupUpdate
+		if g.Status == alert.GroupResolved {
+			reason = ReasonResolved
+		}
+		err = p.enqueueUpdate(ctx, tx, g.ID, reason)
+	default:
+		// Nothing to tell. If that is because of a silence the group was
+		// not waiting for already, the timeline says so, once.
+		if wait != nil && wait.ID != g.SilenceID {
+			err = alert.AppendEvent(ctx, tx, &alert.Event{GroupID: g.ID, Type: EventSilenced, Actor: alert.System(), OccurredAt: now,
+				Data: map[string]any{"silence_id": wait.ID, "until": wait.EndsAt.UTC().Format(time.RFC3339)}})
+		}
+		return out, err
+	}
+	out.Notified, out.Shown = true, shown
+	return out, err
+}
+
+// unsilenced returns the alerts of a group that a message about it shows:
+// all but the hidden ones. When every alert is hidden, which happens when
+// someone acts on a group whose alerts have all been silenced since, the
+// message shows them all rather than nothing.
+func (p *Pipeline) unsilenced(ctx context.Context, g alert.Group, alerts []alert.Alert) ([]alert.Alert, error) {
+	quiet, err := p.quiet(ctx, p.db, alerts, p.now())
+	if err != nil || len(quiet) == 0 {
+		return alerts, err
+	}
+	shown := make([]alert.Alert, 0, len(alerts))
+	for _, a := range alerts {
+		if !hidden(g, a, quiet) {
+			shown = append(shown, a)
+		}
+	}
+	if len(shown) == 0 {
+		return alerts, nil
+	}
+	return shown, nil
 }
 
 // Policy is what the pipeline needs to know of an escalation policy.

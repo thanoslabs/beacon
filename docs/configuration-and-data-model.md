@@ -410,9 +410,9 @@ A unique index on (`source_id`, `fingerprint`) for rows whose status is not `res
 
 `acknowledged_by` references `users` and is set only when a Beacon user acknowledged. Someone who acts from chat before their account is linked is recorded on the timeline event instead.
 
-**`alert_groups`**: `id`, `group_key` (hash of the routing rule and the `group_by` label values), `labels` (those label values, for display), `routing_rule_id`, `team_id`, `escalation_policy_id`, `status` (`open` or `resolved`), `update_interval`, `notify_at`, `notified_at`, `created_at`, `resolved_at`. Unique on `group_key` for open groups.
+**`alert_groups`**: `id`, `group_key` (hash of the routing rule and the `group_by` label values), `labels` (those label values, for display), `routing_rule_id`, `team_id`, `escalation_policy_id`, `status` (`open` or `resolved`), `update_interval`, `notify_at`, `notified_at`, `notified_alerts`, `silence_id`, `created_at`, `resolved_at`. Unique on `group_key` for open groups.
 
-`notify_at` is when the next notification about the group is due, and null when none is; `notified_at` is when the last one was queued; `update_interval` is the `group_interval` the group was opened with. Together they are the timers of grouping: a new group gets `notify_at` one `group_wait` ahead, and a change that a source reports sets it to `notified_at + update_interval`, or to now when that has passed. Workers take due groups with `SELECT ... FOR UPDATE SKIP LOCKED` and queue the notification in the same transaction that clears `notify_at`, so a timer survives a restart and fires once when several replicas run. These four columns were added with grouping (issue 26); the first version of this design did not say where the timers of grouping live. They are kept apart from `escalations`, which times the steps of a policy and belongs to the escalation engine.
+`notify_at` is when the next notification about the group is due, and null when none is; `notified_at` is when the last one was queued; `update_interval` is the `group_interval` the group was opened with. Together they are the timers of grouping: a new group gets `notify_at` one `group_wait` ahead, and a change that a source reports sets it to `notified_at + update_interval`, or to now when that has passed. Workers take due groups with `SELECT ... FOR UPDATE SKIP LOCKED` and queue the notification in the same transaction that clears `notify_at`, so a timer survives a restart and fires once when several replicas run. `notified_alerts` (`jsonb`, alert identifier to `open` or `resolved`) holds the alerts that a notification about the group has shown and what each was shown as, and `silence_id` the silence whose end the group's next notification waits for. Both were added with silences (issue 28): they tell what is news when a silence hides some alerts of a group, and which groups to wake when a silence is expired. The first four columns were added with grouping (issue 26); the first version of this design did not say where the timers of grouping live. They are kept apart from `escalations`, which times the steps of a policy and belongs to the escalation engine.
 
 > [!note] Built up over several migrations
 > The first migration for these tables leaves out the columns that reference tables which do not exist yet: `routing_rule_id`, `team_id` and `escalation_policy_id`. The migrations that create those tables add them.
@@ -433,7 +433,9 @@ A unique index on (`source_id`, `fingerprint`) for rows whose status is not `res
 | `occurred_at` | `timestamptz` | |
 | `data` | `jsonb` | Details specific to the type |
 
-**`silences`**: `id`, `matchers` (`jsonb`: list of label, operator, value), `starts_at`, `ends_at`, `created_by`, `comment`, `created_at`. Expiring a silence early sets `ends_at` to now.
+**`silences`**: `id`, `matchers` (`jsonb`: list of label, operator, value), `starts_at`, `ends_at`, `created_by`, `created_by_token`, `comment`, `created_at`. Expiring a silence early sets `ends_at` to now, and `starts_at` too when the silence had not begun.
+
+The author is exactly one of `created_by`, which references `users`, and `created_by_token`, which references `api_tokens`. The second column was added with silences (issue 28): the first version of this design had only `created_by`, which cannot name a token, and a silence created by automation would have had no author. [[silences]] describes the API.
 
 ### Notifications
 

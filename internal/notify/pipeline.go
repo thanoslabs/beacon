@@ -64,6 +64,9 @@ type Pipeline struct {
 	// whole when it is reloaded.
 	channels atomic.Pointer[map[string]Channel]
 	policies atomic.Pointer[map[string]Policy]
+	// silences is where the pipeline learns which alerts are silenced. It
+	// holds nil until SetSilences is called, and then nothing is.
+	silences atomic.Pointer[Silences]
 }
 
 // New returns a pipeline. Register its channels before calling Run.
@@ -89,6 +92,7 @@ func New(db *pgxpool.Pool, alerts *alert.Store, logger *slog.Logger, cfg Config)
 	p := &Pipeline{db: db, alerts: alerts, logger: logger, cfg: cfg, now: time.Now}
 	p.SetChannels(nil)
 	p.SetPolicies(nil)
+	p.SetSilences(nil)
 	return p
 }
 
@@ -124,6 +128,12 @@ func (p *Pipeline) SetPolicies(policies map[string]Policy) {
 		policies = map[string]Policy{}
 	}
 	p.policies.Store(&policies)
+}
+
+// SetSilences makes the pipeline keep quiet about the alerts that the
+// silences of s match. Call it before the pipeline is used.
+func (p *Pipeline) SetSilences(s Silences) {
+	p.silences.Store(&s)
 }
 
 // Enqueue queues n for delivery through tx, so the notification exists if and
@@ -245,6 +255,9 @@ func (p *Pipeline) send(ctx context.Context, n Notification) (ref string, err er
 	}
 	if m.Events, err = p.alerts.GroupTimeline(ctx, n.GroupID); err != nil {
 		return "", fmt.Errorf("load timeline: %w", err)
+	}
+	if m.Alerts, err = p.unsilenced(ctx, m.Group, m.Alerts); err != nil {
+		return "", fmt.Errorf("load silences: %w", err)
 	}
 	err = p.db.QueryRow(ctx, `SELECT external_ref FROM notifications
 		WHERE alert_group_id = $1 AND integration_id = $2 AND destination = $3 AND status = 'sent' AND external_ref <> ''

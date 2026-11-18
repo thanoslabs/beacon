@@ -21,6 +21,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/server"
+	"github.com/thanoslabs/beacon/internal/silence"
 	"github.com/thanoslabs/beacon/internal/slack"
 	"github.com/thanoslabs/beacon/internal/version"
 )
@@ -122,6 +123,11 @@ func runServe(ctx context.Context, e env, args []string) error {
 	sessions := auth.NewStore(pool)
 	signIn := auth.NewHandler(logger, sessions)
 	pipeline := notify.New(pool, alerts, logger, notifyCfg)
+	// Silences keep the pipeline quiet, and one that is ended early wakes
+	// the groups that were waiting for its end.
+	silences := silence.NewStore(pool)
+	silences.OnExpire(alerts.WakeGroupsWaitingFor)
+	pipeline.SetSilences(silences)
 
 	registry := server.NewRegistry()
 	srvCfg.Authenticator = signIn
@@ -136,6 +142,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 		interactions: slack.NewInteractions(logger, alerts, nil),
 		pipeline:     pipeline,
 		auth:         signIn,
+		silences:     silence.NewHandler(logger, silences),
 	}
 	prov.registerMetrics(registry)
 	prov.ingest.RegisterMetrics(registry)
