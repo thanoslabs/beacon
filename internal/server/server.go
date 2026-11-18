@@ -1,6 +1,7 @@
 // Package server is Beacon's HTTP server: the listener, the middleware every
 // request passes through, and the health, readiness and metrics endpoints.
-// Later features attach their routes to its mux.
+// Features attach their routes with Handle, which puts every route that is
+// not explicitly public behind authentication.
 //
 // The server keeps no state of its own. Everything that must survive a
 // restart, or be seen by another replica, lives in Postgres.
@@ -14,11 +15,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/thanoslabs/beacon/internal/access"
 )
 
 // Paths of the operational endpoints.
@@ -43,6 +47,9 @@ type Config struct {
 	// ReadinessTimeout bounds the database check made by the readiness
 	// endpoint.
 	ReadinessTimeout time.Duration
+	// Authenticator tells who is behind a request to a route that is not
+	// public. Without one, every such route answers 401.
+	Authenticator access.Authenticator
 }
 
 // Defaults for Config.
@@ -58,6 +65,8 @@ type Server struct {
 	logger   *slog.Logger
 	db       Pinger
 	mux      *http.ServeMux
+	guard    *access.Guard
+	routes   []access.Route
 	http     *http.Server
 	listener net.Listener
 	// stopping is set when shutdown begins, so that readiness fails and load
@@ -78,13 +87,20 @@ func New(cfg Config, logger *slog.Logger, db Pinger, registry *prometheus.Regist
 		cfg.ReadinessTimeout = DefaultReadinessTimeout
 	}
 
-	s := &Server{cfg: cfg, logger: logger, db: db, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, logger: logger, db: db, mux: http.NewServeMux(), guard: access.NewGuard(logger, cfg.Authenticator)}
 
-	s.mux.HandleFunc("GET "+PathLiveness, s.handleLiveness)
-	s.mux.HandleFunc("GET "+PathReadiness, s.handleReadiness)
-	s.mux.Handle("GET "+PathMetrics, promhttp.HandlerFor(registry, promhttp.HandlerOpts{
+	// Probes and scrapes come from machines that have no session.
+	s.Handle(access.Route{Pattern: "GET " + PathLiveness, Level: access.Public, Handler: http.HandlerFunc(s.handleLiveness)})
+	s.Handle(access.Route{Pattern: "GET " + PathReadiness, Level: access.Public, Handler: http.HandlerFunc(s.handleReadiness)})
+	s.Handle(access.Route{Pattern: "GET " + PathMetrics, Level: access.Public, Handler: promhttp.HandlerFor(registry, promhttp.HandlerOpts{
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
-	}))
+	})})
+	// Everything else is denied by default: a path that no route matches
+	// answers 401 to a stranger, like a route that exists, and 404 only to
+	// someone who is signed in.
+	s.mux.Handle("/", s.guard.Wrap(access.Route{Level: access.Member, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.writeJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+	})}))
 
 	quiet := map[string]bool{PathLiveness: true, PathReadiness: true, PathMetrics: true}
 	// Outermost first: the identifier exists before anything is logged, and
@@ -102,10 +118,19 @@ func New(cfg Config, logger *slog.Logger, db Pinger, registry *prometheus.Regist
 	return s
 }
 
-// Mux returns the router, so that features can attach their routes. Routes
-// must be added before Serve is called.
-func (s *Server) Mux() *http.ServeMux {
-	return s.mux
+// Handle attaches a route. This is the only way in: there is no access to
+// the router itself, so no route can skip the check of its level. A route
+// that is not access.Public needs a valid session or API token, and
+// access.Admin needs the admin role as well. Routes must be added before
+// Serve is called.
+func (s *Server) Handle(route access.Route) {
+	s.routes = append(s.routes, route)
+	s.mux.Handle(route.Pattern, s.guard.Wrap(route))
+}
+
+// Routes lists every route that was attached, with its level.
+func (s *Server) Routes() []access.Route {
+	return slices.Clone(s.routes)
 }
 
 // Listen opens the listening socket. Calling it before Serve lets the caller

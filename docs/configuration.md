@@ -162,7 +162,7 @@ The first three accept `via`, a list of integration names that narrows how the p
 
 ## Sign-in
 
-The `auth` block says how people sign in. It is one group of settings, not a list of objects, and must be in a single file. [[access]] describes it and what to set up at the identity provider.
+The `auth` block says how people sign in: through an identity provider (`oidc`), as the bootstrap admin (`bootstrap_admin`), or both. It is one group of settings, not a list of objects, and must be in a single file. [[access]] describes it and what to set up at the identity provider.
 
 ```yaml
 auth:
@@ -203,6 +203,8 @@ kill -HUP "$(pidof beacon)"
 docker compose kill --signal HUP beacon
 kubectl exec deploy/beacon -- kill -HUP 1
 ```
+
+An admin can ask for the same over HTTP, with `POST /api/v1/config/reload` (see [[access]]). It answers `200` with `{"result": "reloaded"}`, or `422` with the list of problems when the configuration is rejected. The request reaches one replica; the signal is the way to reach each of them.
 
 - The files are checked first, exactly as `beacon validate --check-secrets` checks them. If anything is wrong, **nothing** of the new configuration is applied and the previous one stays active. The log has one `configuration problem` record per problem, then `configuration reload failed; the previous configuration stays active`.
 - A valid configuration is applied as a whole, as at start: the database is brought in line, then sources, integrations and notification targets switch over together. Requests in progress finish with what they started with. The log says `configuration reloaded`.

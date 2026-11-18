@@ -44,7 +44,7 @@ var (
 	// ErrUserDisabled means the user exists and has been disabled.
 	ErrUserDisabled = errors.New("the account is disabled")
 	// ErrNoSession means the session does not exist or has expired.
-	ErrNoSession = errors.New("no session")
+	ErrNoSession = fmt.Errorf("no session: %w", access.ErrUnauthenticated)
 	// ErrNoFlow means the sign-in was not started here, was already
 	// completed, or took too long.
 	ErrNoFlow = errors.New("the sign-in has expired or was already completed")
