@@ -105,6 +105,36 @@ jobs:
           docker compose stop beacon
           test "$(docker inspect --format '{{.State.ExitCode}}' "$(docker compose ps --all --quiet beacon)")" = "0"
 
+      # A real Alertmanager, the version pinned in compose.yaml, delivers a
+      # firing and then a resolved notification to Beacon. The loops wait for
+      # the alert to change, not for a fixed time: Alertmanager sends after
+      # its group_wait and group_interval.
+      - name: Check that Alertmanager delivers to Beacon
+        env:
+          BEACON_SOURCE_TOKEN: ci-only-source-token-0123456789
+          BEACON_CONFIG_DIR: ./examples/alertmanager
+          COMPOSE_PROFILES: alertmanager
+        run: |
+          set -euo pipefail
+          docker compose up --detach --wait
+          amtool() { docker compose exec -T alertmanager amtool --alertmanager.url=http://localhost:9093 "$@"; }
+          alert_is() {
+            for _ in $(seq 1 120); do
+              state="$(docker compose exec -T postgres psql --username beacon --no-align --tuples-only \
+                --command "SELECT status || ' ' || severity FROM alerts WHERE labels->>'alertname' = 'CISmokeTest'")"
+              if [ "$state" = "$1" ]; then return 0; fi
+              sleep 1
+            done
+            echo "::error::the alert is '$state' in Beacon, want '$1'"
+            return 1
+          }
+          amtool alert add CISmokeTest instance=ci severity=page
+          alert_is "firing critical"
+          amtool alert add CISmokeTest instance=ci severity=page --end="$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+          alert_is "resolved critical"
+
       - name: Show logs
         if: always()
+        env:
+          COMPOSE_PROFILES: alertmanager
         run: docker compose logs --no-color
