@@ -433,7 +433,9 @@ A unique index on (`source_id`, `fingerprint`) for rows whose status is not `res
 | `occurred_at` | `timestamptz` | |
 | `data` | `jsonb` | Details specific to the type |
 
-**`silences`**: `id`, `matchers` (`jsonb`: list of label, operator, value), `starts_at`, `ends_at`, `created_by`, `comment`, `created_at`. Expiring a silence early sets `ends_at` to now.
+**`silences`**: `id`, `matchers` (`jsonb`: list of label, operator, value), `starts_at`, `ends_at`, `created_by`, `created_by_token`, `comment`, `created_at`. Expiring a silence early sets `ends_at` to now, and `starts_at` too when the silence had not begun.
+
+The author is exactly one of `created_by`, which references `users`, and `created_by_token`, which references `api_tokens`. The second column was added with silences (issue 28): the first version of this design had only `created_by`, which cannot name a token, and a silence created by automation would have had no author. [[silences]] describes the API.
 
 ### Notifications
 

@@ -105,6 +105,7 @@ The server answers on these endpoints. Everything that is not listed as open in 
 | `GET /api/v1/me` | Who is signed in. Needs a session. |
 | `POST /api/v1/config/reload` | Reloads the configuration. Needs the admin role. |
 | `GET`, `POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | API tokens for automation. Needs the admin role. |
+| `GET`, `POST /api/v1/silences`, `GET`, `DELETE /api/v1/silences/<id>` | Silences. Needs a session or a token, with either role. See the [silences page](docs/silences.md). |
 | `POST /auth/bootstrap` | Sign-in of the bootstrap admin, for installs with no identity provider. Off unless configured. |
 | `GET /healthz` | Liveness: the process is running. It does not check the database. |
 | `GET /readyz` | Readiness: the database answers and the server is not shutting down. Returns `503` otherwise. |

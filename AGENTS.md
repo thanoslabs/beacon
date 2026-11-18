@@ -65,6 +65,7 @@ Tooling:
 │   ├── routing/              # Routing rules: which team, service, policy and grouping an alert gets
 │   │   └── provisiontest/    # Test helper: a provisioned row to reference
 │   ├── server/               # HTTP server, middleware, health, readiness and metrics endpoints
+│   ├── silence/              # Silences: matchers, the store and the API
 │   ├── slack/                # Slack channel: Web API client, message rendering and button presses
 │   │   └── slacktest/        # Fake Slack for tests
 │   └── version/              # Build version reporting
@@ -185,6 +186,13 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Patterns from users, in routing rules and in silences, are compiled with `config.CompileMatcher` and nothing else: it anchors the pattern at both ends, as Prometheus does, and bounds its length. Go's `regexp` is RE2, which matches in linear time; do not replace it with an engine that backtracks.
 - The group key has the routing rule as its scope (`alert.GroupKey`), so alerts of different rules never share a group.
 - Metric labels stay bounded: `beacon_routing_unmatched_alerts_total` has the source and nothing else. A rule name, an alert name, a fingerprint or an identifier is never a label.
+
+### Silences
+
+- `internal/silence` owns the `silences` table and serves `/api/v1/silences`; `docs/silences.md` is the contract. A silence is runtime state: it is created through the API, never from the files.
+- Everything in a silence comes from a request, so everything is bounded (`MaxMatchers`, `MaxValueLength` and the rest in `silence.go`), and a pattern is compiled with `config.CompileMatcher` like one in a routing rule. Check a silence in `compile` and `Store.Create`, not in the handler, so that no other way of creating one can skip the checks.
+- The author is the principal of the request, a user or a token, taken from `access.FromContext`. Never read it from the body.
+- The routes follow the tokens' conventions: a list is `{"silences": [...]}`, a creation answers `201` with the object, `DELETE` answers `204`, an error is `{"error", "field"}`, and an identifier that is not a UUID is `404` like one that does not exist.
 
 ### Notifications
 
