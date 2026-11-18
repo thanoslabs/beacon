@@ -62,7 +62,7 @@ type Options struct {
 	// SnoozeUntil is when a snooze ends. Required for ActionSnooze.
 	SnoozeUntil time.Time
 	// ResolvedAt is when the alert was resolved, when the source says so.
-	// Zero means now.
+	// Zero means now, and so does a time in the future.
 	ResolvedAt time.Time
 }
 
@@ -340,7 +340,9 @@ func (s *Store) transition(ctx context.Context, tx pgx.Tx, a Alert, action Actio
 		data["until"] = opts.SnoozeUntil.UTC().Format(time.RFC3339)
 	case StatusResolved:
 		resolvedAt = &now
-		if !opts.ResolvedAt.IsZero() {
+		// A source's clock may run ahead of Beacon's. An alert is never
+		// resolved in the future.
+		if !opts.ResolvedAt.IsZero() && opts.ResolvedAt.Before(now) {
 			resolvedAt = &opts.ResolvedAt
 		}
 	}
