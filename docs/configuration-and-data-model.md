@@ -126,7 +126,7 @@ People targets (`schedule`, `team`, `user`) accept an optional `via` list of int
 | Field | Required | Meaning |
 |---|---|---|
 | `group_by` | no | Labels that define a group (default `[alertname]`) |
-| `group_wait` | no | Wait before the first notification of a new group (default `30s`) |
+| `group_wait` | no | Wait before the first notification of a new group (default `30s`). Zero is allowed and sends it at once. |
 | `group_interval` | no | Minimum time between updates for a group (default `5m`) |
 | `default.team` | no | Team for alerts that match no rule |
 | `default.escalation_policy` | yes | Policy for alerts that match no rule |
@@ -410,10 +410,12 @@ A unique index on (`source_id`, `fingerprint`) for rows whose status is not `res
 
 `acknowledged_by` references `users` and is set only when a Beacon user acknowledged. Someone who acts from chat before their account is linked is recorded on the timeline event instead.
 
-**`alert_groups`**: `id`, `group_key` (hash of the routing rule and the `group_by` label values), `routing_rule_id`, `team_id`, `escalation_policy_id`, `status` (`open` or `resolved`), `created_at`, `resolved_at`. Unique on `group_key` for open groups.
+**`alert_groups`**: `id`, `group_key` (hash of the routing rule and the `group_by` label values), `labels` (those label values, for display), `routing_rule_id`, `team_id`, `escalation_policy_id`, `status` (`open` or `resolved`), `update_interval`, `notify_at`, `notified_at`, `created_at`, `resolved_at`. Unique on `group_key` for open groups.
+
+`notify_at` is when the next notification about the group is due, and null when none is; `notified_at` is when the last one was queued; `update_interval` is the `group_interval` the group was opened with. Together they are the timers of grouping: a new group gets `notify_at` one `group_wait` ahead, and a change that a source reports sets it to `notified_at + update_interval`, or to now when that has passed. Workers take due groups with `SELECT ... FOR UPDATE SKIP LOCKED` and queue the notification in the same transaction that clears `notify_at`, so a timer survives a restart and fires once when several replicas run. These four columns were added with grouping (issue 26); the first version of this design did not say where the timers of grouping live. They are kept apart from `escalations`, which times the steps of a policy and belongs to the escalation engine.
 
 > [!note] Built up over several migrations
-> The first migration for these tables leaves out the columns that reference tables which do not exist yet: `routing_rule_id`, `team_id` and `escalation_policy_id`. The migrations that create those tables add them. Until grouping is implemented, every alert gets a group of its own, keyed by a hash of its source and fingerprint.
+> The first migration for these tables leaves out the columns that reference tables which do not exist yet: `routing_rule_id`, `team_id` and `escalation_policy_id`. The migrations that create those tables add them. Until routing is implemented, the routing rule is no part of the group key.
 
 **`escalations`**: one row per open alert group. `alert_group_id`, `escalation_policy_id`, `step_index`, `pass` (which repeat), `next_step_at`, `status` (`active`, `acknowledged`, `exhausted` or `resolved`). Workers claim due rows with `SELECT ... FOR UPDATE SKIP LOCKED`, so a timer fires once when several replicas run.
 

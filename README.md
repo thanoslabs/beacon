@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md) and posts them to a [Slack channel](docs/slack.md), where they can be acknowledged, snoozed and resolved. Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md), [groups](docs/configuration.md#grouping) related alerts and posts each group to a [Slack channel](docs/slack.md), where they can be acknowledged, snoozed and resolved. Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 

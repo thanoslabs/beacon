@@ -12,14 +12,31 @@ A notification is one message about one alert group to one destination, through 
 
 | Reason | Queued when |
 |---|---|
-| `escalation_step` | Someone is asked to respond; for now, when an alert starts firing |
-| `group_update` | The state changed: acknowledged, snoozed, or firing again after a snooze |
-| `resolved` | The alert was resolved |
+| `escalation_step` | Someone is asked to respond; for now, the first notification of a group |
+| `group_update` | The group changed: an alert joined it or resolved, or someone acknowledged, snoozed or resolved alerts, or a snooze ended |
+| `resolved` | Every alert of the group is resolved |
 
-The message is built when it is delivered, from the state of the alerts at that moment. A notification that is delivered late therefore never shows an old state.
+The message is built when it is delivered, from the state of the group at that moment. A notification that is delivered late therefore never shows an old state, and a change made while a notification is still waiting in the queue is shown by that notification and gets none of its own.
 
 > [!note] Who is notified
-> Routing and escalation policies will decide who is notified. Until they exist, every state change of every alert is sent to the same fixed destinations.
+> Routing and escalation policies will decide who is notified. Until they exist, the first notification of every group goes to the same fixed destinations: the channels in the first step of the default escalation policy. Updates go to every destination that was told about the group before.
+
+## Groups
+
+Notifications are about a group of alerts, not about each alert; [[configuration#Grouping]] says how groups are formed. A group has one message per destination, which is updated in place where the service allows it. When that message is sent and updated depends on who caused the change:
+
+| What happens | When it is told |
+|---|---|
+| A new group opens | After `group_wait` (30 seconds by default), with every alert that has joined by then |
+| An alert joins a group that was told about, or a source resolves one | When `group_interval` (5 minutes by default) has passed since the last notification caused by a source: at once if it has, otherwise then. Everything that happened in between is in the one update. |
+| A source resolves the last alert | The same; the notification has the reason `resolved` |
+| Someone acknowledges, snoozes or resolves, or a snooze ends | At once. A person who presses a button sees the result. |
+| A source delivers an alert that is already open again | Never. Repeats are not news. |
+
+- **A group that resolves during its wait tells nobody.** A problem that came and went within `group_wait` produces no notification at all. The alerts and their timelines are stored.
+- **An alert that joins an acknowledged group fires.** It is new, and nobody has taken it; the message shows the group as firing again, with one alert firing and the others acknowledged.
+- **Acting on a message acts on the group.** *Acknowledge* acknowledges every alert of the group that can be acknowledged, and so on. Fifty alerts acknowledged at once are one update.
+- **The timers are rows in Postgres**, not timers in a process: `alert_groups.notify_at` holds when the next notification of a group is due. Every replica looks for due groups once a second, and a group is handed to exactly one of them. A restart loses nothing: whatever became due while no process ran is sent when one starts.
 
 ## Delivery
 

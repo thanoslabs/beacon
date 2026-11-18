@@ -50,6 +50,12 @@ Sources repeat themselves: Alertmanager and Grafana send a firing alert again on
 - **The same fingerprint from two sources** is two alerts. Point the members of an Alertmanager cluster at one source.
 - **A resolution that never arrives** leaves the alert open. Beacon does not guess that a silent source means a solved problem. Resolve such an alert by hand.
 
+## Groups
+
+Every alert belongs to an alert group: the alerts that share the values of the `group_by` labels (see [[configuration#Grouping]]). An alert joins its group when it is opened and stays in it, even if a later delivery changes its labels.
+
+A group is `open` while any of its alerts is not resolved, and `resolved` once all are. A resolved group never opens again: the next alert with the same labels opens a new group. Notifications are sent for the group ([[notifications#Groups]]), and an action taken on a group's message applies to each of its alerts that allows it.
+
 ## Severity
 
 Every alert has one of three fixed levels: `critical`, `warning` or `info`.

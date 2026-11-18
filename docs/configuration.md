@@ -7,7 +7,7 @@ date: 2026-11-17
 Beacon's provisioned objects are defined in YAML files that live in version control: sources, integrations, teams, schedules, escalation policies and routing. So is how people sign in. This page is the reference for those files. Why they look the way they do is in [[configuration-and-data-model]].
 
 > [!warning] Loaded and checked, not all acted on yet
-> Beacon reads and validates every kind described here. What it does with them is still growing: every type of source and Slack integrations work today, and the other integration types, schedules, escalation and routing arrive with later releases. Each section says what is in use.
+> Beacon reads and validates every kind described here. What it does with them is still growing: every type of source, grouping and Slack integrations work today, and the other integration types, schedules, escalation and routing rules arrive with later releases. Each section says what is in use.
 
 ## Files
 
@@ -143,9 +143,9 @@ The first three accept `via`, a list of integration names that narrows how the p
 
 | Field | Required | Meaning |
 |---|---|---|
-| `group_by` | no | Labels that define a group (default `[alertname]`) |
-| `group_wait` | no | Wait before the first notification of a new group (default `30s`) |
-| `group_interval` | no | Minimum time between updates for a group (default `5m`) |
+| `group_by` | no | Labels that define a group (default `[alertname]`). Alerts with the same values for all of them are one group. `[]` puts every alert in one group. |
+| `group_wait` | no | Wait before the first notification of a new group (default `30s`). `0s` sends it at once. |
+| `group_interval` | no | Least time between two notifications about a group that sources cause (default `5m`) |
 | `default.escalation_policy` | yes | Policy for alerts that match no rule |
 | `default.team` | no | Team for alerts that match no rule |
 | `rules` | no | Ordered list; the first matching rule wins |
@@ -159,6 +159,25 @@ The first three accept `via`, a list of integration names that narrows how the p
 | `service` | no | Service name the alert is assigned to |
 | `escalation_policy` | yes | Policy to run |
 | `group_by`, `group_wait`, `group_interval` | no | Override the routing settings for this rule |
+
+### Grouping
+
+Related alerts are told about together. A new alert joins the open group whose alerts have the same values for the `group_by` labels, or opens one. A label that an alert does not have counts as empty. The source does not matter: the same problem reported by two sources is one group.
+
+A group sends **one notification**, which is updated as the group changes; see [[notifications#Groups]] for when. `group_wait` gives alerts that fire together time to arrive before anyone is told, and `group_interval` keeps a busy group from sending update after update. Both apply without a `routing` block too, with their defaults.
+
+```yaml
+routing:
+  group_by: [alertname, cluster]
+  group_wait: 30s
+  group_interval: 5m
+  default:
+    escalation_policy: platform-default
+```
+
+A group keeps the labels and the interval it was opened with. A reload changes the grouping of alerts that arrive afterwards; alerts that are open stay where they are.
+
+Behind Alertmanager or Grafana, which have waited already before they send, a short `group_wait` such as `5s` is enough: long enough for every alert of one of their notifications to be stored.
 
 ## Sign-in
 
@@ -207,7 +226,7 @@ kubectl exec deploy/beacon -- kill -HUP 1
 An admin can ask for the same over HTTP, with `POST /api/v1/config/reload` (see [[access]]). It answers `200` with `{"result": "reloaded"}`, or `422` with the list of problems when the configuration is rejected. The request reaches one replica; the signal is the way to reach each of them.
 
 - The files are checked first, exactly as `beacon validate --check-secrets` checks them. If anything is wrong, **nothing** of the new configuration is applied and the previous one stays active. The log has one `configuration problem` record per problem, then `configuration reload failed; the previous configuration stays active`.
-- A valid configuration is applied as a whole, as at start: the database is brought in line, then sources, integrations and notification targets switch over together. Requests in progress finish with what they started with. The log says `configuration reloaded`.
+- A valid configuration is applied as a whole, as at start: the database is brought in line, then sources, grouping, integrations and notification targets switch over together. Requests in progress finish with what they started with. The log says `configuration reloaded`.
 - Secrets kept in files are read again, so a reload also picks up a rotated secret. Secrets from environment variables cannot change while the process runs; rotating one needs a restart.
 - Each replica reloads on its own. Send the signal to every replica.
 - Process settings (flags and their environment variables) are not part of the configuration and need a restart.
