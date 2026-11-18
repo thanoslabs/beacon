@@ -25,6 +25,7 @@ const (
 	prodToken    = "prod-token-0123456789abcdef"
 	stagingToken = "staging-token-0123456789abcdef"
 	amToken      = "alertmanager-token-0123456789abcdef"
+	grafanaToken = "grafana-token-0123456789abcdef"
 )
 
 type fixture struct {
@@ -33,6 +34,8 @@ type fixture struct {
 	mux   *http.ServeMux
 	logs  *bytes.Buffer
 	ids   map[string]string
+	// handler is the ingest handler behind mux.
+	handler *ingest.Handler
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -47,6 +50,7 @@ func newFixture(t *testing.T) *fixture {
 			Severity: config.SeverityMapping{Label: "priority", Mapping: map[string]alert.Severity{"page": alert.SeverityCritical}, Default: alert.SeverityInfo}},
 		{Name: "am", Type: config.SourceTypeAlertmanager, Token: config.NewSecret(config.SecretRef{}, amToken),
 			Labels: map[string]string{"environment": "production"}},
+		{Name: "grafana", Type: config.SourceTypeGrafana, Token: config.NewSecret(config.SecretRef{}, grafanaToken)},
 	}
 	rows, err := provision.Reconcile(context.Background(), pool, config.Config{Sources: sources})
 	if err != nil {
@@ -57,7 +61,8 @@ func newFixture(t *testing.T) *fixture {
 	for _, s := range sources {
 		configured = append(configured, ingest.Source{ID: f.ids[s.Name], Source: s})
 	}
-	ingest.New(slog.New(slog.NewJSONHandler(f.logs, nil)), f.store, configured).Register(f.mux)
+	f.handler = ingest.New(slog.New(slog.NewJSONHandler(f.logs, nil)), f.store, configured)
+	f.handler.Register(f.mux)
 	return f
 }
 

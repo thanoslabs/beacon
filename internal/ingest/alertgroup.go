@@ -14,6 +14,10 @@ import (
 // describes the payload.
 const AlertmanagerVersion = "4"
 
+// GrafanaVersion is the version of the payload of Grafana's webhook contact
+// point that Beacon reads. docs/grafana.md describes the payload.
+const GrafanaVersion = "1"
+
 // maxLinkLength bounds a web address kept with an alert.
 const maxLinkLength = 2048
 
@@ -39,6 +43,22 @@ var alertmanagerLinks = alertLinks{"generatorURL": alert.LinkGenerator}
 // sends. Every error is a *fieldError.
 func parseAlertmanager(body []byte) (alertGroup, error) {
 	return parseAlertGroup(body, alertmanagerLinks)
+}
+
+// grafanaLinks are the links of an alert from Grafana. The dashboard and the
+// panel are empty unless the alert rule is linked to a panel.
+var grafanaLinks = alertLinks{
+	"generatorURL": alert.LinkGenerator,
+	"dashboardURL": alert.LinkDashboard,
+	"panelURL":     alert.LinkPanel,
+	"silenceURL":   alert.LinkSilence,
+}
+
+// parseGrafana reads the body that Grafana's webhook contact point sends.
+// It has the shape of Alertmanager's, with more fields on each alert. Every
+// error is a *fieldError.
+func parseGrafana(body []byte) (alertGroup, error) {
+	return parseAlertGroup(body, grafanaLinks)
 }
 
 // parseAlertGroup reads a group notification. Only the fields Beacon uses are

@@ -7,7 +7,7 @@ date: 2026-11-17
 Beacon's provisioned objects are defined in YAML files that live in version control: sources, integrations, teams, schedules, escalation policies and routing. So is how people sign in. This page is the reference for those files. Why they look the way they do is in [[configuration-and-data-model]].
 
 > [!warning] Loaded and checked, not all acted on yet
-> Beacon reads and validates every kind described here. What it does with them is still growing: Alertmanager and webhook sources and Slack integrations work today, and the Grafana source, the other integration types, schedules, escalation and routing arrive with later releases. Each section says what is in use.
+> Beacon reads and validates every kind described here. What it does with them is still growing: every type of source, routing, grouping and Slack integrations work today. The other integration types, schedules and escalation beyond the first step of a policy arrive with later releases. Each section says what is in use.
 
 ## Files
 
@@ -51,7 +51,7 @@ A source is an authenticated endpoint that receives alerts, at `/api/v1/ingest/<
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | Identity, and the last segment of the URL |
-| `type` | yes | `alertmanager` (see [[alertmanager]]), `grafana` or `webhook` (see [[webhook]]). A `grafana` source does not receive alerts yet. |
+| `type` | yes | `alertmanager` (see [[alertmanager]]), `grafana` (see [[grafana]]) or `webhook` (see [[webhook]]). It decides which payload the endpoint reads. |
 | `token` | yes | Secret that the sender presents as a bearer token, at least 16 characters |
 | `labels` | no | Labels added to every alert from this source. They do not replace a label the alert already has. |
 | `severity.label` | no | The label that carries severity (default `severity`) |
@@ -128,6 +128,9 @@ A schedule is one rotation.
 | `steps[].notify` | yes | Targets, at least one |
 | `steps[].timeout` | yes | How long to wait for an acknowledgement before the next step |
 
+> [!warning] Only the first step, and only channels
+> Escalation is not implemented yet. Of the policy that routing gives an alert group, Beacon acts on the `{channel, integration}` targets of the **first step**, once. Schedule, team and user targets, later steps, timeouts and `repeat` are read and checked and do nothing; `beacon serve` logs a warning for each policy that has any. A group whose policy has no channel in its first step notifies nobody, and its timeline says so.
+
 A target has exactly one of these forms:
 
 | Target | Who is notified |
@@ -143,22 +146,78 @@ The first three accept `via`, a list of integration names that narrows how the p
 
 | Field | Required | Meaning |
 |---|---|---|
-| `group_by` | no | Labels that define a group (default `[alertname]`) |
-| `group_wait` | no | Wait before the first notification of a new group (default `30s`) |
-| `group_interval` | no | Minimum time between updates for a group (default `5m`) |
+| `group_by` | no | Labels that define a group (default `[alertname]`). Alerts with the same values for all of them are one group. `[]` puts every alert in one group. |
+| `group_wait` | no | Wait before the first notification of a new group (default `30s`). `0s` sends it at once. |
+| `group_interval` | no | Least time between two notifications about a group that sources cause (default `5m`) |
 | `default.escalation_policy` | yes | Policy for alerts that match no rule |
 | `default.team` | no | Team for alerts that match no rule |
 | `rules` | no | Ordered list; the first matching rule wins |
 
 | Rule field | Required | Meaning |
 |---|---|---|
-| `name` | yes | Identity |
+| `name` | yes | Identity; recorded on each alert the rule matched |
 | `match` | one or both | Map of label to exact value; all must match |
-| `match_re` | one or both | Map of label to regular expression ([RE2 syntax](https://github.com/google/re2/wiki/Syntax)), anchored at both ends; all must match |
+| `match_re` | one or both | Map of label to regular expression, which must match the whole value; all must match |
 | `team` | no | Team the alert is assigned to |
-| `service` | no | Service name the alert is assigned to |
-| `escalation_policy` | yes | Policy to run |
-| `group_by`, `group_wait`, `group_interval` | no | Override the routing settings for this rule |
+| `service` | no | Service the alert is assigned to, at most 100 characters. Without it, the alert's `service` label is used. |
+| `escalation_policy` | yes | Policy of the alert's group |
+| `group_by`, `group_wait`, `group_interval` | no | Replace the routing settings for the alerts of this rule |
+
+### How an alert is routed
+
+When an alert is opened, Beacon tries the rules in the order of the file. **The first rule whose matchers all match wins**; the rules after it are not tried. An alert that matches no rule gets `default`.
+
+```yaml
+routing:
+  default:
+    team: platform
+    escalation_policy: platform-default
+  rules:
+    - name: database
+      match:
+        team: dba
+      team: dba
+      service: postgres
+      escalation_policy: dba
+    - name: pages
+      match_re:
+        severity: critical|page
+      escalation_policy: platform-urgent
+      group_wait: 0s
+```
+
+- **Labels.** Rules read the alert's labels as Beacon stores them, which includes the labels its source adds. A label the alert does not have counts as empty: `match: {team: ""}` matches alerts without a `team` label.
+- **Regular expressions** use [RE2 syntax](https://github.com/google/re2/wiki/Syntax) and are anchored at both ends, as in Prometheus: `5..` matches `500` and not `1500`, and `critical|page` does not match `pager`. A pattern may be at most 1024 characters. RE2 matches in time linear in the length of the value whatever the pattern, so a rule cannot be written that stalls Beacon. `beacon validate` reports a pattern that does not compile, with the file, the rule and the label.
+- **A label is in `match` or in `match_re`**, not both.
+- **What the rule decides** is stored on the alert: the rule, the team and the service. The escalation policy is stored on the alert's group. They are decided once: a repeated delivery of an open alert does not route it again, and neither does a reload.
+- **Groups form within a rule.** Alerts that different rules matched never share a group, even when they agree on the `group_by` labels, because the rules may send them to different people.
+- **Unmatched alerts** are counted in the metric `beacon_routing_unmatched_alerts_total{source="..."}`, once when the alert is opened. A value that keeps rising for a source means alerts are arriving that no rule expects.
+- **Without a `routing` block** alerts are stored and grouped, and nobody is notified.
+
+A service is a name on an alert, for filtering and for metrics. It is not an object in the configuration.
+
+### Severity
+
+Severity is not part of routing: it is derived for each alert from a label, by the alert's source; see [Sources](#sources). The label is `severity` unless `severity.label` names another, `severity.mapping` maps its values to `critical`, `warning` and `info`, and `severity.default` applies to everything else. A rule can route on the label itself, as `pages` does above.
+
+### Grouping
+
+Related alerts are told about together. A new alert joins the open group whose alerts have the same values for the `group_by` labels, or opens one. A label that an alert does not have counts as empty. The source does not matter: the same problem reported by two sources is one group.
+
+A group sends **one notification**, which is updated as the group changes; see [[notifications#Groups]] for when. `group_wait` gives alerts that fire together time to arrive before anyone is told, and `group_interval` keeps a busy group from sending update after update. Both apply without a `routing` block too, with their defaults.
+
+```yaml
+routing:
+  group_by: [alertname, cluster]
+  group_wait: 30s
+  group_interval: 5m
+  default:
+    escalation_policy: platform-default
+```
+
+A group keeps the labels and the interval it was opened with. A reload changes the grouping of alerts that arrive afterwards; alerts that are open stay where they are.
+
+Behind Alertmanager or Grafana, which have waited already before they send, a short `group_wait` such as `5s` is enough: long enough for every alert of one of their notifications to be stored.
 
 ## Sign-in
 
@@ -207,7 +266,7 @@ kubectl exec deploy/beacon -- kill -HUP 1
 An admin can ask for the same over HTTP, with `POST /api/v1/config/reload` (see [[access]]). It answers `200` with `{"result": "reloaded"}`, or `422` with the list of problems when the configuration is rejected. The request reaches one replica; the signal is the way to reach each of them.
 
 - The files are checked first, exactly as `beacon validate --check-secrets` checks them. If anything is wrong, **nothing** of the new configuration is applied and the previous one stays active. The log has one `configuration problem` record per problem, then `configuration reload failed; the previous configuration stays active`.
-- A valid configuration is applied as a whole, as at start: the database is brought in line, then sources, integrations and notification targets switch over together. Requests in progress finish with what they started with. The log says `configuration reloaded`.
+- A valid configuration is applied as a whole, as at start: the database is brought in line, then sources, grouping, integrations and notification targets switch over together. Requests in progress finish with what they started with. The log says `configuration reloaded`.
 - Secrets kept in files are read again, so a reload also picks up a rotated secret. Secrets from environment variables cannot change while the process runs; rotating one needs a restart.
 - Each replica reloads on its own. Send the signal to every replica.
 - Process settings (flags and their environment variables) are not part of the configuration and need a restart.

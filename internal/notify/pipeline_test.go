@@ -44,6 +44,8 @@ type fixture struct {
 	alerts        *alert.Store
 	sourceID      string
 	integrationID string
+	// policyID is the row of an escalation policy for groups to refer to.
+	policyID string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -52,6 +54,7 @@ func newFixture(t *testing.T) *fixture {
 	f := &fixture{t: t, pool: pool, alerts: alert.NewStore(pool)}
 	f.sourceID = provisiontest.Row(t, pool, provision.Sources, "test")
 	f.integrationID = provisiontest.Row(t, pool, provision.Integrations, "chat")
+	f.policyID = provisiontest.Row(t, pool, provision.EscalationPolicies, "default")
 	return f
 }
 
@@ -601,70 +604,6 @@ func TestUpdatesWaitForTheMessageTheyUpdate(t *testing.T) {
 	}
 	if fmt.Sprint(log) != fmt.Sprint(want) {
 		t.Errorf("deliveries:\n%s\nwant:\n%s", strings.Join(log, "\n"), strings.Join(want, "\n"))
-	}
-}
-
-func TestNotifyAll(t *testing.T) {
-	f := newFixture(t)
-	ctx := context.Background()
-	p := f.pipeline(fastConfig(), nil)
-	f.alerts.Observe(p.NotifyAll([]notify.Target{{IntegrationID: f.integrationID, Destination: "#alerts"}}))
-
-	reasons := func(groupID string) string {
-		rows, err := f.pool.Query(ctx, `SELECT reason FROM notifications WHERE alert_group_id = $1 ORDER BY created_at, id`, groupID)
-		if err != nil {
-			t.Fatalf("read notifications: %v", err)
-		}
-		got, err := pgx.CollectRows(rows, pgx.RowTo[string])
-		if err != nil {
-			t.Fatalf("read notifications: %v", err)
-		}
-		return strings.Join(got, ",")
-	}
-
-	a := f.fire("DiskFull")
-	if got := reasons(a.GroupID); got != "escalation_step" {
-		t.Fatalf("after firing: %q", got)
-	}
-	// A repeated delivery of the same alert is not a state change.
-	f.fire("DiskFull")
-	steps := []struct {
-		action alert.Action
-		opts   alert.Options
-	}{
-		{alert.ActionSnooze, alert.Options{SnoozeUntil: time.Now().Add(50 * time.Millisecond)}},
-		{alert.ActionAcknowledge, alert.Options{}},
-		{alert.ActionResolve, alert.Options{}},
-	}
-	for _, s := range steps {
-		if _, err := f.alerts.Apply(ctx, a.ID, s.action, alert.System(), s.opts); err != nil {
-			t.Fatalf("%s: %v", s.action, err)
-		}
-	}
-	if got, want := reasons(a.GroupID), "escalation_step,group_update,group_update,resolved"; got != want {
-		t.Errorf("notifications = %q, want %q", got, want)
-	}
-
-	// A snooze that ends is a state change too.
-	b := f.fire("Other")
-	if _, err := f.alerts.Apply(ctx, b.ID, alert.ActionSnooze, alert.System(), alert.Options{SnoozeUntil: time.Now().Add(10 * time.Millisecond)}); err != nil {
-		t.Fatalf("snooze: %v", err)
-	}
-	time.Sleep(20 * time.Millisecond)
-	if n, err := f.alerts.ExpireSnoozes(ctx); err != nil || n != 1 {
-		t.Fatalf("ExpireSnoozes = %d, %v", n, err)
-	}
-	if got, want := reasons(b.GroupID), "escalation_step,group_update,group_update"; got != want {
-		t.Errorf("notifications = %q, want %q", got, want)
-	}
-
-	// A refused action queues nothing: the notification is part of the
-	// transaction that changes the state.
-	if _, err := f.alerts.Apply(ctx, a.ID, alert.ActionAcknowledge, alert.System(), alert.Options{}); err == nil {
-		t.Fatal("acknowledging a resolved alert succeeded")
-	}
-	if got, want := reasons(a.GroupID), "escalation_step,group_update,group_update,resolved"; got != want {
-		t.Errorf("notifications after a refused action = %q, want %q", got, want)
 	}
 }
 

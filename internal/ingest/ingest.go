@@ -1,7 +1,7 @@
 // Package ingest receives alerts from sources over HTTP and hands them to the
 // alert model. A source's type decides which payload its endpoint reads:
-// docs/webhook.md describes the generic one and docs/alertmanager.md
-// Alertmanager's.
+// docs/webhook.md describes the generic one, docs/alertmanager.md
+// Alertmanager's and docs/grafana.md Grafana's.
 package ingest
 
 import (
@@ -20,8 +20,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/config"
+	"github.com/thanoslabs/beacon/internal/routing"
 )
 
 // Path is the route of the ingest endpoint. The last segment is the name of
@@ -54,13 +57,35 @@ type Handler struct {
 	// sources is replaced as a whole when the configuration is reloaded, so
 	// a request sees either the old set or the new one.
 	sources atomic.Pointer[map[string]Source]
+	// router decides the team, service, escalation policy and group of a
+	// new alert. It follows the configuration like the sources do.
+	router atomic.Pointer[routing.Router]
+	// unmatched counts new alerts that no routing rule matched, by source.
+	unmatched *prometheus.CounterVec
 }
 
 // New returns a handler for the given sources.
 func New(logger *slog.Logger, alerts Alerts, sources []Source) *Handler {
-	h := &Handler{logger: logger, alerts: alerts}
+	h := &Handler{logger: logger, alerts: alerts, unmatched: prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "beacon_routing_unmatched_alerts_total",
+		Help: "Alerts opened that matched no routing rule and took the routing default, by source. Repeated deliveries of an open alert are not counted.",
+	}, []string{"source"})}
+	router, _ := routing.New(nil, routing.Refs{}) // without a routing block there is nothing to fail
+	h.SetRouter(router)
 	h.SetSources(sources)
 	return h
+}
+
+// SetRouter replaces the routing of new alerts. It is safe while requests
+// are being handled. Alerts that are open keep the route and the group they
+// have.
+func (h *Handler) SetRouter(r *routing.Router) {
+	h.router.Store(r)
+}
+
+// RegisterMetrics registers the handler's metrics on reg.
+func (h *Handler) RegisterMetrics(reg prometheus.Registerer) {
+	reg.MustRegister(h.unmatched)
 }
 
 // SetSources replaces the sources that the handler serves. It is safe while
@@ -69,6 +94,9 @@ func (h *Handler) SetSources(sources []Source) {
 	byName := make(map[string]Source, len(sources))
 	for _, s := range sources {
 		byName[s.Name] = s
+		// The series exists from the start, so a rate over it is never
+		// empty. The label is bounded by the configuration.
+		h.unmatched.WithLabelValues(s.Name)
 	}
 	h.sources.Store(&byName)
 }
@@ -155,6 +183,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case config.SourceTypeAlertmanager:
 		g, err := parseAlertmanager(body)
 		h.serveGroup(w, r, src, g, err, AlertmanagerVersion)
+	case config.SourceTypeGrafana:
+		g, err := parseGrafana(body)
+		h.serveGroup(w, r, src, g, err, GrafanaVersion)
 	default:
 		p, err := parsePayload(body)
 		h.serveOne(w, r, src, p, err)
@@ -275,17 +306,35 @@ func (h *Handler) apply(ctx context.Context, src Source, d delivery) (response, 
 	for k, v := range d.Labels {
 		labels[k] = v
 	}
+	// Routing and grouping read the labels as they are stored, with the
+	// source's own. Groups form within a routing rule and across sources:
+	// the same problem seen by two sources is one group, and alerts that
+	// different rules matched never share one, because the rules may send
+	// them to different people.
+	route := h.router.Load().Route(labels)
+	key, groupLabels := alert.GroupKey(route.RuleID, route.Grouping.By, labels)
 	a, created, err := h.alerts.Fire(ctx, alert.Firing{
-		SourceID:    src.ID,
-		Fingerprint: fingerprint,
-		Severity:    src.Severity.Resolve(labels),
-		Labels:      labels,
-		Annotations: d.Annotations,
-		Links:       d.Links,
-		StartsAt:    d.StartsAt,
+		SourceID:      src.ID,
+		Fingerprint:   fingerprint,
+		Severity:      src.Severity.Resolve(labels),
+		Labels:        labels,
+		Annotations:   d.Annotations,
+		Links:         d.Links,
+		StartsAt:      d.StartsAt,
+		RoutingRuleID: route.RuleID,
+		TeamID:        route.TeamID,
+		Service:       route.Service,
+		Group: alert.Grouping{
+			Key: key, Labels: groupLabels, Wait: route.Grouping.Wait, Interval: route.Grouping.Interval,
+			RoutingRuleID: route.RuleID, TeamID: route.TeamID, EscalationPolicyID: route.PolicyID,
+		},
 	})
 	if err != nil {
 		return response{}, err
+	}
+	// Only an alert that this delivery opened was routed by it.
+	if created && !route.Matched() {
+		h.unmatched.WithLabelValues(src.Name).Inc()
 	}
 	if created {
 		return response{Result: resultCreated, AlertID: a.ID, Status: string(a.Status)}, nil

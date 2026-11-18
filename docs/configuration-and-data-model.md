@@ -126,7 +126,7 @@ People targets (`schedule`, `team`, `user`) accept an optional `via` list of int
 | Field | Required | Meaning |
 |---|---|---|
 | `group_by` | no | Labels that define a group (default `[alertname]`) |
-| `group_wait` | no | Wait before the first notification of a new group (default `30s`) |
+| `group_wait` | no | Wait before the first notification of a new group (default `30s`). Zero is allowed and sends it at once. |
 | `group_interval` | no | Minimum time between updates for a group (default `5m`) |
 | `default.team` | no | Team for alerts that match no rule |
 | `default.escalation_policy` | yes | Policy for alerts that match no rule |
@@ -136,7 +136,7 @@ People targets (`schedule`, `team`, `user`) accept an optional `via` list of int
 |---|---|---|
 | `name` | yes | Identity; recorded on each alert the rule matched |
 | `match` | one of | Map of label to exact value; all must match |
-| `match_re` | one of | Map of label to regular expression, anchored at both ends; all must match |
+| `match_re` | one of | Map of label to regular expression, anchored at both ends, at most 1024 characters; all must match. A label is in `match` or in `match_re`, not both. |
 | `team` | no | Team the alert is assigned to |
 | `service` | no | Service name the alert is assigned to; defaults to the alert's `service` label |
 | `escalation_policy` | yes | Policy to run |
@@ -410,10 +410,12 @@ A unique index on (`source_id`, `fingerprint`) for rows whose status is not `res
 
 `acknowledged_by` references `users` and is set only when a Beacon user acknowledged. Someone who acts from chat before their account is linked is recorded on the timeline event instead.
 
-**`alert_groups`**: `id`, `group_key` (hash of the routing rule and the `group_by` label values), `routing_rule_id`, `team_id`, `escalation_policy_id`, `status` (`open` or `resolved`), `created_at`, `resolved_at`. Unique on `group_key` for open groups.
+**`alert_groups`**: `id`, `group_key` (hash of the routing rule and the `group_by` label values), `labels` (those label values, for display), `routing_rule_id`, `team_id`, `escalation_policy_id`, `status` (`open` or `resolved`), `update_interval`, `notify_at`, `notified_at`, `notified_alerts`, `silence_id`, `created_at`, `resolved_at`. Unique on `group_key` for open groups.
+
+`notify_at` is when the next notification about the group is due, and null when none is; `notified_at` is when the last one was queued; `update_interval` is the `group_interval` the group was opened with. Together they are the timers of grouping: a new group gets `notify_at` one `group_wait` ahead, and a change that a source reports sets it to `notified_at + update_interval`, or to now when that has passed. Workers take due groups with `SELECT ... FOR UPDATE SKIP LOCKED` and queue the notification in the same transaction that clears `notify_at`, so a timer survives a restart and fires once when several replicas run. `notified_alerts` (`jsonb`, alert identifier to `open` or `resolved`) holds the alerts that a notification about the group has shown and what each was shown as, and `silence_id` the silence whose end the group's next notification waits for. Both were added with silences (issue 28): they tell what is news when a silence hides some alerts of a group, and which groups to wake when a silence is expired. The first four columns were added with grouping (issue 26); the first version of this design did not say where the timers of grouping live. They are kept apart from `escalations`, which times the steps of a policy and belongs to the escalation engine.
 
 > [!note] Built up over several migrations
-> The first migration for these tables leaves out the columns that reference tables which do not exist yet: `routing_rule_id`, `team_id` and `escalation_policy_id`. The migrations that create those tables add them. Until grouping is implemented, every alert gets a group of its own, keyed by a hash of its source and fingerprint.
+> The first migration for these tables leaves out the columns that reference tables which do not exist yet: `routing_rule_id`, `team_id` and `escalation_policy_id`. The migrations that create those tables add them.
 
 **`escalations`**: one row per open alert group. `alert_group_id`, `escalation_policy_id`, `step_index`, `pass` (which repeat), `next_step_at`, `status` (`active`, `acknowledged`, `exhausted` or `resolved`). Workers claim due rows with `SELECT ... FOR UPDATE SKIP LOCKED`, so a timer fires once when several replicas run.
 
@@ -431,7 +433,9 @@ A unique index on (`source_id`, `fingerprint`) for rows whose status is not `res
 | `occurred_at` | `timestamptz` | |
 | `data` | `jsonb` | Details specific to the type |
 
-**`silences`**: `id`, `matchers` (`jsonb`: list of label, operator, value), `starts_at`, `ends_at`, `created_by`, `comment`, `created_at`. Expiring a silence early sets `ends_at` to now.
+**`silences`**: `id`, `matchers` (`jsonb`: list of label, operator, value), `starts_at`, `ends_at`, `created_by`, `created_by_token`, `comment`, `created_at`. Expiring a silence early sets `ends_at` to now, and `starts_at` too when the silence had not begun.
+
+The author is exactly one of `created_by`, which references `users`, and `created_by_token`, which references `api_tokens`. The second column was added with silences (issue 28): the first version of this design had only `created_by`, which cannot name a token, and a silence created by automation would have had no author. [[silences]] describes the API.
 
 ### Notifications
 
@@ -518,7 +522,7 @@ These are judgement calls made in this proposal. Each can be changed before the 
 2. **A user's email address changes.** *Resolved for now (issue 19), for the project owner to confirm:* a user is identified by the provider's issuer and subject, so the account and its history survive a change of address, and the stored address is updated at the next sign-in. The files must then be changed to the new address; until they are, the old address in a team or rotation is an unknown user and is skipped. The alternative is to let the files name a stable identifier, which nobody could write by hand.
 3. **Unknown users in a rotation.** The requirements say an unknown user in a team is skipped and logged. This proposal applies the same rule to rotation members. The alternative is to treat it as an error that blocks applying the schedule, since a skipped member changes who is on call.
 4. **Must rotation members belong to the owning team?** The proposal does not require it, so someone from another team can cover. Requiring it would catch mistakes.
-5. **Service as an object.** Routing can assign a service name, but nothing else is attached to a service. Should services become provisioned objects with an owning team before the MVP, or stay as names?
+5. **Service as an object.** *Resolved for now (issue 27), for the project owner to confirm:* a service stays a plain name on the alert. Routing sets it from the rule's `service`, or from the alert's `service` label, and nothing else is attached to it. The alternative, a provisioned `services` kind with an owning team, would let routing find the team from the service and would bound the values a metric label can take; it can be added later without changing what is stored on an alert, since the name would become the reference.
 6. **Shared channels for a team.** A shared channel is named in each escalation step. Should a team have a default channel, so that policies need not repeat it?
 7. **Minimum Postgres version.** No feature here needs a recent version. Stating a minimum (for example the oldest release still supported upstream) would let later work rely on it.
 8. **Retention.** `alert_events`, `notification_attempts` and `shifts` grow without bound. Is a retention setting needed for the MVP, or is it left to the operator?

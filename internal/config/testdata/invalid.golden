@@ -62,15 +62,20 @@ testdata/invalid/teams/platform.yaml:42: escalation policy "default": steps[1].n
 testdata/invalid/teams/platform.yaml:43: escalation policy "default": steps[1].timeout: is required, and must be longer than zero
 testdata/invalid/teams/platform.yaml:44: escalation policy "empty": steps: at least one step is required
 testdata/invalid/teams/platform.yaml:46: routing: group_by[1]: "not a label" is not a label name
-testdata/invalid/teams/platform.yaml:47: routing: group_wait: must be longer than zero
-testdata/invalid/teams/platform.yaml:48: routing: default.escalation_policy: is required
-testdata/invalid/teams/platform.yaml:49: routing: default.team: team "nobody" does not exist
-testdata/invalid/teams/platform.yaml:51: routing rule "r1": match: a rule needs match, match_re or both
-testdata/invalid/teams/platform.yaml:52: routing rule "r1": escalation_policy: escalation policy "missing" does not exist
-testdata/invalid/teams/platform.yaml:53: routing rule "r1": team: team "nobody" does not exist
-testdata/invalid/teams/platform.yaml:54: routing rule "r1": escalation_policy: is required
-testdata/invalid/teams/platform.yaml:54: routing rule "r1": name: the name is used twice; first at testdata/invalid/teams/platform.yaml:51
-testdata/invalid/teams/platform.yaml:55: routing rule "r1": match: "bad-label" is not a label name
-testdata/invalid/teams/platform.yaml:56: routing rule "r1": match_re: "also bad" is not a label name
-testdata/invalid/teams/platform.yaml:56: routing rule "r1": match_re.severity: is not a regular expression: missing closing ): `^(?:(critical)$`
-testdata/invalid/teams/platform.yaml:57: routing rule "r1": group_interval: must be longer than zero
+testdata/invalid/teams/platform.yaml:46: routing: group_by[2]: "alertname" is listed twice
+testdata/invalid/teams/platform.yaml:48: routing: group_interval: must be longer than zero
+testdata/invalid/teams/platform.yaml:49: routing: default.escalation_policy: is required
+testdata/invalid/teams/platform.yaml:50: routing: default.team: team "nobody" does not exist
+testdata/invalid/teams/platform.yaml:52: routing rule "r1": match: a rule needs match, match_re or both
+testdata/invalid/teams/platform.yaml:53: routing rule "r1": escalation_policy: escalation policy "missing" does not exist
+testdata/invalid/teams/platform.yaml:54: routing rule "r1": team: team "nobody" does not exist
+testdata/invalid/teams/platform.yaml:55: routing rule "r1": escalation_policy: is required
+testdata/invalid/teams/platform.yaml:55: routing rule "r1": name: the name is used twice; first at testdata/invalid/teams/platform.yaml:52
+testdata/invalid/teams/platform.yaml:56: routing rule "r1": match: "bad-label" is not a label name
+testdata/invalid/teams/platform.yaml:57: routing rule "r1": match_re: "also bad" is not a label name
+testdata/invalid/teams/platform.yaml:57: routing rule "r1": match_re.severity: is not a regular expression: missing closing ): `^(?:(critical)$`
+testdata/invalid/teams/platform.yaml:58: routing rule "r1": group_interval: must be longer than zero
+testdata/invalid/teams/platform.yaml:60: routing rule "r3": match.severity: the label is in match and in match_re; use one of them
+testdata/invalid/teams/platform.yaml:60: routing rule "r3": match.team: is longer than 1024 characters
+testdata/invalid/teams/platform.yaml:61: routing rule "r3": match_re.instance: is longer than 1024 characters
+testdata/invalid/teams/platform.yaml:62: routing rule "r3": service: must be at most 100 characters, without control characters

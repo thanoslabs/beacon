@@ -42,6 +42,8 @@ escalation_policies:
             integration: slack
         timeout: 5m
 routing:
+  group_wait: 0s
+  group_interval: 1s
   default:
     escalation_policy: default
 `

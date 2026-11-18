@@ -91,6 +91,13 @@ func New(t testing.TB, token string) *Server {
 	return s
 }
 
+// AddChannel gives the workspace another channel, with a name and an ID.
+func (s *Server) AddChannel(name, id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.channels[name], s.channels[id] = id, id
+}
+
 // Fail makes the next calls to method fail, one failure per call, in order.
 func (s *Server) Fail(method string, failures ...Failure) {
 	s.mu.Lock()

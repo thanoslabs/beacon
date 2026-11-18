@@ -1,0 +1,39 @@
+# Grafana alerting, provisioned so that every alert goes to Beacon.
+# compose.yaml starts this Grafana under the profile "grafana", for
+# development and for trying the Grafana source out; docs/grafana.md explains
+# each setting.
+apiVersion: 1
+
+# The contact point is the part to copy into an existing Grafana: a webhook
+# to Beacon's source, with the token of the source as a bearer token.
+contactPoints:
+  - orgId: 1
+    name: beacon
+    receivers:
+      - uid: beacon-webhook
+        type: webhook
+        # Without resolved notifications, alerts in Beacon never resolve by
+        # themselves.
+        disableResolveMessage: false
+        settings:
+          # /api/v1/ingest/<name of the source in Beacon's configuration>
+          url: http://beacon:8080/api/v1/ingest/grafana
+          httpMethod: POST
+          authorization_scheme: Bearer
+          # Grafana replaces this with the environment variable.
+          authorization_credentials: $BEACON_SOURCE_TOKEN
+          # Every alert of a group, so Beacon knows about all of them.
+          maxAlerts: 0
+
+# The notification policy sends everything to that contact point.
+policies:
+  - orgId: 1
+    receiver: beacon
+    group_by: [grafana_folder, alertname]
+    # Beacon waits and batches by itself, so Grafana need not hold alerts
+    # back for long.
+    group_wait: 10s
+    group_interval: 1m
+    # A repeat changes nothing in Beacon and notifies nobody. It is what
+    # makes Beacon learn of an alert it missed.
+    repeat_interval: 1h
