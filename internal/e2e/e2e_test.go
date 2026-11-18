@@ -600,6 +600,34 @@ func TestAlertmanagerSource(t *testing.T) {
 	}
 }
 
+// TestGrafanaSource delivers what a real Grafana sent about an alert of a
+// rule that is linked to a dashboard panel: firing, then resolved.
+func TestGrafanaSource(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, strings.Replace(configuration, "type: webhook", "type: grafana", 1)))
+	b.waitUntilServing()
+
+	var res map[string]any
+	if code := b.deliver("e2e", captured(t, "grafana/firing.json"), &res); code != http.StatusOK || res["created"] != float64(1) {
+		t.Fatalf("firing = %d %v, want one alert created", code, res)
+	}
+	msg := b.message("the alert in Slack", contains("*Firing* · warning", "Latency is high on api1"))
+	for _, want := range []string{
+		"http://localhost:13000/alerting/grafana/beacon-demo-latency/view?orgId=1|:mag: Source",
+		"|:bar_chart: Dashboard", "viewPanel=1|:chart_with_upwards_trend: Panel", "|:no_bell: Silence at the source",
+		"`grafana_folder=Beacon`",
+	} {
+		if !strings.Contains(msg.JSON(), want) {
+			t.Errorf("the message does not contain %q:\n%s", want, msg.JSON())
+		}
+	}
+
+	if code := b.deliver("e2e", captured(t, "grafana/resolved.json"), &res); code != http.StatusOK || res["resolved"] != float64(1) {
+		t.Fatalf("resolved = %d %v, want one alert resolved", code, res)
+	}
+	b.message("the resolution in Slack", contains("*Resolved*", "Resolved by the source", "|:bar_chart: Dashboard"))
+}
+
 // rows lists the rows of a provisioned table as "name" or "name (removed)".
 func (b *beacon) rows(table string) string {
 	b.t.Helper()

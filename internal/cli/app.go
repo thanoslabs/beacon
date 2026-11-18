@@ -269,11 +269,6 @@ func (p *provisioner) reloadFrom(ctx context.Context) error {
 func (p *provisioner) applySources(ctx context.Context, cfg config.Config, ids map[string]string) {
 	sources := make([]ingest.Source, 0, len(cfg.Sources))
 	for _, s := range cfg.Sources {
-		if s.Type == config.SourceTypeGrafana {
-			p.logger.WarnContext(ctx, "this type of source does not receive alerts yet, so its endpoint refuses every request",
-				slog.String("source", s.Name), slog.String("type", s.Type))
-			continue
-		}
 		sources = append(sources, ingest.Source{ID: ids[s.Name], Source: s})
 		p.logger.InfoContext(ctx, "source configured",
 			slog.String("source", s.Name), slog.String("type", s.Type),

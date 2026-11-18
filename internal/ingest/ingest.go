@@ -1,7 +1,7 @@
 // Package ingest receives alerts from sources over HTTP and hands them to the
 // alert model. A source's type decides which payload its endpoint reads:
-// docs/webhook.md describes the generic one and docs/alertmanager.md
-// Alertmanager's.
+// docs/webhook.md describes the generic one, docs/alertmanager.md
+// Alertmanager's and docs/grafana.md Grafana's.
 package ingest
 
 import (
@@ -155,6 +155,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case config.SourceTypeAlertmanager:
 		g, err := parseAlertmanager(body)
 		h.serveGroup(w, r, src, g, err, AlertmanagerVersion)
+	case config.SourceTypeGrafana:
+		g, err := parseGrafana(body)
+		h.serveGroup(w, r, src, g, err, GrafanaVersion)
 	default:
 		p, err := parsePayload(body)
 		h.serveOne(w, r, src, p, err)

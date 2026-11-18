@@ -156,9 +156,9 @@ func TestServeRejectsABadSlackAPIURL(t *testing.T) {
 	}
 }
 
-// TestServeWarnsAboutWhatIsNotImplemented starts with source and integration
-// types that are valid in the files but have no behaviour yet. They are
-// stored, and the log says that they do nothing.
+// TestServeWarnsAboutWhatIsNotImplemented starts with an integration type
+// that is valid in the files but has no behaviour yet. It is stored, and the
+// log says that it does nothing.
 func TestServeWarnsAboutWhatIsNotImplemented(t *testing.T) {
 	const token = "source-token-marker-7c2e41d0"
 	srv := startServe(t, map[string]string{
@@ -181,11 +181,12 @@ routing:
   default: {escalation_policy: default}
 `),
 	})
-	if code, _ := postJSON(t, srv.baseURL+"/api/v1/ingest/grafana", token, `{"labels": {"alertname": "A"}}`); code != http.StatusUnauthorized {
-		t.Errorf("POST to a grafana source = %d, want 401", code)
+	// Every type of source receives alerts.
+	if code, body := postJSON(t, srv.baseURL+"/api/v1/ingest/grafana", token, `{"labels": {"alertname": "A"}}`); code != http.StatusBadRequest || body["field"] != "alerts" {
+		t.Errorf("a generic payload to a grafana source = %d %v, want 400 naming alerts", code, body)
 	}
 	logs := srv.logs.String()
-	for _, want := range []string{"this type of source does not receive alerts yet", "this type of integration does not deliver yet", "alerts are stored but nobody is notified"} {
+	for _, want := range []string{"this type of integration does not deliver yet", "alerts are stored but nobody is notified"} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("logs do not contain %q:\n%s", want, logs)
 		}

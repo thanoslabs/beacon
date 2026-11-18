@@ -299,3 +299,108 @@ func TestAlertmanagerStoreFailure(t *testing.T) {
 		t.Errorf("with the database gone = %d %v, want 500", code, got)
 	}
 }
+
+// TestGrafana replays what a real Grafana sent about one alert of a rule
+// that is linked to a dashboard panel: firing, then resolved.
+func TestGrafana(t *testing.T) {
+	f := newFixture(t)
+
+	code, got := f.postGroup(t, "grafana", grafanaToken, captured(t, "grafana/firing.json"))
+	if want := (counts{Result: "accepted", Received: 1, Created: 1}); code != http.StatusOK || got != want {
+		t.Fatalf("firing = %d %v, want 200 %v", code, got, want)
+	}
+	a, ok := f.alerts(t, "grafana")["api1 firing"]
+	if !ok {
+		t.Fatalf("alerts = %v", f.alerts(t, "grafana"))
+	}
+	if a.Fingerprint != "c4acda1b7a9196f1" || a.Severity != alert.SeverityWarning {
+		t.Errorf("fingerprint %q, severity %s; want Grafana's fingerprint and warning", a.Fingerprint, a.Severity)
+	}
+	wantLabels := map[string]string{"alertname": "HighLatency", "grafana_folder": "Beacon", "instance": "api1", "severity": "warning"}
+	if fmt.Sprint(a.Labels) != fmt.Sprint(wantLabels) {
+		t.Errorf("labels = %v, want %v", a.Labels, wantLabels)
+	}
+	if fmt.Sprint(a.Annotations) != fmt.Sprint(map[string]string{"summary": "Latency is high on api1"}) {
+		t.Errorf("annotations = %v", a.Annotations)
+	}
+	wantLinks := map[string]string{
+		alert.LinkGenerator: "http://localhost:13000/alerting/grafana/beacon-demo-latency/view?orgId=1",
+		alert.LinkDashboard: "http://localhost:13000/d/beacon-demo?from=1794979580000&orgId=1&to=1794983190007",
+		alert.LinkPanel:     "http://localhost:13000/d/beacon-demo?from=1794979580000&orgId=1&to=1794983190007&viewPanel=1",
+		alert.LinkSilence:   "http://localhost:13000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Dbeacon-demo-latency&matcher=instance%3Dapi1&matcher=severity%3Dwarning&orgId=1",
+	}
+	if fmt.Sprint(a.Links) != fmt.Sprint(wantLinks) {
+		t.Errorf("links = %v\nwant    %v", a.Links, wantLinks)
+	}
+	if want := time.Date(2026, 11, 18, 6, 26, 20, 0, time.UTC); !a.StartedAt.Equal(want) {
+		t.Errorf("started at %v, want %v", a.StartedAt, want)
+	}
+
+	// Grafana repeats a firing group like Alertmanager does.
+	code, got = f.postGroup(t, "grafana", grafanaToken, captured(t, "grafana/firing.json"))
+	if want := (counts{Result: "accepted", Received: 1, Updated: 1}); code != http.StatusOK || got != want {
+		t.Fatalf("repeated firing = %d %v, want 200 %v", code, got, want)
+	}
+
+	code, got = f.postGroup(t, "grafana", grafanaToken, captured(t, "grafana/resolved.json"))
+	if want := (counts{Result: "accepted", Received: 1, Resolved: 1}); code != http.StatusOK || got != want {
+		t.Fatalf("resolved = %d %v, want 200 %v", code, got, want)
+	}
+	a, ok = f.alerts(t, "grafana")["api1 resolved"]
+	if want := time.Date(2026, 11, 18, 6, 26, 40, 6365000, time.UTC); !ok || a.ResolvedAt == nil || !a.ResolvedAt.Equal(want) {
+		t.Fatalf("alert = %+v, want it resolved at the time Grafana gave, %v", a, want)
+	}
+	// The links stay as they were when the alert last fired.
+	if a.Links[alert.LinkPanel] != wantLinks[alert.LinkPanel] {
+		t.Errorf("panel link after the resolve = %q", a.Links[alert.LinkPanel])
+	}
+	events, err := f.store.Timeline(context.Background(), a.ID)
+	if err != nil || len(events) != 2 || events[1].Type != alert.EventResolved || events[1].Actor.ID != f.ids["grafana"] {
+		t.Errorf("timeline = %+v, %v; want fired and resolved by the source", events, err)
+	}
+	if strings.Contains(f.logs.String(), `"level":"WARN"`) {
+		t.Errorf("a payload of the version Beacon reads was warned about:\n%s", f.logs.String())
+	}
+}
+
+func TestGrafanaDetails(t *testing.T) {
+	f := newFixture(t)
+
+	t.Run("an alert of a rule without a panel has no dashboard links", func(t *testing.T) {
+		// Grafana sends the fields empty.
+		body := `{"version": "1", "alerts": [{"status": "firing", "labels": {"alertname": "NoPanel", "instance": "a"},
+			"generatorURL": "https://grafana.example.com/alerting/grafana/abc/view", "silenceURL": "", "dashboardURL": "", "panelURL": "", "values": {"B": 44.2, "C": 1}}]}`
+		if code, got := f.postGroup(t, "grafana", grafanaToken, body); code != http.StatusOK || got.Created != 1 {
+			t.Fatalf("firing = %d %v", code, got)
+		}
+		a := f.alerts(t, "grafana")["a firing"]
+		if len(a.Links) != 1 || a.Links[alert.LinkGenerator] != "https://grafana.example.com/alerting/grafana/abc/view" {
+			t.Errorf("links = %v, want only the generator link", a.Links)
+		}
+	})
+
+	t.Run("firing and resolved alerts in one notification", func(t *testing.T) {
+		fire := `{"alerts": [{"status": "firing", "labels": {"alertname": "Mixed", "instance": "b1"}, "fingerprint": "b1"}, {"status": "firing", "labels": {"alertname": "Mixed", "instance": "b2"}, "fingerprint": "b2"}]}`
+		if code, got := f.postGroup(t, "grafana", grafanaToken, fire); code != http.StatusOK || got.Created != 2 {
+			t.Fatalf("firing = %d %v", code, got)
+		}
+		mixed := `{"status": "firing", "alerts": [{"status": "firing", "labels": {"alertname": "Mixed", "instance": "b1"}, "fingerprint": "b1"}, {"status": "resolved", "labels": {"alertname": "Mixed", "instance": "b2"}, "fingerprint": "b2", "endsAt": "2026-11-18T07:00:00Z"}]}`
+		if code, got := f.postGroup(t, "grafana", grafanaToken, mixed); code != http.StatusOK || got.Updated != 1 || got.Resolved != 1 {
+			t.Fatalf("mixed = %d %v, want one updated and one resolved", code, got)
+		}
+	})
+
+	t.Run("a link that is not a string is refused", func(t *testing.T) {
+		code, got := f.postGroup(t, "grafana", grafanaToken, `{"alerts": [{"status": "firing", "labels": {"a": "b"}, "panelURL": 5}]}`)
+		if code != http.StatusBadRequest || got.Field != "alerts[0].panelURL" {
+			t.Errorf("panelURL as a number = %d %v, want 400 naming alerts[0].panelURL", code, got)
+		}
+	})
+
+	t.Run("each source has its own token", func(t *testing.T) {
+		var out map[string]string
+		if code := f.postInto(t, "grafana", amToken, captured(t, "grafana/firing.json"), &out); code != http.StatusUnauthorized {
+			t.Errorf("another source's token = %d, want 401", code)
+		}
+	})
+}
