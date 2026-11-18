@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md) and posts them to a [Slack channel](docs/slack.md), where they can be acknowledged, snoozed and resolved. Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md) and posts them to a [Slack channel](docs/slack.md), where they can be acknowledged, snoozed and resolved. Routing, schedules and escalation do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -55,7 +55,7 @@ curl -X POST http://localhost:8080/api/v1/ingest/default \
 
 Without `BEACON_SOURCE_TOKEN`, Compose uses a fixed token that is only fit for a local try-out.
 
-The [webhook page](docs/webhook.md) describes the payload and the responses. Sources, integrations and everything else that is provisioned are defined in YAML files; the [configuration page](docs/configuration.md) is the reference. To use your own, point Compose at a directory of them with `BEACON_CONFIG_DIR`. To have alerts posted to Slack, start from [`examples/slack`](examples/slack/beacon.yaml) as the [Slack page](docs/slack.md) describes.
+The [webhook page](docs/webhook.md) describes the payload and the responses. Sources, integrations and everything else that is provisioned are defined in YAML files; the [configuration page](docs/configuration.md) is the reference. To use your own, point Compose at a directory of them with `BEACON_CONFIG_DIR`. To have alerts posted to Slack, start from [`examples/slack`](examples/slack/beacon.yaml) as the [Slack page](docs/slack.md) describes. To put Beacon behind an Alertmanager, see the [Alertmanager page](docs/alertmanager.md); `docker compose --profile alertmanager up` starts one that sends to Beacon.
 
 Releases publish a container image for `linux/amd64` and `linux/arm64`, tagged with the bare version:
 
@@ -99,7 +99,7 @@ The server answers on these endpoints. Everything that is not listed as open in 
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/v1/ingest/<source>` | Receives alerts from a source. See the [webhook page](docs/webhook.md). |
+| `POST /api/v1/ingest/<source>` | Receives alerts from a source: Alertmanager's notifications ([Alertmanager page](docs/alertmanager.md)) or the generic JSON payload ([webhook page](docs/webhook.md)), by the type of the source. |
 | `POST /api/v1/integrations/<name>/interactions` | Receives button presses from Slack. See the [Slack page](docs/slack.md). |
 | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` | Sign-in through an OpenID Connect identity provider. See the [access page](docs/access.md). |
 | `GET /api/v1/me` | Who is signed in. Needs a session. |

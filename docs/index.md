@@ -13,6 +13,7 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[configuration-and-data-model]]: the design behind the configuration schema and the Postgres data model
 - [[access]]: sign in through an OpenID Connect identity provider, users and sessions
 - [[alert-lifecycle]]: the states an alert moves through, and its timeline
+- [[alertmanager]]: put Beacon behind an existing Alertmanager
 - [[webhook]]: send alerts to Beacon as JSON over HTTP
 - [[notifications]]: how notifications are queued, retried and recorded
 - [[slack]]: set up the Slack app and send alerts to a channel

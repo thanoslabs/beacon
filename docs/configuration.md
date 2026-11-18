@@ -7,7 +7,7 @@ date: 2026-11-17
 Beacon's provisioned objects are defined in YAML files that live in version control: sources, integrations, teams, schedules, escalation policies and routing. So is how people sign in. This page is the reference for those files. Why they look the way they do is in [[configuration-and-data-model]].
 
 > [!warning] Loaded and checked, not all acted on yet
-> Beacon reads and validates every kind described here. What it does with them is still growing: webhook sources and Slack integrations work today, and the other source and integration types, schedules, escalation and routing arrive with later releases. Each section says what is in use.
+> Beacon reads and validates every kind described here. What it does with them is still growing: Alertmanager and webhook sources and Slack integrations work today, and the Grafana source, the other integration types, schedules, escalation and routing arrive with later releases. Each section says what is in use.
 
 ## Files
 
@@ -51,7 +51,7 @@ A source is an authenticated endpoint that receives alerts, at `/api/v1/ingest/<
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | Identity, and the last segment of the URL |
-| `type` | yes | `alertmanager`, `grafana` or `webhook`. Only `webhook` receives alerts today; see [[webhook]]. |
+| `type` | yes | `alertmanager` (see [[alertmanager]]), `grafana` or `webhook` (see [[webhook]]). A `grafana` source does not receive alerts yet. |
 | `token` | yes | Secret that the sender presents as a bearer token, at least 16 characters |
 | `labels` | no | Labels added to every alert from this source. They do not replace a label the alert already has. |
 | `severity.label` | no | The label that carries severity (default `severity`) |

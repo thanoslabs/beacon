@@ -70,5 +70,37 @@ services:
       timeout: 3s
       retries: 30
 
+  # An Alertmanager that sends its notifications to Beacon, for development
+  # and for trying the Alertmanager source out. It is not started by
+  # `docker compose up`; ask for it with the profile, and give Beacon a
+  # configuration that has the source:
+  #
+  #   BEACON_CONFIG_DIR=./examples/alertmanager docker compose --profile alertmanager up --build
+  #
+  # Its configuration is dev/alertmanager/alertmanager.yml. See
+  # docs/alertmanager.md.
+  alertmanager:
+    image: prom/alertmanager:v0.35.0
+    profiles: ["alertmanager"]
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
+    volumes:
+      - ./dev/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    configs:
+      - source: source-token
+        target: /etc/alertmanager/beacon-token
+    ports:
+      - "127.0.0.1:${BEACON_ALERTMANAGER_PORT:-9093}:9093"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9093/-/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+# The token of Beacon's source, as a file for the senders that read their
+# credentials from one.
+configs:
+  source-token:
+    content: ${BEACON_SOURCE_TOKEN:-local-development-token}
+
 volumes:
   postgres-data:

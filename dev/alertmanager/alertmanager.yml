@@ -1,0 +1,32 @@
+# An Alertmanager that sends every notification to Beacon. compose.yaml starts
+# it under the profile "alertmanager", for development and for trying the
+# Alertmanager source out; docs/alertmanager.md explains each setting.
+#
+# The receiver is the part to copy into an existing Alertmanager.
+
+route:
+  receiver: beacon
+  group_by: [alertname]
+  # Beacon waits and batches by itself, so Alertmanager need not hold alerts
+  # back for long.
+  group_wait: 10s
+  group_interval: 1m
+  # A repeat changes nothing in Beacon and notifies nobody. It is what makes
+  # Beacon learn of an alert it missed.
+  repeat_interval: 1h
+
+receivers:
+  - name: beacon
+    webhook_configs:
+      # /api/v1/ingest/<name of the source in Beacon's configuration>
+      - url: http://beacon:8080/api/v1/ingest/alertmanager
+        # Without resolved notifications, alerts in Beacon never resolve by
+        # themselves.
+        send_resolved: true
+        # Every alert of a group, so Beacon knows about all of them.
+        max_alerts: 0
+        http_config:
+          authorization:
+            type: Bearer
+            # A file that holds the token of the source.
+            credentials_file: /etc/alertmanager/beacon-token

@@ -4,7 +4,7 @@ tags: [ingestion, reference]
 date: 2026-11-16
 ---
 
-Any system that can send JSON over HTTP can send alerts to Beacon through a webhook source. One request reports one alert as firing, or as resolved. What happens to the alert afterwards is described in [[alert-lifecycle]].
+Any system that can send JSON over HTTP can send alerts to Beacon through a webhook source. For Alertmanager, use an `alertmanager` source instead, which reads Alertmanager's own notifications; see [[alertmanager]]. One request reports one alert as firing, or as resolved. What happens to the alert afterwards is described in [[alert-lifecycle]].
 
 ## Set up a source
 
