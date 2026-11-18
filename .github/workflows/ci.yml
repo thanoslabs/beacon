@@ -121,16 +121,16 @@ jobs:
           alert_is() {
             for _ in $(seq 1 120); do
               state="$(docker compose exec -T postgres psql --username beacon --no-align --tuples-only \
-                --command "SELECT status || ' ' || severity FROM alerts WHERE labels->>'alertname' = 'CISmokeTest'")"
+                --command "SELECT status || ' ' || severity FROM alerts WHERE labels->>'alertname' = 'AlertmanagerSmokeTest'")"
               if [ "$state" = "$1" ]; then return 0; fi
               sleep 1
             done
             echo "::error::the alert is '$state' in Beacon, want '$1'"
             return 1
           }
-          amtool alert add CISmokeTest instance=ci severity=page
+          amtool alert add AlertmanagerSmokeTest instance=ci severity=page
           alert_is "firing critical"
-          amtool alert add CISmokeTest instance=ci severity=page --end="$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+          amtool alert add AlertmanagerSmokeTest instance=ci severity=page --end="$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
           alert_is "resolved critical"
 
       - name: Show logs
