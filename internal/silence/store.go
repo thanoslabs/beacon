@@ -26,6 +26,8 @@ const maxListed = 1000
 type Store struct {
 	db  *pgxpool.Pool
 	now func() time.Time
+	// onExpire is told, in the transaction that ends a silence early.
+	onExpire []func(ctx context.Context, tx pgx.Tx, silenceID string) error
 }
 
 // NewStore returns a store that uses db.
@@ -35,6 +37,14 @@ func NewStore(db *pgxpool.Pool) *Store {
 
 // SetClock replaces the clock, so tests can move time.
 func (s *Store) SetClock(now func() time.Time) { s.now = now }
+
+// OnExpire registers fn to be called when a silence is ended early, inside
+// the transaction that ends it: what fn writes through tx commits or rolls
+// back with the expiry, and an error keeps the silence as it was. Call it
+// before the store is used.
+func (s *Store) OnExpire(fn func(ctx context.Context, tx pgx.Tx, silenceID string) error) {
+	s.onExpire = append(s.onExpire, fn)
+}
 
 // New is a silence that someone asks for.
 type New struct {
@@ -183,11 +193,24 @@ type Querier interface {
 // no silence with the identifier.
 func (s *Store) Expire(ctx context.Context, id string) (Silence, error) {
 	now := s.now()
-	out, err := s.scan(s.db.QueryRow(ctx, `
-		WITH s AS (
-			UPDATE silences SET ends_at = LEAST(ends_at, $2), starts_at = LEAST(starts_at, $2)
-			WHERE id = $1 RETURNING *)
-		SELECT `+columns+` FROM s`+authors, id, now), now)
+	var out Silence
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		var err error
+		out, err = s.scan(tx.QueryRow(ctx, `
+			WITH s AS (
+				UPDATE silences SET ends_at = LEAST(ends_at, $2), starts_at = LEAST(starts_at, $2)
+				WHERE id = $1 RETURNING *)
+			SELECT `+columns+` FROM s`+authors, id, now), now)
+		if err != nil {
+			return err
+		}
+		for _, fn := range s.onExpire {
+			if err := fn(ctx, tx, out.ID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if errors.Is(err, pgx.ErrNoRows) || notUUID(err) {
 		return Silence{}, ErrNotFound
 	}

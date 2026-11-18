@@ -1868,3 +1868,93 @@ func TestSilencesAPI(t *testing.T) {
 		}
 	}
 }
+
+// TestSilences follows alerts under a silence through the real binary: an
+// alert that arrives while a silence matches it is stored and tells nobody;
+// the rest of its group is told about without it; and when the silence is
+// expired, or runs out, what it held back is told.
+func TestSilences(t *testing.T) {
+	b, admin, bare, memberToken := signedIn(t)
+	fire := func(alertname, host string) string {
+		t.Helper()
+		body := fmt.Sprintf(`{"labels": {"alertname": %q, "host": %q}, "annotations": {"summary": %q}}`, alertname, host, alertname+" on "+host)
+		code, res := b.webhook(body)
+		if code != http.StatusCreated {
+			t.Fatalf("webhook = %d %v", code, res)
+		}
+		return res["alert_id"]
+	}
+	silenceHost := func(client *http.Client, token, host, duration string) string {
+		t.Helper()
+		code, created := b.api(client, "POST", "/api/v1/silences", token,
+			fmt.Sprintf(`{"matchers": [{"label": "host", "operator": "=", "value": %q}], "duration": %q, "comment": "work on %s"}`, host, duration, host))
+		if code != http.StatusCreated {
+			t.Fatalf("create silence = %d %v", code, created)
+		}
+		return created["id"].(string)
+	}
+	// heldBack waits until Beacon has looked at the alert's group and found
+	// that a silence keeps its notification back.
+	heldBack := func(alertID, silenceID string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			var waitsFor string
+			err := b.db.QueryRow(context.Background(), `SELECT COALESCE(g.silence_id::text, '') FROM alerts a JOIN alert_groups g ON g.id = a.group_id WHERE a.id = $1`, alertID).Scan(&waitsFor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if waitsFor == silenceID {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the group of the alert waits for %q, want the silence %s", waitsFor, silenceID)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	// 1. A member silences db1. An alert from db1 is recorded, and Slack
+	// hears nothing.
+	silenceID := silenceHost(bare, memberToken, "db1", "1h")
+	db1 := fire("DiskFull", "db1")
+	heldBack(db1, silenceID)
+	if got := b.status(db1); got != "firing" {
+		t.Errorf("the silenced alert is %s, want it recorded as firing", got)
+	}
+	if msgs := b.slack.Messages(); len(msgs) != 0 {
+		t.Fatalf("Slack was told about a silenced alert: %+v", msgs)
+	}
+	if got := b.timeline(db1, 2); strings.Join(got, ",") != "fired by source,notification_silenced by system" {
+		t.Errorf("timeline = %v, want it to say that a silence held the notification back", got)
+	}
+
+	// 2. An alert of the same group that the silence does not match is
+	// told about, alone.
+	fire("DiskFull", "db2")
+	msg := b.message("the alert that is not silenced", contains("*Firing*", "*DiskFull on db2*"))
+	if strings.Contains(msg.JSON(), "db1") {
+		t.Errorf("the message shows the silenced alert:\n%s", msg.JSON())
+	}
+
+	// 3. An admin expires the silence. db1 still fires, so it is news now:
+	// the message shows both.
+	if code, body := b.api(admin, "DELETE", "/api/v1/silences/"+silenceID, "", ""); code != http.StatusNoContent {
+		t.Fatalf("expire = %d %v", code, body)
+	}
+	b.message("both alerts once the silence is expired", contains("2 alerts: 2 firing", "DiskFull on db1", "DiskFull on db2"))
+
+	// 4. A silence that runs out by itself: the alert is told about when it
+	// ends, by the same timer that would have told it at once.
+	short := silenceHost(admin, "", "web1", "3s")
+	web1 := fire("HighLoad", "web1")
+	heldBack(web1, short)
+	b.find("the alert when its silence ran out", contains("*HighLoad on web1*"))
+	var early bool
+	if err := b.db.QueryRow(context.Background(), `SELECT g.notified_at < s.ends_at FROM alerts a JOIN alert_groups g ON g.id = a.group_id, silences s WHERE a.id = $1 AND s.id = $2`, web1, short).Scan(&early); err != nil || early {
+		t.Errorf("the group was notified before its silence ended: %v, %v", early, err)
+	}
+	if n := len(b.slack.Calls("chat.postMessage")); n != 2 {
+		t.Errorf("%d messages were posted, want 2", n)
+	}
+}
