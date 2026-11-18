@@ -92,6 +92,29 @@ The position is the person on call, so everyone else keeps their place when the 
 
 Taking a change back before it takes over, by restoring the old definition, leaves nothing pending. Remove `effective_from` from the file once its time has passed: left in place, the next edit of the schedule would take over at once instead of at the next handoff.
 
+### Preview a change
+
+`beacon preview` shows what a configuration would do to upcoming shifts, without applying it:
+
+```console
+$ beacon preview --config beacon.d --weeks 4
+schedule platform-primary: changed. The new definition takes over at the next handoff, Mon 2026-11-23 09:00 GMT.
+  the person on call would change in 2 periods in the next 4 weeks:
+    Mon 2026-11-23 09:00 GMT to Mon 2026-11-30 09:00 GMT: linus@example.com instead of grace@example.com
+    Mon 2026-11-30 09:00 GMT to Mon 2026-12-07 09:00 GMT: grace@example.com instead of linus@example.com
+  shifts with this configuration:
+    Mon 2026-11-16 09:00 GMT to Mon 2026-11-23 09:00 GMT: ada@example.com
+    Mon 2026-11-23 09:00 GMT to Mon 2026-11-30 09:00 GMT: linus@example.com
+    ...
+```
+
+- It needs the configuration to preview (`--config`) and the database of the running Beacon (`BEACON_DATABASE_URL`), because the position is there. It only reads: the queries run in a read-only transaction, so a database user with `SELECT` on `schedules`, `schedule_positions` and `users` is enough. It needs no secret of the configuration.
+- It runs the same arithmetic as the server, so what it shows is what will be recorded if nothing but time changes.
+- For each schedule it says whether it is `new`, `unchanged`, `changed`, `pending` (applied already and waiting to take over) or `removed`, and lists the periods in which someone else would be on call. Times are shown in the schedule's zone.
+- Members who are not users are listed as passed over, as they would be.
+- `--format json` prints the same for a program to read. `--schedule <name>` limits the output to one schedule. `--weeks` sets how far ahead to look (default 8).
+- **In CI**: `beacon preview` exits `0` whatever it finds, so its output can be posted to a pull request. With `--fail-on-moves` it exits `1` when any upcoming shift would move or a running schedule would end, for teams that want such a change to need a second look.
+
 ## When a schedule leaves the configuration
 
 Its shift in progress ends at that moment and its position is dropped. The shifts it recorded are kept. If a schedule with the same name returns, it is the same schedule with the same history, and its rotation starts afresh with the first member.

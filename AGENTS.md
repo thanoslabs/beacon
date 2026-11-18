@@ -99,6 +99,7 @@ Run `mise install` first so that the pinned versions are used.
 | Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_TEST_OIDC_ISSUER='http://127.0.0.1:5556/dex' go test -race ./...` |
 | Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_SOURCE_TOKEN=local-development-token ./bin/beacon serve --config examples/quickstart` then `curl localhost:8080/readyz` |
 | Check configuration | `./bin/beacon validate --config examples/full` |
+| Preview schedule changes | `BEACON_DATABASE_URL=... ./bin/beacon preview --config examples/full` |
 | Hash a password for the bootstrap admin | `./bin/beacon hash-password` |
 | Apply migrations | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon migrate` |
 | End-to-end tests only | `BEACON_TEST_DATABASE_URL=... go test -race -count=1 ./internal/e2e/` |
@@ -147,8 +148,9 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 ### Schedules
 
 - `internal/schedule` owns the `schedule_positions` and `shifts` tables. `docs/schedules.md` describes the rules; keep it true. The file is the intent and the database is the position: nothing may work out who is on call from the files alone.
-- The arithmetic is pure and lives in `rotation.go`: `Start`, `State.WithDefinition` and `State.Next` say what happens, and `Store` only applies them. Change the rules there and nowhere else.
+- The arithmetic is pure and lives in `rotation.go`: `Start`, `State.WithDefinition` and `State.Next` say what happens, and `Store` only applies them. `beacon preview` runs the same functions ahead of time (`State.Project`). Change the rules there and nowhere else, so that the preview cannot disagree with what the store will do; `TestPreviewIsWhatHappens` compares the two shift for shift.
 - A change of definition never moves the shift in progress. `Store.Apply` stores it as pending, and it takes over in `State.Next`: at a handoff, or at the stated time, where the person on call stays unless the new rotation no longer has them. Do not write `definition` anywhere else.
+- `beacon preview` must stay read-only (it runs in a read-only transaction) and must not need the secrets of the configuration.
 - A handoff instant is always found from a calendar date in the schedule's zone (`instant`), never by adding hours. Any change to the arithmetic needs cases in `TestDaylightSaving` for both directions in a northern and a southern zone.
 - A shift is recorded when it begins and closed once. Never update or delete a closed shift; a trigger refuses the update. A handoff is recorded at the instant it was due, not at the time the worker ran.
 - Read a row that is locked with `FOR UPDATE` from its own table alone, and load what belongs to it in further statements. A locking read that waited sees the locked row as the other transaction left it and the joined rows as they were before, which once made the wrong person hand over; `TestReplicasHandOverOnce` is the guard.

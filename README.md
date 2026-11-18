@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md), [routes](docs/configuration.md#how-an-alert-is-routed) them by label, [groups](docs/configuration.md#grouping) related alerts and posts each group to the [Slack channel](docs/slack.md) of its escalation policy, where they can be acknowledged, snoozed and resolved. It runs [on-call rotations](docs/schedules.md), records every shift and applies changes to a schedule without moving the shift in progress, but does not page the person on call yet: overrides and escalation beyond a policy's first step do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md), [routes](docs/configuration.md#how-an-alert-is-routed) them by label, [groups](docs/configuration.md#grouping) related alerts and posts each group to the [Slack channel](docs/slack.md) of its escalation policy, where they can be acknowledged, snoozed and resolved. It runs [on-call rotations](docs/schedules.md), records every shift and [previews](docs/schedules.md#preview-a-change) what a change to a schedule would move, but does not page the person on call yet: overrides and escalation beyond a policy's first step do not exist yet, and the Slack integration has not been tried against a real workspace. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -92,6 +92,7 @@ export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmo
 ./bin/beacon migrate            # apply schema migrations without serving
 ./bin/beacon migrate --status   # list migrations and their state
 ./bin/beacon validate --config examples/full   # check configuration files; needs no database
+./bin/beacon preview --config examples/full    # show which on-call shifts a configuration would move; reads the database
 ./bin/beacon hash-password      # hash a password for the bootstrap admin
 ```
 

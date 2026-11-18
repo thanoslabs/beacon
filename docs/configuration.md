@@ -121,7 +121,7 @@ A schedule is one rotation: its members take turns being on call, in the order o
 - The file has no start date and no "current person". A new schedule starts when it is first applied, with the first member, and Beacon keeps its position in the database from then on.
 - A member whose address belongs to no user yet is passed over, logged as an error and counted in `beacon_schedule_members_skipped{schedule="..."}`. They take their place once they have signed in.
 - Members need not belong to the owning team, so someone from another team can be part of a rotation.
-- Editing a running schedule never moves the shift in progress; see [[schedules#Changing a schedule]].
+- Editing a running schedule never moves the shift in progress; see [[schedules#Changing a schedule]]. `beacon preview --config <path>` shows which upcoming shifts a change would move before it is merged.
 
 ## Escalation policies
 
