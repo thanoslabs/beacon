@@ -13,7 +13,7 @@ import (
 func runCLIEnv(t *testing.T, environ map[string]string, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	code = Run(context.Background(), args, func(k string) string { return environ[k] }, &out, &errOut)
+	code = Run(context.Background(), args, func(k string) string { return environ[k] }, strings.NewReader(""), &out, &errOut)
 	return code, out.String(), errOut.String()
 }
 

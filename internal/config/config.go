@@ -294,6 +294,9 @@ type Auth struct {
 	// means that everyone who can sign in is a member and nobody is an
 	// admin.
 	Roles *RoleMapping `yaml:"roles" json:"roles,omitempty"`
+	// BootstrapAdmin is an admin account that needs no identity provider.
+	// Nil means it is off.
+	BootstrapAdmin *BootstrapAdmin `yaml:"bootstrap_admin" json:"bootstrap_admin,omitempty"`
 
 	Origin Origin `yaml:"-" json:"-"`
 }
@@ -331,6 +334,16 @@ func (o OIDC) Claim() string {
 		return o.GroupsClaim
 	}
 	return DefaultGroupsClaim
+}
+
+// BootstrapAdmin is an admin account for an install that has no identity
+// provider yet, or whose provider maps nobody to admin yet. Taking it out of
+// the configuration turns it off.
+type BootstrapAdmin struct {
+	// PasswordHash is the bcrypt hash of the account's password, as
+	// `beacon hash-password` prints it. Beacon never sees the password
+	// except when someone signs in with it.
+	PasswordHash Secret `yaml:"password_hash" json:"password_hash"`
 }
 
 // DefaultGroupsClaim is the claim that carries a person's roles or groups

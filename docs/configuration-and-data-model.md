@@ -380,7 +380,9 @@ Applying a configuration makes these rows match the files, in one transaction, s
 
 **`team_members`**: `team_id`, `user_id`, `origin` (`config` or `group`), `created_at`. Primary key on all three of `team_id`, `user_id`, `origin`.
 
-**`api_tokens`**: `id`, `name`, `token_hash`, `role`, `created_by`, `created_at`, `expires_at`, `last_used_at`, `revoked_at`.
+**`api_tokens`**: `id`, `name`, `token_hash`, `role`, `created_by`, `created_at`, `expires_at`, `last_used_at`, `revoked_at`. The token is 256 random bits behind the prefix `bcn_`, shown once; `token_hash` is its SHA-256, which is enough for a secret that cannot be guessed. `created_by` is null for a token created with another token. `last_used_at` is exact to the minute, so a busy token does not write its row on every request. A revoked token keeps its row.
+
+The **bootstrap admin** has a row in `users` with the email address `bootstrap-admin@beacon.invalid`, the admin role and no issuer or subject. Its password is not in the database at all: the configuration gives Beacon a bcrypt hash through a secret reference (`auth.bootstrap_admin.password_hash`). Removing that from the configuration sets the row's `disabled_at` and deletes its sessions.
 
 ### Alerts
 
@@ -474,7 +476,7 @@ A worker claims a due row by moving its `next_attempt_at` into the future in the
 
 Membership is the union of two origins, and each origin manages only its own rows in `team_members`:
 
-- **`config`**: applying configuration makes the `config` rows of a team equal its `members` list. An email with no user is skipped and logged as an error. When a user is created at first sign-in, Beacon checks the loaded configuration and adds the rows that were skipped.
+- **`config`**: applying configuration makes the `config` rows of a team equal its `members` list. An email with no user is skipped, logged as an error and counted in the metric `beacon_team_members_skipped`; the rest of the configuration is applied. At every sign-in, Beacon makes that user's `config` rows equal the teams whose loaded `members` list names their address: that adds the rows that were skipped when the user did not exist yet, and moves them when the provider changed the address. A team that leaves the files loses its `config` rows.
 - **`group`**: at every sign-in, the user's `group` rows are replaced with the teams whose `groups` match the groups in the user's token. Leaving a group in the identity provider removes that membership at the next sign-in. A sign-in that is refused because the person is in no group with a role removes all their `group` rows and ends their sessions.
 
 A user is a member if either row exists. Removing someone from `members` does not remove them while their identity provider group still maps to the team, and the reverse.

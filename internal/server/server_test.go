@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanoslabs/beacon/internal/access"
 	"github.com/thanoslabs/beacon/internal/logging"
 )
 
@@ -173,11 +174,14 @@ func TestMetrics(t *testing.T) {
 
 func TestUnknownPathAndMethod(t *testing.T) {
 	s, _ := newTestServer(t, &fakeDB{})
-	if rec := do(t, s, http.MethodGet, "/nope", nil); rec.Code != http.StatusNotFound {
-		t.Errorf("GET /nope = %d, want 404", rec.Code)
+	// A path that no route matches is closed like everything else: a
+	// stranger cannot tell it from a route that exists.
+	if rec := do(t, s, http.MethodGet, "/nope", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /nope = %d, want 401", rec.Code)
 	}
-	if rec := do(t, s, http.MethodPost, PathLiveness, nil); rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("POST %s = %d, want 405", PathLiveness, rec.Code)
+	// So is a method that a route does not take.
+	if rec := do(t, s, http.MethodPost, PathLiveness, nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("POST %s = %d, want 401", PathLiveness, rec.Code)
 	}
 }
 
@@ -195,9 +199,9 @@ func TestRequestID(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s, logs := newTestServer(t, &fakeDB{})
-			s.Mux().HandleFunc("GET /hello", func(w http.ResponseWriter, _ *http.Request) {
+			s.Handle(access.Route{Pattern: "GET /hello", Level: access.Public, Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = io.WriteString(w, "hello")
-			})
+			})})
 
 			header := http.Header{}
 			if tt.sent != "" {
@@ -256,9 +260,9 @@ func TestProbesAreLoggedAtDebug(t *testing.T) {
 
 func TestPanicIsRecovered(t *testing.T) {
 	s, logs := newTestServer(t, &fakeDB{})
-	s.Mux().HandleFunc("GET /boom", func(http.ResponseWriter, *http.Request) {
+	s.Handle(access.Route{Pattern: "GET /boom", Level: access.Public, Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("kaboom")
-	})
+	})})
 
 	rec := do(t, s, http.MethodGet, "/boom", nil)
 	if rec.Code != http.StatusInternalServerError {
@@ -300,11 +304,11 @@ func TestGracefulShutdownWaitsForInFlightRequests(t *testing.T) {
 	s, logs := newTestServer(t, &fakeDB{})
 	started := make(chan struct{})
 	release := make(chan struct{})
-	s.Mux().HandleFunc("GET /slow", func(w http.ResponseWriter, _ *http.Request) {
+	s.Handle(access.Route{Pattern: "GET /slow", Level: access.Public, Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		close(started)
 		<-release
 		_, _ = io.WriteString(w, "finished")
-	})
+	})})
 	baseURL, stop, done := startServer(t, s)
 
 	type result struct {
@@ -362,10 +366,10 @@ func TestShutdownTimeoutCutsOffStuckRequests(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	defer close(release)
-	s.Mux().HandleFunc("GET /stuck", func(http.ResponseWriter, *http.Request) {
+	s.Handle(access.Route{Pattern: "GET /stuck", Level: access.Public, Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		close(started)
 		<-release
-	})
+	})})
 	baseURL, stop, done := startServer(t, s)
 
 	go func() {
@@ -391,5 +395,97 @@ func TestListenFailsOnBadAddress(t *testing.T) {
 	s := New(Config{Addr: "not-an-address"}, slog.New(slog.DiscardHandler), &fakeDB{}, NewRegistry())
 	if err := s.Listen(); err == nil || !strings.Contains(err.Error(), "listen on not-an-address") {
 		t.Errorf("Listen = %v, want an error naming the address", err)
+	}
+}
+
+// principalFromHeader authenticates a request by a header, for tests.
+type principalFromHeader struct{}
+
+func (principalFromHeader) Authenticate(r *http.Request) (access.Principal, error) {
+	role := access.Role(r.Header.Get("X-Test-Role"))
+	if !role.Valid() {
+		return access.Principal{}, access.ErrUnauthenticated
+	}
+	return access.Principal{Email: "test@example.com", Role: role}, nil
+}
+
+// TestRoutesAreClosedByDefault checks that the server puts every route
+// behind its level, including one whose level was not stated, and that only
+// the probes and the metrics are open of its own routes.
+func TestRoutesAreClosedByDefault(t *testing.T) {
+	logs := &syncBuffer{}
+	s := New(Config{Authenticator: principalFromHeader{}}, slog.New(slog.NewJSONHandler(logs, nil)), &fakeDB{}, NewRegistry())
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, _ := access.FromContext(r.Context())
+		_, _ = io.WriteString(w, "hello "+string(p.Role))
+	})
+	s.Handle(access.Route{Pattern: "GET /open", Level: access.Public, Handler: ok})
+	s.Handle(access.Route{Pattern: "GET /members", Level: access.Member, Handler: ok})
+	s.Handle(access.Route{Pattern: "POST /admins", Level: access.Admin, Handler: ok})
+	s.Handle(access.Route{Pattern: "GET /forgotten", Handler: ok})
+
+	var public []string
+	for _, r := range s.Routes() {
+		if r.Level == access.Public {
+			public = append(public, r.Pattern)
+		}
+	}
+	if got, want := strings.Join(public, ", "), "GET /healthz, GET /readyz, GET /metrics, GET /open"; got != want {
+		t.Errorf("public routes = %s, want %s", got, want)
+	}
+
+	tests := []struct {
+		method, path, role string
+		header             [2]string
+		want               int
+	}{
+		{method: "GET", path: "/open", want: 200},
+		{method: "GET", path: "/healthz", want: 200},
+		{method: "GET", path: "/members", want: 401},
+		{method: "GET", path: "/members", role: "member", want: 200},
+		{method: "GET", path: "/members", role: "admin", want: 200},
+		{method: "POST", path: "/admins", want: 401},
+		{method: "POST", path: "/admins", role: "member", want: 403},
+		{method: "POST", path: "/admins", role: "admin", want: 200},
+		// A level that was left out means admins only.
+		{method: "GET", path: "/forgotten", want: 401},
+		{method: "GET", path: "/forgotten", role: "member", want: 403},
+		{method: "GET", path: "/forgotten", role: "admin", want: 200},
+		// Paths that no route matches.
+		{method: "GET", path: "/api/v1/anything", want: 401},
+		{method: "DELETE", path: "/", want: 401},
+		{method: "GET", path: "/api/v1/anything", role: "member", want: 404},
+		// A request that another site made the browser send, with the
+		// person's credentials attached.
+		{method: "POST", path: "/admins", role: "admin", header: [2]string{"Sec-Fetch-Site", "cross-site"}, want: 403},
+		{method: "POST", path: "/admins", role: "admin", header: [2]string{"Origin", "https://evil.example.com"}, want: 403},
+		{method: "POST", path: "/admins", role: "admin", header: [2]string{"Sec-Fetch-Site", "same-origin"}, want: 200},
+	}
+	for _, tt := range tests {
+		header := http.Header{}
+		if tt.role != "" {
+			header.Set("X-Test-Role", tt.role)
+		}
+		if tt.header[0] != "" {
+			header.Set(tt.header[0], tt.header[1])
+		}
+		rec := do(t, s, tt.method, tt.path, header)
+		if rec.Code != tt.want {
+			t.Errorf("%s %s as %q with %v = %d, want %d", tt.method, tt.path, tt.role, tt.header, rec.Code, tt.want)
+		}
+		if tt.want == 200 && tt.role != "" && tt.path != "/open" && !strings.Contains(rec.Body.String(), "hello "+tt.role) {
+			t.Errorf("%s %s: the handler did not get the principal: %q", tt.method, tt.path, rec.Body.String())
+		}
+		if tt.want == 401 && rec.Header().Get("WWW-Authenticate") == "" {
+			t.Errorf("%s %s: 401 without a WWW-Authenticate header", tt.method, tt.path)
+		}
+	}
+
+	// Without an authenticator nobody gets past a closed route.
+	bare, _ := newTestServer(t, &fakeDB{})
+	bare.Handle(access.Route{Pattern: "GET /members", Level: access.Member, Handler: ok})
+	header := http.Header{"X-Test-Role": {"admin"}}
+	if rec := do(t, bare, http.MethodGet, "/members", header); rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /members without an authenticator = %d, want 401", rec.Code)
 	}
 }

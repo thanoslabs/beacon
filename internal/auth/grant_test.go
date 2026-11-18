@@ -93,20 +93,16 @@ func TestRolesAndTeamsFollowTheGroups(t *testing.T) {
 	}
 	const ada = "ada@example.com"
 
-	// 1. An admin group and a team group.
+	// 1. An admin group and a team group. Ada is also on the members list of
+	// the team "listed"; that membership comes from the configuration and
+	// must stay whatever her groups are.
 	status, msg, first := signIn("ada", ada, "beacon-admins", "platform-engineers", "unrelated")
-	if status != http.StatusSeeOther || b.role(ada) != "admin" || b.memberships(ada) != "platform/group" {
+	if status != http.StatusSeeOther || b.role(ada) != "admin" || b.memberships(ada) != "listed/config platform/group" {
 		t.Fatalf("first sign-in = %d %q, role %s, teams %q", status, msg, b.role(ada), b.memberships(ada))
 	}
-	// A membership from the configuration, which sign-in must leave alone.
-	if _, err := b.pool.Exec(context.Background(), `INSERT INTO team_members (team_id, user_id, origin)
-		SELECT t.id, u.id, 'config' FROM teams t, users u WHERE t.name IN ('listed', 'platform') AND u.email = $1`, ada); err != nil {
-		t.Fatal(err)
-	}
-
 	// 2. No longer an admin, and in another team.
 	status, msg, second := signIn("ada", ada, "beacon-users", "data-engineers")
-	if status != http.StatusSeeOther || b.role(ada) != "member" || b.memberships(ada) != "data/group listed/config platform/config" {
+	if status != http.StatusSeeOther || b.role(ada) != "member" || b.memberships(ada) != "data/group listed/config" {
 		t.Fatalf("second sign-in = %d %q, role %s, teams %q", status, msg, b.role(ada), b.memberships(ada))
 	}
 	// The earlier session is still valid, and now has the new role: the role
@@ -124,7 +120,7 @@ func TestRolesAndTeamsFollowTheGroups(t *testing.T) {
 	if me(first) != http.StatusUnauthorized || me(second) != http.StatusUnauthorized {
 		t.Error("the sessions outlived the person's access")
 	}
-	if got := b.memberships(ada); got != "listed/config platform/config" {
+	if got := b.memberships(ada); got != "listed/config" {
 		t.Errorf("teams after access was removed = %q, want only those from the configuration", got)
 	}
 	if n := b.count(`SELECT count(*) FROM users WHERE email = $1`, ada); n != 1 {
@@ -132,13 +128,13 @@ func TestRolesAndTeamsFollowTheGroups(t *testing.T) {
 	}
 
 	// 4. Back in a group: access returns.
-	if status, msg, _ := signIn("ada", ada, "beacon-users", "platform-engineers"); status != http.StatusSeeOther || b.memberships(ada) != "listed/config platform/config platform/group" {
+	if status, msg, _ := signIn("ada", ada, "beacon-users", "platform-engineers"); status != http.StatusSeeOther || b.memberships(ada) != "listed/config platform/group" {
 		t.Fatalf("sign-in after returning = %d %q, teams %q", status, msg, b.memberships(ada))
 	}
 
 	// Still with access, but in no team's group any more: the last group
 	// membership goes, and the ones from the configuration stay.
-	if status, msg, _ := signIn("ada", ada, "beacon-users"); status != http.StatusSeeOther || b.memberships(ada) != "listed/config platform/config" {
+	if status, msg, _ := signIn("ada", ada, "beacon-users"); status != http.StatusSeeOther || b.memberships(ada) != "listed/config" {
 		t.Fatalf("sign-in with a role and no team group = %d %q, teams %q", status, msg, b.memberships(ada))
 	}
 	if status, msg, _ := signIn("ada", ada, "beacon-users", "platform-engineers"); status != http.StatusSeeOther {
@@ -158,7 +154,7 @@ func TestRolesAndTeamsFollowTheGroups(t *testing.T) {
 	b.provisionTeams(mappedTeams[1:])
 	a.Roles = &config.RoleMapping{Admin: []string{"beacon-users"}}
 	b.handler.Configure(context.Background(), a, mappedTeams[1:])
-	if status, msg, _ := signIn("ada", ada, "beacon-users", "platform-engineers", "data-engineers"); status != http.StatusSeeOther || b.role(ada) != "admin" || b.memberships(ada) != "data/group listed/config platform/config" {
+	if status, msg, _ := signIn("ada", ada, "beacon-users", "platform-engineers", "data-engineers"); status != http.StatusSeeOther || b.role(ada) != "admin" || b.memberships(ada) != "data/group listed/config" {
 		t.Fatalf("sign-in after the configuration changed = %d %q, role %s, teams %q", status, msg, b.role(ada), b.memberships(ada))
 	}
 	// With only admins mapped, everyone else who can sign in is a member.
@@ -179,7 +175,7 @@ func TestGroupsFromDex(t *testing.T) {
 
 	// Ada is in beacon-admins and platform-engineers.
 	code, body := oidctest.SignIn(t, oidctest.Browser(t, b.addr()), oidctest.Ada, oidctest.Password)
-	if code != http.StatusOK || !strings.Contains(body, `"role":"admin"`) || b.memberships(oidctest.Ada) != "platform/group" {
+	if code != http.StatusOK || !strings.Contains(body, `"role":"admin"`) || b.memberships(oidctest.Ada) != "listed/config platform/group" {
 		t.Errorf("Ada: %d %s, teams %q\nlogs:\n%s", code, body, b.memberships(oidctest.Ada), b.logs)
 	}
 	// Grace is in platform-engineers only.
@@ -202,5 +198,53 @@ func TestGroupsFromDex(t *testing.T) {
 	b.handler.Configure(context.Background(), a, mappedTeams)
 	if code, _ := oidctest.SignIn(t, oidctest.Browser(t, b.addr()), oidctest.Ada, oidctest.Password); code != http.StatusForbidden {
 		t.Errorf("Ada without the groups scope: %d, want 403", code)
+	}
+}
+
+// TestListedMembersJoinWhenTheySignIn covers the person whom a team's
+// members list names before they have ever signed in: reconciliation had to
+// skip them, and the sign-in that creates the user adds them.
+func TestListedMembersJoinWhenTheySignIn(t *testing.T) {
+	f := newFakeProvider(t)
+	a := fakeAuth(f, "http://127.0.0.1:18080")
+	teams := []config.Team{
+		{Name: "platform", Members: []string{"Ada@Example.com", "grace@example.com"}, Groups: []string{"platform-engineers"}},
+		{Name: "data", Members: []string{"ada.lovelace@example.com"}},
+		{Name: "other", Members: []string{"grace@example.com"}},
+	}
+	b := newBeacon(t, a)
+	b.provisionTeams(teams)
+	b.handler.Configure(context.Background(), a, teams)
+	hooks := 0
+	b.handler.AfterSignIn(func(context.Context) { hooks++ })
+
+	signIn := func(email string, groups ...string) {
+		t.Helper()
+		at := begin(t, b, f)
+		c := at.claims()
+		c["sub"], c["email"], c["groups"] = "ada", email, groups
+		at.grant("code", sign(t, f.key, c))
+		if status, msg, _ := at.callback(url.Values{"code": {"code"}, "state": {at.state}}, at.cookie); status != http.StatusSeeOther {
+			t.Fatalf("sign-in = %d %q", status, msg)
+		}
+	}
+
+	// Listed and in the team's group: a member twice over, once per origin.
+	signIn("ada@example.com", "platform-engineers")
+	if got := b.memberships("ada@example.com"); got != "platform/config platform/group" {
+		t.Errorf("memberships after the first sign-in = %q", got)
+	}
+	// Leaving the group removes only the membership that came from it.
+	signIn("ada@example.com")
+	if got := b.memberships("ada@example.com"); got != "platform/config" {
+		t.Errorf("memberships after leaving the group = %q", got)
+	}
+	// The provider changes the address: the memberships follow the lists.
+	signIn("ada.lovelace@example.com")
+	if got := b.memberships("ada.lovelace@example.com"); got != "data/config" {
+		t.Errorf("memberships after the address changed = %q", got)
+	}
+	if hooks != 3 {
+		t.Errorf("the hook ran %d times, want once per sign-in", hooks)
 	}
 }
