@@ -245,14 +245,61 @@ type Target struct {
 
 // Routing decides which team and escalation policy an alert gets.
 type Routing struct {
-	GroupBy       []string     `yaml:"group_by" json:"group_by,omitempty"`
-	GroupWait     *Duration    `yaml:"group_wait" json:"group_wait,omitempty"`
+	// GroupBy lists the labels that define a group. Nil means
+	// DefaultGroupBy; an empty list puts every alert in one group.
+	GroupBy []string `yaml:"group_by" json:"group_by,omitempty"`
+	// GroupWait is how long a new group waits before its first
+	// notification. Nil means DefaultGroupWait; zero means no wait.
+	GroupWait *Duration `yaml:"group_wait" json:"group_wait,omitempty"`
+	// GroupInterval is the least time between notifications about a group.
+	// Nil means DefaultGroupInterval.
 	GroupInterval *Duration    `yaml:"group_interval" json:"group_interval,omitempty"`
 	Default       RouteDefault `yaml:"default" json:"default"`
 	// Rules are tried in order; the first match wins.
 	Rules []RoutingRule `yaml:"rules" json:"rules,omitempty"`
 
 	Origin Origin `yaml:"-" json:"-"`
+}
+
+// The grouping that applies unless the configuration says otherwise.
+const (
+	DefaultGroupWait     = Duration(30 * time.Second)
+	DefaultGroupInterval = Duration(5 * time.Minute)
+)
+
+// DefaultGroupBy are the labels that define a group unless the configuration
+// says otherwise.
+var DefaultGroupBy = []string{"alertname"}
+
+// Grouping says which alerts are told about together, and how often.
+type Grouping struct {
+	// By lists the labels that define a group: alerts with the same values
+	// for all of them share one. An empty list puts every alert in one group.
+	By []string
+	// Wait is how long a new group waits before its first notification.
+	Wait time.Duration
+	// Interval is the least time between two notifications about a group
+	// that its sources cause.
+	Interval time.Duration
+}
+
+// Grouping returns the grouping that the routing block asks for, with the
+// defaults for what it leaves out. A nil Routing gives the defaults.
+func (r *Routing) Grouping() Grouping {
+	g := Grouping{By: DefaultGroupBy, Wait: time.Duration(DefaultGroupWait), Interval: time.Duration(DefaultGroupInterval)}
+	if r == nil {
+		return g
+	}
+	if r.GroupBy != nil {
+		g.By = r.GroupBy
+	}
+	if r.GroupWait != nil {
+		g.Wait = time.Duration(*r.GroupWait)
+	}
+	if r.GroupInterval != nil {
+		g.Interval = time.Duration(*r.GroupInterval)
+	}
+	return g
 }
 
 // RouteDefault applies to alerts that match no rule.

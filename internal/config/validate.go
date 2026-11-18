@@ -154,10 +154,16 @@ func (o object) groups(field string, list []string) {
 
 // labelNames checks a list of label names.
 func (o object) labelNames(field string, names []string) {
+	seen := map[string]bool{}
 	for i, n := range names {
-		if !labelNameRE.MatchString(n) {
-			o.errorf(fmt.Sprintf("%s[%d]", field, i), "%q is not a label name", n)
+		at := fmt.Sprintf("%s[%d]", field, i)
+		switch {
+		case !labelNameRE.MatchString(n):
+			o.errorf(at, "%q is not a label name", n)
+		case seen[n]:
+			o.errorf(at, "%q is listed twice", n)
 		}
+		seen[n] = true
 	}
 }
 
@@ -279,7 +285,8 @@ func (c Config) validate(v *validator) {
 	if r := c.Routing; r != nil {
 		o := object{v: v, origin: r.Origin, label: kindRouting}
 		o.labelNames("group_by", r.GroupBy)
-		o.positive("group_wait", r.GroupWait)
+		// group_wait may be zero: the first notification is then sent at
+		// once.
 		o.positive("group_interval", r.GroupInterval)
 		if r.Default.Team != "" {
 			o.ref("default.team", kindTeam, r.Default.Team, teams)
@@ -318,7 +325,6 @@ func (c Config) validate(v *validator) {
 				o.ref("escalation_policy", kindPolicy, rule.EscalationPolicy, policies)
 			}
 			o.labelNames("group_by", rule.GroupBy)
-			o.positive("group_wait", rule.GroupWait)
 			o.positive("group_interval", rule.GroupInterval)
 		}
 	}

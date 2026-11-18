@@ -43,8 +43,9 @@ escalation_policies:
         timeout: 0s
   - name: empty
 routing:
-  group_by: [alertname, "not a label"]
+  group_by: [alertname, "not a label", alertname]
   group_wait: 0s
+  group_interval: 0s
   default:
     team: nobody
   rules:
