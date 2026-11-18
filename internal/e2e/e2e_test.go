@@ -1714,6 +1714,105 @@ func TestScheduleRotation(t *testing.T) {
 	}
 }
 
+// waitFor polls until cond holds, and fails the test with what if it does
+// not within half a minute.
+func (b *beacon) waitFor(what string, cond func() bool) {
+	b.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			b.t.Fatalf("timed out waiting for %s\n%s", what, b.output())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestSlackIdentity links people to their Slack accounts in the real
+// binary. Ada has an account in the workspace with her address: Beacon
+// finds it after she signs in, shows it to her, and attributes what she
+// does in Slack to her. Grace has none: that is logged and counted.
+func TestSlackIdentity(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, signInConfiguration(t)))
+	b.waitUntilServing()
+	b.slack.AddUser(oidctest.Ada, "U0ADA")
+
+	admin := oidctest.Browser(t, strings.TrimPrefix(b.url, "http://"))
+	if code, body := oidctest.SignIn(t, admin, oidctest.Ada, oidctest.Password); code != http.StatusOK {
+		t.Fatalf("sign-in = %d %s", code, body)
+	}
+	identities := func(client *http.Client) []any {
+		t.Helper()
+		code, body := b.api(client, "GET", "/api/v1/me/identities", "", "")
+		list, _ := body["identities"].([]any)
+		if code != http.StatusOK || list == nil {
+			t.Fatalf("GET /api/v1/me/identities = %d %v", code, body)
+		}
+		return list
+	}
+	b.waitFor("Ada's Slack account to be linked", func() bool { return len(identities(admin)) == 1 })
+	if got := identities(admin)[0].(map[string]any); got["integration"] != "slack" || got["provider"] != "slack" || got["external_id"] != "U0ADA" || got["origin"] != "email" {
+		t.Errorf("Ada's identity = %v", got)
+	}
+
+	// Grace is not in the workspace.
+	member := oidctest.Browser(t, strings.TrimPrefix(b.url, "http://"))
+	if code, body := oidctest.SignIn(t, member, oidctest.Grace, oidctest.Password); code != http.StatusOK {
+		t.Fatalf("sign-in = %d %s", code, body)
+	}
+	b.waitFor("the gap to be logged", func() bool {
+		return strings.Contains(b.output(), `"msg":"no account in the chat service has this user's email address, so they cannot be reached directly through this integration; Beacon asks again in an hour","integration":"slack","provider":"slack"`)
+	})
+	if len(identities(member)) != 0 {
+		t.Errorf("Grace has identities: %v", identities(member))
+	}
+	b.waitFor("the metric of users without an identity", func() bool {
+		return b.metrics("beacon_users_without_identity") == `beacon_users_without_identity{integration="slack"} 1`
+	})
+
+	// Ada acknowledges from Slack, under whatever name she has there. The
+	// timeline and the alert name the Beacon user.
+	code, res := b.webhook(diskFull)
+	if code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	msg := b.message("the alert", contains("Disk is full on db1"))
+	if code := b.click(msg, "beacon_acknowledge", slacktest.User{ID: "U0ADA", Username: "ada.in.slack"}); code != http.StatusOK {
+		t.Fatalf("click = %d", code)
+	}
+	var (
+		actor, name string
+		by          bool
+	)
+	err := b.db.QueryRow(context.Background(), `
+		SELECT u.email, COALESCE(a.acknowledged_by = u.id, false), e.data->>'actor_name'
+		FROM alert_events e JOIN users u ON u.id = e.actor_id JOIN alerts a ON a.id = e.alert_id
+		WHERE e.type = 'acknowledged' AND e.actor_provider = 'slack' AND e.actor_external_id = 'U0ADA'`).Scan(&actor, &by, &name)
+	if err != nil || actor != oidctest.Ada || !by || name == "" || name == "ada.in.slack" {
+		t.Errorf("the acknowledgement is by %q (acknowledged_by matches: %v, name %q), %v; want the user Ada", actor, by, name, err)
+	}
+	b.message("the acknowledgement by the Beacon user", contains("Acknowledged by "+name))
+
+	// Someone in the channel who is no Beacon user can still act, and is
+	// recorded as the Slack account.
+	if code := b.click(b.slack.Messages()[0], "beacon_resolve", slacktest.User{ID: "U0GUEST", Username: "guest"}); code != http.StatusOK {
+		t.Fatalf("click = %d", code)
+	}
+	b.message("the resolution", contains("Resolved by guest"))
+	var unlinked int
+	err = b.db.QueryRow(context.Background(), `SELECT count(*) FROM alert_events WHERE type = 'resolved' AND actor_id IS NULL AND actor_external_id = 'U0GUEST'`).Scan(&unlinked)
+	if err != nil || unlinked != 1 {
+		t.Errorf("%d resolved events by the unlinked account, %v; want 1", unlinked, err)
+	}
+
+	if code := b.terminate(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+	if logs := b.output(); strings.Contains(logs, botToken) || strings.Contains(logs, signingSecret) {
+		t.Error("the logs contain a Slack credential")
+	}
+}
+
 // TestRolesAreEnforced signs in a member and an admin through the identity
 // provider and sends both to a route that only an admin may use.
 func TestRolesAreEnforced(t *testing.T) {

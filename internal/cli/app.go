@@ -17,6 +17,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/access"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/config"
+	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/provision"
@@ -45,6 +46,9 @@ type provisioner struct {
 	silences     *silence.Handler
 	schedules    *schedule.Store
 	scheduleAPI  *schedule.Handler
+	identities   *identity.Store
+	identityAPI  *identity.Handler
+	linker       *identity.Linker
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -84,7 +88,9 @@ func (p *provisioner) routes() []access.Route {
 	// Silences are runtime state that members create and end.
 	routes = append(routes, p.silences.Routes()...)
 	// So are the overrides of schedules.
-	return append(routes, p.scheduleAPI.Routes()...)
+	routes = append(routes, p.scheduleAPI.Routes()...)
+	// A person sees their own chat accounts.
+	return append(routes, p.identityAPI.Routes()...)
 }
 
 // handleReload reloads the configuration for an admin. It does what SIGHUP
@@ -379,15 +385,23 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	ids := make(map[string]string, len(cfg.Integrations))
 	channels := make(map[string]notify.Channel, len(cfg.Integrations))
 	signingSecrets := make(map[string]config.Secret, len(cfg.Integrations))
+	// The chat services in which people have accounts. Slack can be asked
+	// for an account by email address; in Discord people link theirs.
+	var chat []identity.Integration
 	for _, i := range cfg.Integrations {
+		if i.Type == config.IntegrationTypeDiscord {
+			chat = append(chat, identity.Integration{ID: integrations[i.Name], Name: i.Name, Provider: identity.ProviderDiscord})
+		}
 		if i.Type != config.IntegrationTypeSlack {
 			p.logger.WarnContext(ctx, "this type of integration does not deliver yet, so nothing is sent through it",
 				slog.String("integration", i.Name), slog.String("type", i.Type))
 			continue
 		}
 		ids[i.Name] = integrations[i.Name]
-		channels[integrations[i.Name]] = slack.NewChannel(slack.NewClient(p.slackAPIURL, i.Slack.BotToken))
+		client := slack.NewClient(p.slackAPIURL, i.Slack.BotToken)
+		channels[integrations[i.Name]] = slack.NewChannel(client)
 		signingSecrets[i.Name] = i.Slack.SigningSecret
+		chat = append(chat, identity.Integration{ID: integrations[i.Name], Name: i.Name, Provider: identity.ProviderSlack, Lookup: client})
 		p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
 			slog.String("interactions_path", strings.Replace(slack.InteractionsPath, "{name}", i.Name, 1)))
 	}
@@ -434,4 +448,18 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	p.pipeline.SetChannels(channels)
 	p.pipeline.SetPolicies(byID)
 	p.interactions.SetSecrets(signingSecrets)
+	p.linker.SetIntegrations(chat)
+	// The new integrations are asked about their users at once.
+	p.linker.Kick()
+}
+
+// UserFor tells the Slack handler which Beacon user an account of the
+// integration with this name belongs to.
+func (p *provisioner) UserFor(ctx context.Context, integration, externalID string) (userID, name string, found bool, err error) {
+	in, ok := p.linker.Integrations()[integration]
+	if !ok {
+		return "", "", false, nil
+	}
+	u, found, err := p.identities.UserFor(ctx, p.pool, in.ID, externalID)
+	return u.ID, u.Name, found, err
 }
