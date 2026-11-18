@@ -628,6 +628,108 @@ func TestGrafanaSource(t *testing.T) {
 	b.message("the resolution in Slack", contains("*Resolved*", "Resolved by the source", "|:bar_chart: Dashboard"))
 }
 
+// threeSources is the configuration with a source of each type. They share
+// one token.
+var threeSources = strings.Replace(configuration, "sources:\n", `sources:
+  - name: am
+    type: alertmanager
+    token: {env: BEACON_SOURCE_TOKEN}
+  - name: grafana
+    type: grafana
+    token: {env: BEACON_SOURCE_TOKEN}
+`, 1)
+
+// TestConcurrentDeliveries sends the same notification to each type of
+// source from several clients at once, over real connections, and then
+// resolves it the same way. Each alert exists once, is told to Slack once
+// and is resolved once, however the deliveries interleave.
+func TestConcurrentDeliveries(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, threeSources))
+	b.waitUntilServing()
+	const clients, repeats = 8, 4
+
+	storm := func(payloads map[string]string) {
+		t.Helper()
+		var wg sync.WaitGroup
+		for source, payload := range payloads {
+			for range clients {
+				wg.Go(func() {
+					// Each client has its own connections, as separate senders do.
+					client := &http.Client{Transport: &http.Transport{}}
+					defer client.CloseIdleConnections()
+					for range repeats {
+						req, err := http.NewRequest(http.MethodPost, b.url+"/api/v1/ingest/"+source, strings.NewReader(payload))
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						req.Header.Set("Authorization", "Bearer "+sourceToken)
+						resp, err := client.Do(req)
+						if err != nil {
+							t.Errorf("%s: %v", source, err)
+							return
+						}
+						_, _ = io.Copy(io.Discard, resp.Body)
+						_ = resp.Body.Close()
+						if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+							t.Errorf("%s: status %d", source, resp.StatusCode)
+						}
+					}
+				})
+			}
+		}
+		wg.Wait()
+	}
+	count := func(query string) (n int) {
+		t.Helper()
+		if err := b.db.QueryRow(context.Background(), query).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	storm(map[string]string{"e2e": diskFull, "am": captured(t, "alertmanager/firing.json"), "grafana": captured(t, "grafana/firing.json")})
+	if alerts, firing := count(`SELECT count(*) FROM alerts`), count(`SELECT count(*) FROM alerts WHERE status = 'firing'`); alerts != 4 || firing != 4 {
+		t.Fatalf("%d alerts, %d firing, after %d deliveries to each source; want the 4 distinct alerts", alerts, firing, clients*repeats)
+	}
+	b.waitForMessages("one message per alert", 4, contains("*Firing*"))
+
+	storm(map[string]string{"e2e": diskFullResolved, "am": captured(t, "alertmanager/resolved.json"), "grafana": captured(t, "grafana/resolved.json")})
+	// Alertmanager's last notification resolved one of its two alerts.
+	if alerts, resolved := count(`SELECT count(*) FROM alerts`), count(`SELECT count(*) FROM alerts WHERE status = 'resolved'`); alerts != 4 || resolved != 3 {
+		t.Fatalf("%d alerts, %d resolved, want 4 and 3", alerts, resolved)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		resolved := 0
+		msgs := b.slack.Messages()
+		for _, m := range msgs {
+			if strings.Contains(m.JSON(), "*Resolved*") {
+				resolved++
+			}
+		}
+		if len(msgs) == 4 && resolved == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Slack has %d messages, %d resolved; want 4 and 3", len(msgs), resolved)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// One notification when each alert fired and one when it resolved:
+	// repeats and duplicate resolves told nobody.
+	if got := count(`SELECT count(*) FROM alert_events WHERE type IN ('fired', 'resolved')`); got != 7 {
+		t.Errorf("%d fired and resolved events, want 7", got)
+	}
+	if got := count(`SELECT count(*) FROM notifications`); got != 7 {
+		t.Errorf("%d notifications, want 7", got)
+	}
+	if n := len(b.slack.Calls("chat.postMessage")); n != 4 {
+		t.Errorf("%d messages were posted to Slack, want 4", n)
+	}
+}
+
 // rows lists the rows of a provisioned table as "name" or "name (removed)".
 func (b *beacon) rows(table string) string {
 	b.t.Helper()
