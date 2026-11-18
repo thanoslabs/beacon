@@ -10,6 +10,7 @@ import (
 
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
+	"github.com/thanoslabs/beacon/internal/schedule"
 	"github.com/thanoslabs/beacon/internal/server"
 	"github.com/thanoslabs/beacon/internal/silence"
 )
@@ -48,6 +49,9 @@ var wantRoutes = []string{
 	"member POST /api/v1/silences",
 	"member GET /api/v1/silences/{id}",
 	"member DELETE /api/v1/silences/{id}",
+	"member GET /api/v1/schedules/{name}/overrides",
+	"member POST /api/v1/schedules/{name}/overrides",
+	"member DELETE /api/v1/schedules/{name}/overrides/{id}",
 }
 
 var pathParamRE = regexp.MustCompile(`\{[a-z]+\}`)
@@ -56,7 +60,7 @@ func TestRoutes(t *testing.T) {
 	// The routes, registered as beacon serve registers them.
 	logger := slog.New(slog.DiscardHandler)
 	srv := server.New(server.Config{}, logger, nil, server.NewRegistry())
-	for _, route := range (&provisioner{auth: auth.NewHandler(logger, nil), silences: silence.NewHandler(logger, nil)}).routes() {
+	for _, route := range (&provisioner{auth: auth.NewHandler(logger, nil), silences: silence.NewHandler(logger, nil), scheduleAPI: schedule.NewHandler(logger, nil)}).routes() {
 		srv.Handle(route)
 	}
 	var got []string
@@ -100,10 +104,10 @@ func TestRoutes(t *testing.T) {
 			closed++
 		}
 	}
-	if closed != 10 {
-		t.Errorf("%d routes refused a stranger, want 10", closed)
+	if closed != 13 {
+		t.Errorf("%d routes refused a stranger, want 13", closed)
 	}
-	for _, probe := range []string{"GET /", "GET /api/v1/alerts", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
+	for _, probe := range []string{"GET /", "GET /api/v1/alerts", "GET /api/v1/schedules/x/overrides/y", "PUT /api/v1/schedules/x/overrides", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
 		method, path, _ := strings.Cut(probe, " ")
 		if code, body := request(method, path); code != http.StatusUnauthorized {
 			t.Errorf("%s without a session = %d %s, want 401", probe, code, body)

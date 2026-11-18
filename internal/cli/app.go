@@ -44,6 +44,7 @@ type provisioner struct {
 	auth         *auth.Handler
 	silences     *silence.Handler
 	schedules    *schedule.Store
+	scheduleAPI  *schedule.Handler
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -81,7 +82,9 @@ func (p *provisioner) routes() []access.Route {
 	}
 	routes = append(routes, p.auth.Routes()...)
 	// Silences are runtime state that members create and end.
-	return append(routes, p.silences.Routes()...)
+	routes = append(routes, p.silences.Routes()...)
+	// So are the overrides of schedules.
+	return append(routes, p.scheduleAPI.Routes()...)
 }
 
 // handleReload reloads the configuration for an admin. It does what SIGHUP

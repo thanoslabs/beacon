@@ -1553,7 +1553,7 @@ func scheduleConfiguration(t *testing.T) string {
 func (b *beacon) onCall(name string) (email string, shifts int) {
 	b.t.Helper()
 	err := b.db.QueryRow(context.Background(), `
-		SELECT COALESCE(u.email, ''), (SELECT count(*) FROM shifts f WHERE f.schedule_id = s.id)
+		SELECT COALESCE(u.email, ''), (SELECT count(*) FROM shifts f WHERE f.schedule_id = s.id AND f.kind = 'rotation')
 		FROM schedules s JOIN schedule_positions p ON p.schedule_id = s.id LEFT JOIN users u ON u.id = p.user_id
 		WHERE s.name = $1`, name).Scan(&email, &shifts)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -1601,8 +1601,47 @@ func TestScheduleRotation(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	var started time.Time
-	if err := b.db.QueryRow(context.Background(), `SELECT starts_at FROM shifts WHERE ends_at IS NULL`).Scan(&started); err != nil {
+	if err := b.db.QueryRow(context.Background(), `SELECT starts_at FROM shifts WHERE ends_at IS NULL AND kind = 'rotation'`).Scan(&started); err != nil {
 		t.Fatalf("read the shift: %v", err)
+	}
+
+	// Grace covers for an hour, through the API. Her override is recorded as
+	// a shift beside Ada's, and removing it ends that shift.
+	admin := oidctest.Browser(t, strings.TrimPrefix(b.url, "http://"))
+	if code, body := oidctest.SignIn(t, admin, oidctest.Ada, oidctest.Password); code != http.StatusOK {
+		t.Fatalf("sign-in = %d %s", code, body)
+	}
+	member := oidctest.Browser(t, strings.TrimPrefix(b.url, "http://"))
+	if code, body := oidctest.SignIn(t, member, oidctest.Grace, oidctest.Password); code != http.StatusOK {
+		t.Fatalf("sign-in = %d %s", code, body)
+	}
+	if code, body := b.api(oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), "POST", "/api/v1/schedules/primary/overrides", "", `{"user": "grace@example.com", "duration": "1h"}`); code != http.StatusUnauthorized {
+		t.Errorf("an override without a session = %d %v, want 401", code, body)
+	}
+	code, override := b.api(member, "POST", "/api/v1/schedules/primary/overrides", "", `{"user": "grace@example.com", "duration": "1h", "reason": "e2e"}`)
+	if code != http.StatusCreated || override["state"] != "active" || override["created_by"] != "grace@example.com" {
+		t.Fatalf("create override = %d %v", code, override)
+	}
+	overrideShifts := func() (open, closed int) {
+		t.Helper()
+		err := b.db.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE f.ends_at IS NULL), count(*) FILTER (WHERE f.ends_at IS NOT NULL)
+			FROM shifts f JOIN users u ON u.id = f.user_id WHERE f.kind = 'override' AND u.email = 'grace@example.com'`).Scan(&open, &closed)
+		if err != nil {
+			t.Fatalf("read shifts: %v", err)
+		}
+		return open, closed
+	}
+	if open, closed := overrideShifts(); open != 1 || closed != 0 {
+		t.Errorf("%d open and %d closed override shifts after the override began, want 1 and 0", open, closed)
+	}
+	if code, body := b.api(admin, "POST", "/api/v1/schedules/primary/overrides", "", `{"user": "ada@example.com", "duration": "30m"}`); code != http.StatusConflict {
+		t.Errorf("an overlapping override = %d %v, want 409", code, body)
+	}
+	if code, body := b.api(admin, "DELETE", "/api/v1/schedules/primary/overrides/"+override["id"].(string), "", ""); code != http.StatusNoContent {
+		t.Errorf("remove override = %d %v, want 204", code, body)
+	}
+	if open, closed := overrideShifts(); open != 0 || closed != 1 {
+		t.Errorf("%d open and %d closed override shifts after the override was removed, want 0 and 1", open, closed)
 	}
 
 	// A restart in the middle of the shift.
@@ -1612,11 +1651,12 @@ func TestScheduleRotation(t *testing.T) {
 	b = launch(t, dbURL, dir)
 	b.waitUntilServing()
 	var again time.Time
-	err := b.db.QueryRow(context.Background(), `SELECT starts_at FROM shifts WHERE ends_at IS NULL`).Scan(&again)
+	err := b.db.QueryRow(context.Background(), `SELECT starts_at FROM shifts WHERE ends_at IS NULL AND kind = 'rotation'`).Scan(&again)
 	if who, shifts := b.onCall("primary"); err != nil || who != oidctest.Ada || shifts != 1 || !again.Equal(started) {
 		t.Errorf("after a restart %q is on call with %d shifts, the open one since %s (%v); want Ada with the shift from %s", who, shifts, again, err, started)
 	}
-	if got := b.metrics("beacon_schedule_members_skipped"); got != `beacon_schedule_members_skipped{schedule="primary"} 1` {
+	// Both members are users by now.
+	if got := b.metrics("beacon_schedule_members_skipped"); got != `beacon_schedule_members_skipped{schedule="primary"} 0` {
 		t.Errorf("metric after the restart: %s", got)
 	}
 
@@ -1632,7 +1672,7 @@ func TestScheduleRotation(t *testing.T) {
 	if err != nil || inForce != "grace@example.com" || pending != "linus@example.com" {
 		t.Errorf("in force begins with %q and the pending rotation has %q second (%v); want the old one in force and the new one pending", inForce, pending, err)
 	}
-	err = b.db.QueryRow(context.Background(), `SELECT starts_at FROM shifts WHERE ends_at IS NULL`).Scan(&again)
+	err = b.db.QueryRow(context.Background(), `SELECT starts_at FROM shifts WHERE ends_at IS NULL AND kind = 'rotation'`).Scan(&again)
 	if who, shifts := b.onCall("primary"); err != nil || who != oidctest.Ada || shifts != 1 || !again.Equal(started) {
 		t.Errorf("after the definition changed %q is on call with %d shifts, the open one since %s (%v)", who, shifts, again, err)
 	}
@@ -1643,7 +1683,7 @@ func TestScheduleRotation(t *testing.T) {
 		t.Errorf("the logs do not say that the schedule ended:\n%s", logs)
 	}
 	var open, closed int
-	err = b.db.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE ends_at IS NULL), count(*) FILTER (WHERE ends_at IS NOT NULL) FROM shifts`).Scan(&open, &closed)
+	err = b.db.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE ends_at IS NULL), count(*) FILTER (WHERE ends_at IS NOT NULL) FROM shifts WHERE kind = 'rotation'`).Scan(&open, &closed)
 	if who, _ := b.onCall("primary"); err != nil || open != 0 || closed != 1 || who != "" {
 		t.Errorf("after the schedule was removed: %d open and %d closed shifts, %q on call (%v)", open, closed, who, err)
 	}

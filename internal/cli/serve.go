@@ -152,6 +152,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 		auth:         signIn,
 		silences:     silence.NewHandler(logger, silences),
 		schedules:    schedules,
+		scheduleAPI:  schedule.NewHandler(logger, schedules),
 	}
 	prov.registerMetrics(registry)
 	prov.ingest.RegisterMetrics(registry)
