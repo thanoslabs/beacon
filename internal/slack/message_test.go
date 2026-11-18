@@ -169,10 +169,6 @@ func TestRenderWithoutOptionalParts(t *testing.T) {
 		t.Errorf("a message without alerts is empty: %+v", msg)
 	}
 
-	_, out = rendered(t, notify.Message{Alerts: []alert.Alert{firingAlert(), firingAlert(), firingAlert()}})
-	if !strings.Contains(out, "and 2 more in this group") {
-		t.Errorf("a group of three does not mention the other two:\n%s", out)
-	}
 }
 
 // TestRenderEscapesAlertContent checks that nothing from an alert can add
@@ -300,5 +296,194 @@ func TestButtonsFollowTheState(t *testing.T) {
 				t.Errorf("buttons = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRenderLinks(t *testing.T) {
+	a := firingAlert()
+	a.Links = map[string]string{
+		alert.LinkGenerator: "http://prometheus.example.com:9090/graph?g0.expr=up+%3C+1&g0.tab=1",
+		alert.LinkDashboard: "https://grafana.example.com/d/abc",
+		alert.LinkPanel:     "https://grafana.example.com/d/abc?viewPanel=2",
+		alert.LinkSilence:   "javascript:alert(1)",
+		"other":             "https://example.com/not-shown",
+	}
+	msg, out := rendered(t, notify.Message{Alerts: []alert.Alert{a}})
+	want := "<http://prometheus.example.com:9090/graph?g0.expr=up+%3C+1&amp;g0.tab=1|:mag: Source> · " +
+		"<https://grafana.example.com/d/abc|:bar_chart: Dashboard> · " +
+		"<https://grafana.example.com/d/abc?viewPanel=2|:chart_with_upwards_trend: Panel>"
+	if len(msg.Blocks) != 5 || msg.Blocks[2].Type != "section" || msg.Blocks[2].Text.Text != want {
+		t.Errorf("links block = %+v, want %s", msg.Blocks[2], want)
+	}
+	if strings.Contains(out, "javascript") || strings.Contains(out, "not-shown") {
+		t.Errorf("the message has a link it should not:\n%s", out)
+	}
+
+	// Four links of the greatest length shown still fit in a section, and a
+	// longer one is left out rather than cut.
+	long := "https://grafana.example.com/" + strings.Repeat("d", maxLinkURL-len("https://grafana.example.com/"))
+	a.Links = map[string]string{alert.LinkGenerator: long, alert.LinkDashboard: long, alert.LinkPanel: long, alert.LinkSilence: long + "x"}
+	msg, _ = rendered(t, notify.Message{Alerts: []alert.Alert{a}})
+	if got := strings.Count(msg.Blocks[2].Text.Text, long); got != 3 || strings.Contains(msg.Blocks[2].Text.Text, "Silence") {
+		t.Errorf("links block has %d long links, want the three that fit: %s", got, msg.Blocks[2].Text.Text)
+	}
+}
+
+// groupOf builds a group message from alerts given as "host status severity".
+func groupOf(specs ...string) notify.Message {
+	m := notify.Message{Group: alert.Group{ID: "group-1", Labels: map[string]string{"alertname": "DiskFull", "cluster": "eu"}}}
+	for i, spec := range specs {
+		f := strings.Fields(spec)
+		a := alert.Alert{
+			ID: fmt.Sprintf("alert-%d", i), GroupID: "group-1", Fingerprint: f[0],
+			Status: alert.Status(f[1]), Severity: alert.Severity(f[2]),
+			Labels:      map[string]string{"alertname": "DiskFull", "cluster": "eu", "host": f[0]},
+			Annotations: map[string]string{"summary": "Disk is full on " + f[0], "description": "only shown for one alert"},
+			StartedAt:   t0.Add(time.Duration(i) * time.Minute),
+		}
+		at := t0.Add(time.Hour + time.Duration(i)*time.Minute)
+		switch a.Status {
+		case alert.StatusAcknowledged:
+			a.AcknowledgedAt = &at
+		case alert.StatusSnoozed:
+			a.SnoozedUntil = &at
+		case alert.StatusResolved:
+			a.ResolvedAt = &at
+		}
+		m.Alerts = append(m.Alerts, a)
+	}
+	return m
+}
+
+func TestRenderGroup(t *testing.T) {
+	m := groupOf("db1 resolved critical", "db2 firing warning", "db3 acknowledged critical", "db4 firing info")
+	m.Events = []alert.Event{{AlertID: "alert-2", Type: alert.EventAcknowledged, Actor: alert.ChatUser("slack", "U1", "alice")}}
+	msg, out := rendered(t, m)
+
+	if msg.Text != "[FIRING] critical: DiskFull · eu (4 alerts)" {
+		t.Errorf("fallback text = %q", msg.Text)
+	}
+	for _, want := range []string{
+		// Firing while any alert fires, with the worst severity that is open.
+		":red_circle: *Firing* · critical\\n*DiskFull · eu*\\n4 alerts: 2 firing, 1 acknowledged, 1 resolved",
+		// What the alerts share.
+		`"text":"` + "`alertname=DiskFull` `cluster=eu`" + `"`,
+		// Each alert, those that fire first, with what tells it apart.
+		":red_circle: Disk is full on db2 `host=db2`\\n:red_circle: Disk is full on db4 `host=db4`\\n" +
+			":large_yellow_circle: Disk is full on db3 `host=db3`\\n:large_green_circle: Disk is full on db1 `host=db1`",
+		// The alert that has fired longest.
+		"Firing since <!date^1772366460^",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("message does not contain %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "only shown for one alert") {
+		t.Errorf("a group shows the description of one of its alerts:\n%s", out)
+	}
+	if len(msg.Blocks) != 5 || msg.Blocks[4].Type != "actions" || len(msg.Blocks[4].Elements) != 3 {
+		t.Fatalf("blocks = %+v, want head, labels, list, context and the three buttons", msg.Blocks)
+	}
+	for _, e := range msg.Blocks[4].Elements {
+		if b := e.(button); b.Value != "group-1" {
+			t.Errorf("button %s acts on %q, want the group", b.ActionID, b.Value)
+		}
+	}
+}
+
+func TestRenderGroupStates(t *testing.T) {
+	alice := alert.ChatUser("slack", "U1", "alice")
+	tests := []struct {
+		name    string
+		alerts  []string
+		event   alert.Event
+		want    []string
+		buttons []string
+	}{
+		{
+			name:    "acknowledged once nothing fires",
+			alerts:  []string{"db1 acknowledged warning", "db2 acknowledged critical", "db3 resolved critical", "db4 snoozed info"},
+			event:   alert.Event{AlertID: "alert-1", Type: alert.EventAcknowledged, Actor: alice},
+			want:    []string{":large_yellow_circle: *Acknowledged* · critical", "4 alerts: 2 acknowledged, 1 snoozed, 1 resolved", "Acknowledged by alice"},
+			buttons: []string{actionAcknowledge, actionSnooze, actionResolve},
+		},
+		{
+			name:    "snoozed when the rest is resolved",
+			alerts:  []string{"db1 snoozed warning", "db2 resolved critical"},
+			event:   alert.Event{AlertID: "alert-0", Type: alert.EventSnoozed, Actor: alice},
+			want:    []string{":zzz: *Snoozed* · warning", "2 alerts: 1 snoozed, 1 resolved", "Snoozed by alice until"},
+			buttons: []string{actionAcknowledge, actionResolve},
+		},
+		{
+			name:   "resolved when all are",
+			alerts: []string{"db1 resolved warning", "db2 resolved critical"},
+			event:  alert.Event{AlertID: "alert-1", Type: alert.EventResolved, Actor: alert.Source("s")},
+			want:   []string{":large_green_circle: *Resolved* · critical", "2 alerts: 2 resolved", "Resolved by the source"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := groupOf(tt.alerts...)
+			m.Events = []alert.Event{tt.event}
+			msg, out := rendered(t, m)
+			for _, want := range tt.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("message does not contain %q:\n%s", want, out)
+				}
+			}
+			var got []string
+			if last := msg.Blocks[len(msg.Blocks)-1]; last.Type == "actions" {
+				for _, e := range last.Elements {
+					got = append(got, e.(button).ActionID)
+				}
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tt.buttons) {
+				t.Errorf("buttons = %v, want %v", got, tt.buttons)
+			}
+		})
+	}
+}
+
+// TestRenderLargeGroup checks the bounds: a group of many alerts with long
+// and hostile content still fits in Slack's limits, and says what it left
+// out.
+func TestRenderLargeGroup(t *testing.T) {
+	var specs []string
+	for i := range 40 {
+		specs = append(specs, fmt.Sprintf("db%d firing warning", i))
+	}
+	m := groupOf(specs...)
+	for i := range m.Alerts {
+		m.Alerts[i].Annotations["summary"] = "<!channel> " + strings.Repeat("é", 300)
+		m.Alerts[i].Labels["note"] = strings.Repeat("`<x>", 200)
+	}
+	m.Group.Labels = map[string]string{"alertname": strings.Repeat("N", 500), "cluster": "<!here>"}
+	msg, out := rendered(t, m) // rendered fails the test if a section is too long
+	if !strings.Contains(out, "… and 30 more") {
+		t.Errorf("the message does not count the alerts it left out:\n%s", out)
+	}
+	if got := strings.Count(msg.Blocks[2].Text.Text, ":red_circle:"); got != 10 {
+		t.Errorf("%d alerts are listed, want 10", got)
+	}
+	for _, bad := range []string{"<!channel>", "<!here>", "<x>"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("message contains unescaped %q", bad)
+		}
+	}
+	if len(msg.Text) > 400 {
+		t.Errorf("fallback text has %d bytes", len(msg.Text))
+	}
+
+	// A group whose alerts have no summary and no label of their own still
+	// lists something for each.
+	bare := groupOf("db1 firing info", "db2 firing info")
+	for i := range bare.Alerts {
+		bare.Alerts[i].Annotations = nil
+		bare.Alerts[i].Labels = map[string]string{"alertname": "DiskFull", "cluster": "eu"}
+	}
+	bare.Group.Labels = nil
+	msg, _ = rendered(t, bare)
+	if msg.Text != "[FIRING] info: Alerts (2 alerts)" || !strings.Contains(msg.Blocks[1].Text.Text, "`alertname=DiskFull` `cluster=eu`") {
+		t.Errorf("bare group: text %q, blocks %+v", msg.Text, msg.Blocks)
 	}
 }

@@ -72,7 +72,8 @@ func TestMain(m *testing.M) {
 
 // configuration is what the tests provision: one webhook source, one Slack
 // integration, and a default escalation policy whose first step names the
-// channel that is told about every alert. Secrets are references, as they
+// channel that is told about every alert group. A group is told about at
+// once and may be updated every second, so the tests need not wait long. Secrets are references, as they
 // must be; the values are in the process environment.
 const configuration = `sources:
   - name: e2e
@@ -92,6 +93,8 @@ escalation_policies:
             integration: slack
         timeout: 5m
 routing:
+  group_wait: 0s
+  group_interval: 1s
   default:
     escalation_policy: default
 `
@@ -251,6 +254,13 @@ func (b *beacon) webhook(payload string) (int, map[string]string) {
 // webhookTo is webhook for another source with the same token.
 func (b *beacon) webhookTo(source, payload string) (int, map[string]string) {
 	b.t.Helper()
+	var out map[string]string
+	return b.deliver(source, payload, &out), out
+}
+
+// deliver sends a payload to a source and decodes the response into out.
+func (b *beacon) deliver(source, payload string, out any) int {
+	b.t.Helper()
 	req, err := http.NewRequest(http.MethodPost, b.url+"/api/v1/ingest/"+source, strings.NewReader(payload))
 	if err != nil {
 		b.t.Fatalf("new request: %v", err)
@@ -263,11 +273,10 @@ func (b *beacon) webhookTo(source, payload string) (int, map[string]string) {
 	}
 	defer resp.Body.Close() //nolint:errcheck // test cleanup
 	raw, _ := io.ReadAll(resp.Body)
-	var out map[string]string
-	if err := json.Unmarshal(raw, &out); err != nil {
-		b.t.Fatalf("webhook answered %d %q, not a JSON object", resp.StatusCode, raw)
+	if err := json.Unmarshal(raw, out); err != nil {
+		b.t.Fatalf("webhook answered %d %q, not the expected JSON", resp.StatusCode, raw)
 	}
-	return resp.StatusCode, out
+	return resp.StatusCode
 }
 
 // click presses a button on a Slack message as a Slack user.
@@ -506,6 +515,592 @@ func TestSourceResolvesAnAlertNobodyTook(t *testing.T) {
 			t.Fatalf("Slack has %d messages, want a second one for the new alert", len(b.slack.Messages()))
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitForMessages waits until Slack has n messages that all satisfy cond, and
+// returns them.
+func (b *beacon) waitForMessages(what string, n int, cond func(slacktest.Message) bool) []slacktest.Message {
+	b.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		msgs := b.slack.Messages()
+		ok := len(msgs) == n
+		for _, m := range msgs {
+			ok = ok && cond(m)
+		}
+		if ok {
+			return msgs
+		}
+		if time.Now().After(deadline) {
+			b.t.Fatalf("timed out waiting for %s; Slack has: %+v", what, msgs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// captured reads a payload that a real sender produced, from the fixtures of
+// the ingest package.
+func captured(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "ingest", "testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// TestAlertmanagerSource delivers what a real Alertmanager sent about a group
+// of two alerts: firing, repeated, one resolved, both resolved.
+func TestAlertmanagerSource(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, strings.Replace(configuration, "type: webhook", "type: alertmanager", 1)))
+	b.waitUntilServing()
+	deliver := func(fixture string) map[string]int {
+		t.Helper()
+		var res map[string]any
+		if code := b.deliver("e2e", captured(t, fixture), &res); code != http.StatusOK || res["result"] != "accepted" {
+			t.Fatalf("%s = %d %v, want 200 accepted", fixture, code, res)
+		}
+		counts := map[string]int{}
+		for k, v := range res {
+			if n, ok := v.(float64); ok && n != 0 {
+				counts[k] = int(n)
+			}
+		}
+		return counts
+	}
+
+	if got := deliver("alertmanager/firing.json"); got["received"] != 2 || got["created"] != 2 {
+		t.Fatalf("firing = %v, want two alerts created", got)
+	}
+	// Both alerts are DiskFull, so they are one group and one message.
+	msg := b.message("the group in Slack", contains("*Firing* · critical", "2 alerts: 2 firing", "Disk is full on db1", "Disk is filling up on db2"))
+	if msg.Text != "[FIRING] critical: DiskFull (2 alerts)" || !strings.Contains(msg.JSON(), "`instance=db1.example.com:9100`") {
+		t.Errorf("message = %s", msg.JSON())
+	}
+
+	// The repeat that Alertmanager sends every repeat_interval changes
+	// nothing and tells nobody.
+	if got := deliver("alertmanager/firing.json"); got["updated"] != 2 || got["created"] != 0 {
+		t.Fatalf("repeated firing = %v, want two alerts updated", got)
+	}
+	if got := deliver("alertmanager/some-resolved.json"); got["updated"] != 1 || got["resolved"] != 1 {
+		t.Fatalf("one resolved = %v", got)
+	}
+	b.message("the partly resolved group in Slack", contains("*Firing* · critical", "2 alerts: 1 firing, 1 resolved"))
+	if got := deliver("alertmanager/resolved.json"); got["resolved"] != 1 {
+		t.Fatalf("all resolved = %v", got)
+	}
+	msg = b.message("the resolved group in Slack", contains("*Resolved*", "2 alerts: 2 resolved", "Resolved by the source"))
+	if strings.Contains(msg.JSON(), `"actions"`) {
+		t.Errorf("the resolved message still has buttons:\n%s", msg.JSON())
+	}
+
+	var alerts, groups int
+	err := b.db.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM alerts WHERE status = 'resolved'), (SELECT count(*) FROM alert_groups WHERE status = 'resolved')`).Scan(&alerts, &groups)
+	if err != nil || alerts != 2 || groups != 1 {
+		t.Errorf("%d resolved alerts in %d resolved groups, %v; want 2 in 1", alerts, groups, err)
+	}
+	if n := len(b.slack.Calls("chat.postMessage")); n != 1 {
+		t.Errorf("%d messages were posted, want 1", n)
+	}
+	if strings.Contains(b.output(), sourceToken) {
+		t.Errorf("the logs contain the source token")
+	}
+}
+
+// TestGrafanaSource delivers what a real Grafana sent about an alert of a
+// rule that is linked to a dashboard panel: firing, then resolved.
+func TestGrafanaSource(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, strings.Replace(configuration, "type: webhook", "type: grafana", 1)))
+	b.waitUntilServing()
+
+	var res map[string]any
+	if code := b.deliver("e2e", captured(t, "grafana/firing.json"), &res); code != http.StatusOK || res["created"] != float64(1) {
+		t.Fatalf("firing = %d %v, want one alert created", code, res)
+	}
+	msg := b.message("the alert in Slack", contains("*Firing* · warning", "Latency is high on api1"))
+	for _, want := range []string{
+		"http://localhost:13000/alerting/grafana/beacon-demo-latency/view?orgId=1|:mag: Source",
+		"|:bar_chart: Dashboard", "viewPanel=1|:chart_with_upwards_trend: Panel", "|:no_bell: Silence at the source",
+		"`grafana_folder=Beacon`",
+	} {
+		if !strings.Contains(msg.JSON(), want) {
+			t.Errorf("the message does not contain %q:\n%s", want, msg.JSON())
+		}
+	}
+
+	if code := b.deliver("e2e", captured(t, "grafana/resolved.json"), &res); code != http.StatusOK || res["resolved"] != float64(1) {
+		t.Fatalf("resolved = %d %v, want one alert resolved", code, res)
+	}
+	b.message("the resolution in Slack", contains("*Resolved*", "Resolved by the source", "|:bar_chart: Dashboard"))
+}
+
+// threeSources is the configuration with a source of each type. They share
+// one token.
+var threeSources = strings.Replace(configuration, "sources:\n", `sources:
+  - name: am
+    type: alertmanager
+    token: {env: BEACON_SOURCE_TOKEN}
+  - name: grafana
+    type: grafana
+    token: {env: BEACON_SOURCE_TOKEN}
+`, 1)
+
+// TestConcurrentDeliveries sends the same notification to each type of
+// source from several clients at once, over real connections, and then
+// resolves it the same way. Each alert exists once, is told to Slack once
+// and is resolved once, however the deliveries interleave.
+func TestConcurrentDeliveries(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, threeSources))
+	b.waitUntilServing()
+	const clients, repeats = 8, 4
+
+	storm := func(payloads map[string]string) {
+		t.Helper()
+		var wg sync.WaitGroup
+		for source, payload := range payloads {
+			for range clients {
+				wg.Go(func() {
+					// Each client has its own connections, as separate senders do.
+					client := &http.Client{Transport: &http.Transport{}}
+					defer client.CloseIdleConnections()
+					for range repeats {
+						req, err := http.NewRequest(http.MethodPost, b.url+"/api/v1/ingest/"+source, strings.NewReader(payload))
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						req.Header.Set("Authorization", "Bearer "+sourceToken)
+						resp, err := client.Do(req)
+						if err != nil {
+							t.Errorf("%s: %v", source, err)
+							return
+						}
+						_, _ = io.Copy(io.Discard, resp.Body)
+						_ = resp.Body.Close()
+						if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+							t.Errorf("%s: status %d", source, resp.StatusCode)
+						}
+					}
+				})
+			}
+		}
+		wg.Wait()
+	}
+	count := func(query string) (n int) {
+		t.Helper()
+		if err := b.db.QueryRow(context.Background(), query).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	storm(map[string]string{"e2e": diskFull, "am": captured(t, "alertmanager/firing.json"), "grafana": captured(t, "grafana/firing.json")})
+	if alerts, firing := count(`SELECT count(*) FROM alerts`), count(`SELECT count(*) FROM alerts WHERE status = 'firing'`); alerts != 4 || firing != 4 {
+		t.Fatalf("%d alerts, %d firing, after %d deliveries to each source; want the 4 distinct alerts", alerts, firing, clients*repeats)
+	}
+	// The three DiskFull alerts, from two sources, are one group; Grafana's
+	// HighLatency is another. Groups, like alerts, are not duplicated by
+	// deliveries that arrive together.
+	if groups := count(`SELECT count(*) FROM alert_groups`); groups != 2 {
+		t.Fatalf("%d groups, want 2", groups)
+	}
+	b.waitForMessages("one message per group", 2, func(m slacktest.Message) bool {
+		return strings.Contains(m.JSON(), "3 alerts: 3 firing") || strings.Contains(m.JSON(), "Latency is high on api1")
+	})
+
+	storm(map[string]string{"e2e": diskFullResolved, "am": captured(t, "alertmanager/resolved.json"), "grafana": captured(t, "grafana/resolved.json")})
+	// Alertmanager's last notification resolved one of its two alerts.
+	if alerts, resolved := count(`SELECT count(*) FROM alerts`), count(`SELECT count(*) FROM alerts WHERE status = 'resolved'`); alerts != 4 || resolved != 3 {
+		t.Fatalf("%d alerts, %d resolved, want 4 and 3", alerts, resolved)
+	}
+	b.waitForMessages("the resolutions in Slack", 2, func(m slacktest.Message) bool {
+		return strings.Contains(m.JSON(), "3 alerts: 1 firing, 2 resolved") || strings.Contains(m.JSON(), "*Resolved*")
+	})
+	// Each alert fired once and resolved once, whatever was repeated.
+	if got := count(`SELECT count(*) FROM alert_events WHERE type IN ('fired', 'resolved')`); got != 7 {
+		t.Errorf("%d fired and resolved events, want 7", got)
+	}
+	if n := len(b.slack.Calls("chat.postMessage")); n != 2 {
+		t.Errorf("%d messages were posted to Slack, want 2", n)
+	}
+}
+
+// groupStates reads the states of the alerts with an alert name, as
+// "host=state" in host order.
+func (b *beacon) groupStates(alertname string) string {
+	b.t.Helper()
+	rows, err := b.db.Query(context.Background(), `SELECT (labels->>'host') || '=' || status FROM alerts WHERE labels->>'alertname' = $1 ORDER BY 1`, alertname)
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	states, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	return strings.Join(states, " ")
+}
+
+// find waits for the one Slack message that satisfies cond, among others.
+func (b *beacon) find(what string, cond func(slacktest.Message) bool) slacktest.Message {
+	b.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var found []slacktest.Message
+		for _, m := range b.slack.Messages() {
+			if cond(m) {
+				found = append(found, m)
+			}
+		}
+		if len(found) == 1 {
+			return found[0]
+		}
+		if time.Now().After(deadline) {
+			b.t.Fatalf("timed out waiting for %s; Slack has: %+v", what, b.slack.Messages())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestGrouping follows a group through the real binary: it forms, gains
+// alerts, is acknowledged from Slack as a whole, and resolves, in one Slack
+// message throughout.
+func TestGrouping(t *testing.T) {
+	b := start(t)
+	fire := func(alertname, host string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"labels": {"alertname": %q, "host": %q, "severity": "warning"}, "annotations": {"summary": %q}}`, alertname, host, alertname+" on "+host)
+		if code, res := b.webhook(body); code != http.StatusCreated {
+			t.Fatalf("webhook = %d %v", code, res)
+		}
+	}
+	resolve := func(alertname, host string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"status": "resolved", "labels": {"alertname": %q, "host": %q, "severity": "warning"}}`, alertname, host)
+		if code, res := b.webhook(body); code != http.StatusOK || res["result"] != "resolved" {
+			t.Fatalf("resolve webhook = %d %v", code, res)
+		}
+	}
+	diskFull := func(substrings ...string) func(slacktest.Message) bool {
+		return contains(append([]string{"DiskFull"}, substrings...)...)
+	}
+
+	// 1. One alert: the message is about that alert.
+	fire("DiskFull", "db1")
+	msg := b.find("the first alert in Slack", diskFull("*Firing* · warning", "*DiskFull on db1*"))
+	if msg.Text != "[FIRING] warning: DiskFull on db1" {
+		t.Errorf("text = %q", msg.Text)
+	}
+
+	// 2. A second alert with the same name joins: the same message now
+	// shows the group. An alert with another name gets a message of its own.
+	fire("DiskFull", "db2")
+	fire("HighLoad", "web1")
+	msg = b.find("the group in Slack", diskFull("2 alerts: 2 firing", "DiskFull on db1 `host=db1`", "DiskFull on db2 `host=db2`"))
+	if msg.Text != "[FIRING] warning: DiskFull (2 alerts)" {
+		t.Errorf("text = %q", msg.Text)
+	}
+	b.find("the other alert in Slack", contains("*HighLoad on web1*"))
+
+	// 3. Acknowledging the group from Slack acknowledges its alerts, and
+	// only its alerts.
+	alice := slacktest.User{ID: "U0ALICE", Username: "alice"}
+	if code := b.click(msg, "beacon_acknowledge", alice); code != http.StatusOK {
+		t.Fatalf("acknowledge = %d", code)
+	}
+	if got := b.groupStates("DiskFull"); got != "db1=acknowledged db2=acknowledged" {
+		t.Fatalf("DiskFull alerts = %s, want both acknowledged", got)
+	}
+	if got := b.groupStates("HighLoad"); got != "web1=firing" {
+		t.Errorf("HighLoad alerts = %s, want it untouched", got)
+	}
+	b.find("the acknowledgement in Slack", diskFull("*Acknowledged*", "2 alerts: 2 acknowledged", "Acknowledged by alice"))
+
+	// 4. A third alert joins the acknowledged group: it is new, so the
+	// group fires again.
+	fire("DiskFull", "db3")
+	msg = b.find("the new alert in the group", diskFull("*Firing*", "3 alerts: 1 firing, 2 acknowledged"))
+	if !strings.Contains(msg.JSON(), "beacon_acknowledge") {
+		t.Errorf("the message does not offer to acknowledge the new alert:\n%s", msg.JSON())
+	}
+
+	// 5. The source resolves them one by one; the message follows, and ends
+	// resolved without buttons.
+	resolve("DiskFull", "db3")
+	b.find("one resolution in Slack", diskFull("*Acknowledged*", "3 alerts: 2 acknowledged, 1 resolved"))
+	resolve("DiskFull", "db1")
+	resolve("DiskFull", "db2")
+	msg = b.find("the resolved group in Slack", diskFull("*Resolved*", "3 alerts: 3 resolved"))
+	if strings.Contains(msg.JSON(), `"actions"`) {
+		t.Errorf("the resolved message still has buttons:\n%s", msg.JSON())
+	}
+
+	// 6. Two groups, two messages, however many alerts and changes.
+	if n := len(b.slack.Calls("chat.postMessage")); n != 2 {
+		t.Errorf("%d messages were posted, want 2", n)
+	}
+	var open, resolved int
+	if err := b.db.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE status = 'open'), count(*) FILTER (WHERE status = 'resolved') FROM alert_groups`).Scan(&open, &resolved); err != nil || open != 1 || resolved != 1 {
+		t.Errorf("%d open and %d resolved groups, %v; want 1 and 1", open, resolved, err)
+	}
+
+	// 7. The same problem again is a new group with a new message.
+	fire("DiskFull", "db1")
+	b.find("the new group in Slack", diskFull("*Firing*", "*DiskFull on db1*"))
+	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
+		t.Errorf("%d messages were posted, want 3", n)
+	}
+}
+
+// routingConfiguration routes by two rules and a default, each to a channel
+// of its own. The policy "urgent" also names a person and a second step,
+// which do nothing until the escalation engine exists.
+const routingConfiguration = `sources:
+  - name: e2e
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}
+    severity:
+      label: priority
+      mapping: {P1: critical, P2: warning}
+      default: info
+integrations:
+  - name: slack
+    type: slack
+    slack:
+      bot_token: {env: BEACON_SLACK_BOT_TOKEN}
+      signing_secret: {file: signing-secret}
+teams:
+  - name: dba
+  - name: platform
+escalation_policies:
+  - name: default
+    steps:
+      - notify: [{channel: C0ALERTS, integration: slack}]
+        timeout: 5m
+  - name: dba
+    steps:
+      - notify: [{channel: C0DBA, integration: slack}]
+        timeout: 5m
+  - name: urgent
+    repeat: 1
+    steps:
+      - notify:
+          - user: ada@example.com
+          - channel: C0URGENT
+            integration: slack
+        timeout: 5m
+      - notify: [{team: platform}]
+        timeout: 5m
+routing:
+  group_wait: 0s
+  group_interval: 1s
+  default:
+    team: platform
+    escalation_policy: default
+  rules:
+    - name: database
+      match: {team: dba}
+      team: dba
+      service: postgres
+      escalation_policy: dba
+    - name: pages
+      match_re: {priority: "P1|page"}
+      escalation_policy: urgent
+`
+
+// TestRouting sends alerts that match the first rule, a later rule and no
+// rule through the real binary, and follows each to its channel.
+func TestRouting(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, routingConfiguration))
+	b.slack.AddChannel("dba", "C0DBA")
+	b.slack.AddChannel("urgent", "C0URGENT")
+	b.waitUntilServing()
+	fire := func(labels string) string {
+		t.Helper()
+		code, res := b.webhook(`{"labels": ` + labels + `}`)
+		if code != http.StatusCreated {
+			t.Fatalf("webhook = %d %v", code, res)
+		}
+		return res["alert_id"]
+	}
+	// routed reads what routing stored for an alert.
+	routed := func(alertID string) string {
+		t.Helper()
+		var got string
+		err := b.db.QueryRow(context.Background(), `
+			SELECT 'rule=' || COALESCE(r.name, '-') || ' team=' || COALESCE(t.name, '-') || ' service=' || COALESCE(a.service, '-') ||
+				' policy=' || COALESCE(p.name, '-') || ' severity=' || a.severity
+			FROM alerts a JOIN alert_groups g ON g.id = a.group_id
+			LEFT JOIN routing_rules r ON r.id = a.routing_rule_id LEFT JOIN teams t ON t.id = a.team_id
+			LEFT JOIN escalation_policies p ON p.id = g.escalation_policy_id WHERE a.id = $1`, alertID).Scan(&got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	inChannel := func(channel, text string) func(slacktest.Message) bool {
+		return func(m slacktest.Message) bool { return m.Channel == channel && strings.Contains(m.JSON(), text) }
+	}
+
+	// 1. The first rule. The second would match too; the first one wins.
+	first := fire(`{"alertname": "ReplicationLag", "team": "dba", "priority": "P1", "service": "from-the-alert"}`)
+	if got, want := routed(first), "rule=database team=dba service=postgres policy=dba severity=critical"; got != want {
+		t.Errorf("first rule: %s, want %s", got, want)
+	}
+	b.find("the database alert in its channel", inChannel("C0DBA", "ReplicationLag"))
+
+	// 2. A later rule, by a regular expression.
+	second := fire(`{"alertname": "CheckoutDown", "priority": "page", "service": "checkout"}`)
+	if got, want := routed(second), "rule=pages team=- service=checkout policy=urgent severity=info"; got != want {
+		t.Errorf("later rule: %s, want %s", got, want)
+	}
+	b.find("the page in its channel", inChannel("C0URGENT", "CheckoutDown"))
+
+	// 3. No rule: the default. The pattern is anchored, so P10 is not P1.
+	third := fire(`{"alertname": "DiskFilling", "priority": "P10"}`)
+	if got, want := routed(third), "rule=- team=platform service=- policy=default severity=info"; got != want {
+		t.Errorf("default: %s, want %s", got, want)
+	}
+	b.find("the unmatched alert in the default channel", inChannel("C0ALERTS", "DiskFilling"))
+	if got, want := b.metrics("beacon_routing_unmatched_alerts_total"), `beacon_routing_unmatched_alerts_total{source="e2e"} 1`; got != want {
+		t.Errorf("metric:\n%s\nwant:\n%s", got, want)
+	}
+
+	// Each alert went to one channel, and the person in the first step of
+	// "urgent" was told nothing: the log says that such targets do nothing
+	// yet.
+	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
+		t.Errorf("%d messages were posted, want 3", n)
+	}
+	var destinations string
+	if err := b.db.QueryRow(context.Background(), `SELECT string_agg(destination, ',' ORDER BY destination) FROM notifications`).Scan(&destinations); err != nil || destinations != "C0ALERTS,C0DBA,C0URGENT" {
+		t.Errorf("notifications went to %q, %v", destinations, err)
+	}
+	if !strings.Contains(b.output(), `"msg":"escalation is not implemented yet: only the channel targets of a policy's first step are notified, once; its schedule, team and user targets, its later steps and its repeats do nothing","policy":"urgent","first_step_people_targets_skipped":1,"later_steps_skipped":1,"repeats_skipped":1`) {
+		t.Errorf("the log does not say what of the policy is skipped")
+	}
+
+	// 4. A reload changes the rules for alerts that arrive afterwards. The
+	// alert that is open keeps the route it was given.
+	b.reload(strings.Replace(routingConfiguration, "match: {team: dba}", "match: {team: storage}", 1), 1)
+	fourth := fire(`{"alertname": "SlowQueries", "team": "dba", "priority": "P2"}`)
+	if got, want := routed(fourth), "rule=- team=platform service=- policy=default severity=warning"; got != want {
+		t.Errorf("after the reload: %s, want %s", got, want)
+	}
+	b.find("the alert in the default channel after the reload", inChannel("C0ALERTS", "SlowQueries"))
+	if got, want := routed(first), "rule=database team=dba service=postgres policy=dba severity=critical"; got != want {
+		t.Errorf("the open alert after the reload: %s, want %s", got, want)
+	}
+	if got, want := b.metrics("beacon_routing_unmatched_alerts_total"), `beacon_routing_unmatched_alerts_total{source="e2e"} 2`; got != want {
+		t.Errorf("metric after the reload: %s", got)
+	}
+
+	// 5. A configuration whose rule has a broken pattern is rejected whole,
+	// and names the field.
+	logs := b.reload(strings.Replace(routingConfiguration, `"P1|page"`, `"P1|(page"`, 1), 2)
+	if !strings.Contains(logs, `"object":"routing rule \"pages\"","field":"match_re.priority","problem":"is not a regular expression: missing closing )`) {
+		t.Errorf("the rejected pattern is not named in the logs")
+	}
+	if got := routed(fire(`{"alertname": "StillRouted", "priority": "page"}`)); !strings.HasPrefix(got, "rule=pages ") {
+		t.Errorf("after the rejected reload: %s, want the rules that were active", got)
+	}
+}
+
+// TestReloadChangesGrouping: the labels that define a group follow the
+// configuration. Alerts that arrive after a reload are grouped the new way;
+// the groups that exist stay as they are.
+func TestReloadChangesGrouping(t *testing.T) {
+	b := start(t)
+	fire := func(alertname, host string) {
+		t.Helper()
+		if code, res := b.webhook(fmt.Sprintf(`{"labels": {"alertname": %q, "host": %q}}`, alertname, host)); code != http.StatusCreated && code != http.StatusOK {
+			t.Fatalf("webhook = %d %v", code, res)
+		}
+	}
+	groups := func() string {
+		t.Helper()
+		rows, err := b.db.Query(context.Background(), `SELECT string_agg(a.labels->>'alertname' || '@' || (a.labels->>'host'), '+' ORDER BY a.labels->>'alertname', a.labels->>'host')
+			FROM alerts a GROUP BY a.group_id ORDER BY 1`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(got, " | ")
+	}
+
+	fire("DiskFull", "db1")
+	fire("DiskFull", "db2")
+	fire("HighLoad", "db1")
+	if got, want := groups(), "DiskFull@db1+DiskFull@db2 | HighLoad@db1"; got != want {
+		t.Fatalf("groups by alertname = %s, want %s", got, want)
+	}
+
+	logs := b.reload(strings.Replace(configuration, "routing:\n", "routing:\n  group_by: [host]\n", 1), 1)
+	if !strings.Contains(logs, `"msg":"alerts are routed and grouped","rules":0,"group_by":["host"]`) {
+		t.Errorf("the new grouping is not in the logs")
+	}
+	fire("DiskFull", "db3")
+	fire("HighLoad", "db3")
+	fire("HighLoad", "db1")
+	// db3's two alerts share a group now. HighLoad@db1 is open already and
+	// stays in its group.
+	if got, want := groups(), "DiskFull@db1+DiskFull@db2 | DiskFull@db3+HighLoad@db3 | HighLoad@db1"; got != want {
+		t.Errorf("groups after the reload = %s, want %s", got, want)
+	}
+}
+
+// TestGroupWaitSurvivesARestart stops the process while a group waits for
+// its first notification. The wait is a row in Postgres, not a timer in the
+// process: two new processes start on the database, and between them they
+// send the notification once.
+func TestGroupWaitSurvivesARestart(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	cfg := strings.Replace(configuration, "group_wait: 0s", "group_wait: 3s", 1)
+	first := launch(t, dbURL, writeConfig(t, cfg))
+	first.waitUntilServing()
+	if code, res := first.webhook(diskFull); code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	if code := first.terminate(); code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	sentByFirst := len(first.slack.Messages())
+
+	replicas := []*beacon{launch(t, dbURL, writeConfig(t, cfg)), launch(t, dbURL, writeConfig(t, cfg))}
+	for _, r := range replicas {
+		r.waitUntilServing()
+	}
+	total := func() int { return sentByFirst + len(replicas[0].slack.Messages()) + len(replicas[1].slack.Messages()) }
+	deadline := time.Now().Add(30 * time.Second)
+	for total() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no process sent the notification of the group that was waiting")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// The notification is on record as sent, once, and nothing else is due.
+	var sent, due int
+	for {
+		err := first.db.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM notifications WHERE status = 'sent'),
+			(SELECT count(*) FROM notifications WHERE status = 'pending') + (SELECT count(*) FROM alert_groups WHERE notify_at IS NOT NULL)`).Scan(&sent, &due)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (sent > 0 && due == 0) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if sent != 1 || due != 0 || total() != 1 {
+		t.Errorf("%d notifications sent, %d due, %d messages in Slack; want 1, 0 and 1", sent, due, total())
 	}
 }
 
@@ -1164,5 +1759,202 @@ func TestBootstrapAdminAndTokens(t *testing.T) {
 		if strings.Contains(logs, secret) {
 			t.Errorf("the logs contain %s", name)
 		}
+	}
+}
+
+// bootstrapConfiguration is the test configuration with the bootstrap admin
+// as the way to sign in.
+const bootstrapConfiguration = configuration + `auth:
+  public_url: ` + oidctest.PublicURL + `
+  bootstrap_admin:
+    password_hash: {env: BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH}
+`
+
+// signedIn starts Beacon with the bootstrap admin and returns a browser that
+// is signed in as that admin, a client without cookies, and a member token.
+func signedIn(t *testing.T) (b *beacon, admin, bare *http.Client, memberToken string) {
+	t.Helper()
+	dbURL := postgrestest.NewURL(t)
+	b = launch(t, dbURL, writeConfig(t, bootstrapConfiguration))
+	b.waitUntilServing()
+	addr := strings.TrimPrefix(b.url, "http://")
+	admin = oidctest.Browser(t, addr)
+	bare = oidctest.Browser(t, addr)
+	bare.Jar = nil
+	if code, who := b.api(admin, "POST", "/auth/bootstrap", "", `{"password": "`+bootstrapPassword+`"}`); code != http.StatusOK || who["role"] != "admin" {
+		t.Fatalf("bootstrap sign-in = %d %v", code, who)
+	}
+	code, created := b.api(admin, "POST", "/api/v1/tokens", "", `{"name": "responder", "role": "member"}`)
+	memberToken, _ = created["token"].(string)
+	if code != http.StatusCreated || memberToken == "" {
+		t.Fatalf("create the member token = %d %v", code, created)
+	}
+	return b, admin, bare, memberToken
+}
+
+// TestSilencesAPI creates, reads and expires silences through the real
+// binary, as a member with a token and as an admin with a session.
+func TestSilencesAPI(t *testing.T) {
+	b, admin, bare, memberToken := signedIn(t)
+	const request = `{"matchers": [{"label": "alertname", "operator": "=", "value": "DiskFull"}], "duration": "1h", "comment": "replacing the disk"}`
+
+	// Nobody without a credential, and nobody with one that was never issued.
+	for _, probe := range [][2]string{{"GET", "/api/v1/silences"}, {"POST", "/api/v1/silences"}, {"GET", "/api/v1/silences/x"}, {"DELETE", "/api/v1/silences/x"}} {
+		for _, token := range []string{"", "bcn_never-issued"} {
+			if code, body := b.api(bare, probe[0], probe[1], token, request); code != http.StatusUnauthorized {
+				t.Errorf("%s %s with the token %q = %d %v, want 401", probe[0], probe[1], token, code, body)
+			}
+		}
+	}
+	// The token of a source is not a credential for the API.
+	if code, _ := b.api(bare, "POST", "/api/v1/silences", sourceToken, request); code != http.StatusUnauthorized {
+		t.Errorf("create with the source token = %d, want 401", code)
+	}
+
+	// A member creates one with a token: the token is the author.
+	code, byMember := b.api(bare, "POST", "/api/v1/silences", memberToken, request)
+	if code != http.StatusCreated || byMember["created_by_token"] != "responder" || byMember["created_by"] != nil || byMember["state"] != "active" {
+		t.Fatalf("create as a member = %d %v", code, byMember)
+	}
+	// An admin creates one in the browser: the user is the author.
+	code, byAdmin := b.api(admin, "POST", "/api/v1/silences", "", `{"matchers": [{"label": "team", "operator": "=~", "value": "dba|storage"}], "duration": "30m", "comment": "migration"}`)
+	if code != http.StatusCreated || byAdmin["created_by"] != "bootstrap-admin@beacon.invalid" || byAdmin["created_by_token"] != nil {
+		t.Fatalf("create as an admin = %d %v", code, byAdmin)
+	}
+	// A request that is not a silence is refused, with the field at fault.
+	if code, body := b.api(bare, "POST", "/api/v1/silences", memberToken, `{"matchers": [{"label": "a", "operator": "=~", "value": "(x"}], "duration": "1h", "comment": "x"}`); code != http.StatusBadRequest || body["field"] != "matchers[0].value" {
+		t.Errorf("a broken pattern = %d %v, want 400 at matchers[0].value", code, body)
+	}
+
+	// Both see both, and the member may end the admin's.
+	for who, client := range map[string]*http.Client{"member": bare, "admin": admin} {
+		token := map[string]string{"member": memberToken}[who]
+		code, list := b.api(client, "GET", "/api/v1/silences", token, "")
+		if silences, _ := list["silences"].([]any); code != http.StatusOK || len(silences) != 2 {
+			t.Errorf("list as the %s = %d %v, want both silences", who, code, list)
+		}
+	}
+	adminsID, _ := byAdmin["id"].(string)
+	if code, body := b.api(bare, "DELETE", "/api/v1/silences/"+adminsID, memberToken, ""); code != http.StatusNoContent {
+		t.Fatalf("a member expires the admin's silence = %d %v, want 204", code, body)
+	}
+	if code, got := b.api(admin, "GET", "/api/v1/silences/"+adminsID, "", ""); code != http.StatusOK || got["state"] != "expired" {
+		t.Errorf("the expired silence = %d %v", code, got)
+	}
+	code, list := b.api(bare, "GET", "/api/v1/silences", memberToken, "")
+	if silences, _ := list["silences"].([]any); code != http.StatusOK || len(silences) != 1 {
+		t.Errorf("list after the expiry = %d %v, want the one that is left", code, list)
+	}
+
+	// What is stored: the matchers, exactly one author each, and a period
+	// that the expiry cut short. The periods are compared with each other, not
+	// with the database's clock, which need not agree with Beacon's.
+	rows, err := b.db.Query(context.Background(), `SELECT comment || ': ' || matchers::text || ' user=' || (created_by IS NOT NULL)::text || ' token=' || (created_by_token IS NOT NULL)::text ||
+		' cut_short=' || (ends_at - starts_at < interval '30 minutes')::text FROM silences ORDER BY created_at`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	want := []string{
+		`replacing the disk: [{"label": "alertname", "value": "DiskFull", "operator": "="}] user=false token=true cut_short=false`,
+		`migration: [{"label": "team", "value": "dba|storage", "operator": "=~"}] user=true token=false cut_short=true`,
+	}
+	if err != nil || strings.Join(stored, "\n") != strings.Join(want, "\n") {
+		t.Errorf("stored:\n%s\n%v\nwant:\n%s", strings.Join(stored, "\n"), err, strings.Join(want, "\n"))
+	}
+	for _, secret := range []string{memberToken, sourceToken} {
+		if strings.Contains(b.output(), secret) {
+			t.Errorf("the logs contain a credential")
+		}
+	}
+}
+
+// TestSilences follows alerts under a silence through the real binary: an
+// alert that arrives while a silence matches it is stored and tells nobody;
+// the rest of its group is told about without it; and when the silence is
+// expired, or runs out, what it held back is told.
+func TestSilences(t *testing.T) {
+	b, admin, bare, memberToken := signedIn(t)
+	fire := func(alertname, host string) string {
+		t.Helper()
+		body := fmt.Sprintf(`{"labels": {"alertname": %q, "host": %q}, "annotations": {"summary": %q}}`, alertname, host, alertname+" on "+host)
+		code, res := b.webhook(body)
+		if code != http.StatusCreated {
+			t.Fatalf("webhook = %d %v", code, res)
+		}
+		return res["alert_id"]
+	}
+	silenceHost := func(client *http.Client, token, host, duration string) string {
+		t.Helper()
+		code, created := b.api(client, "POST", "/api/v1/silences", token,
+			fmt.Sprintf(`{"matchers": [{"label": "host", "operator": "=", "value": %q}], "duration": %q, "comment": "work on %s"}`, host, duration, host))
+		if code != http.StatusCreated {
+			t.Fatalf("create silence = %d %v", code, created)
+		}
+		return created["id"].(string)
+	}
+	// heldBack waits until Beacon has looked at the alert's group and found
+	// that a silence keeps its notification back.
+	heldBack := func(alertID, silenceID string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			var waitsFor string
+			err := b.db.QueryRow(context.Background(), `SELECT COALESCE(g.silence_id::text, '') FROM alerts a JOIN alert_groups g ON g.id = a.group_id WHERE a.id = $1`, alertID).Scan(&waitsFor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if waitsFor == silenceID {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the group of the alert waits for %q, want the silence %s", waitsFor, silenceID)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	// 1. A member silences db1. An alert from db1 is recorded, and Slack
+	// hears nothing.
+	silenceID := silenceHost(bare, memberToken, "db1", "1h")
+	db1 := fire("DiskFull", "db1")
+	heldBack(db1, silenceID)
+	if got := b.status(db1); got != "firing" {
+		t.Errorf("the silenced alert is %s, want it recorded as firing", got)
+	}
+	if msgs := b.slack.Messages(); len(msgs) != 0 {
+		t.Fatalf("Slack was told about a silenced alert: %+v", msgs)
+	}
+	if got := b.timeline(db1, 2); strings.Join(got, ",") != "fired by source,notification_silenced by system" {
+		t.Errorf("timeline = %v, want it to say that a silence held the notification back", got)
+	}
+
+	// 2. An alert of the same group that the silence does not match is
+	// told about, alone.
+	fire("DiskFull", "db2")
+	msg := b.message("the alert that is not silenced", contains("*Firing*", "*DiskFull on db2*"))
+	if strings.Contains(msg.JSON(), "db1") {
+		t.Errorf("the message shows the silenced alert:\n%s", msg.JSON())
+	}
+
+	// 3. An admin expires the silence. db1 still fires, so it is news now:
+	// the message shows both.
+	if code, body := b.api(admin, "DELETE", "/api/v1/silences/"+silenceID, "", ""); code != http.StatusNoContent {
+		t.Fatalf("expire = %d %v", code, body)
+	}
+	b.message("both alerts once the silence is expired", contains("2 alerts: 2 firing", "DiskFull on db1", "DiskFull on db2"))
+
+	// 4. A silence that runs out by itself: the alert is told about when it
+	// ends, by the same timer that would have told it at once.
+	short := silenceHost(admin, "", "web1", "3s")
+	web1 := fire("HighLoad", "web1")
+	heldBack(web1, short)
+	b.find("the alert when its silence ran out", contains("*HighLoad on web1*"))
+	var early bool
+	if err := b.db.QueryRow(context.Background(), `SELECT g.notified_at < s.ends_at FROM alerts a JOIN alert_groups g ON g.id = a.group_id, silences s WHERE a.id = $1 AND s.id = $2`, web1, short).Scan(&early); err != nil || early {
+		t.Errorf("the group was notified before its silence ended: %v, %v", early, err)
+	}
+	if n := len(b.slack.Calls("chat.postMessage")); n != 2 {
+		t.Errorf("%d messages were posted, want 2", n)
 	}
 }

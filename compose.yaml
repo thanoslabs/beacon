@@ -70,5 +70,66 @@ services:
       timeout: 3s
       retries: 30
 
+  # An Alertmanager that sends its notifications to Beacon, for development
+  # and for trying the Alertmanager source out. It is not started by
+  # `docker compose up`; ask for it with the profile, and give Beacon a
+  # configuration that has the source:
+  #
+  #   BEACON_CONFIG_DIR=./examples/alertmanager docker compose --profile alertmanager up --build
+  #
+  # Its configuration is dev/alertmanager/alertmanager.yml. See
+  # docs/alertmanager.md.
+  alertmanager:
+    image: prom/alertmanager:v0.35.0
+    profiles: ["alertmanager"]
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
+    volumes:
+      - ./dev/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    configs:
+      - source: source-token
+        target: /etc/alertmanager/beacon-token
+    ports:
+      - "127.0.0.1:${BEACON_ALERTMANAGER_PORT:-9093}:9093"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9093/-/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # A Grafana whose alerting sends its notifications to Beacon, for
+  # development and for trying the Grafana source out. It is not started by
+  # `docker compose up`; ask for it with the profile, and give Beacon a
+  # configuration that has the source:
+  #
+  #   BEACON_CONFIG_DIR=./examples/grafana docker compose --profile grafana up --build
+  #
+  # Its contact point and notification policy are in dev/grafana. Sign in
+  # with Grafana's initial account, admin and admin. See docs/grafana.md.
+  grafana:
+    image: grafana/grafana:13.3.1
+    profiles: ["grafana"]
+    environment:
+      # Read by the provisioned contact point.
+      BEACON_SOURCE_TOKEN: ${BEACON_SOURCE_TOKEN:-local-development-token}
+      # The address that the links in notifications start with.
+      GF_SERVER_ROOT_URL: http://localhost:${BEACON_GRAFANA_PORT:-3000}/
+    volumes:
+      - ./dev/grafana/provisioning/alerting:/etc/grafana/provisioning/alerting:ro
+      - ./dev/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./dev/grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${BEACON_GRAFANA_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+# The token of Beacon's source, as a file for the senders that read their
+# credentials from one.
+configs:
+  source-token:
+    content: ${BEACON_SOURCE_TOKEN:-local-development-token}
+
 volumes:
   postgres-data:

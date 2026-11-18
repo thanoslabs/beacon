@@ -2,8 +2,6 @@ package alert
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -51,8 +49,19 @@ type Firing struct {
 	Severity    Severity
 	Labels      map[string]string
 	Annotations map[string]string
+	// Links are web addresses that belong to the alert, by name.
+	Links map[string]string
 	// StartsAt is when the source says the alert began. Zero means now.
 	StartsAt time.Time
+	// RoutingRuleID, TeamID and Service are what routing decided for the
+	// alert. Each may be empty. Like Group, they are kept as they were when
+	// the alert was opened: a repeated delivery does not route it again.
+	RoutingRuleID string
+	TeamID        string
+	Service       string
+	// Group says which group the alert joins if it is new. An alert that is
+	// already open stays in the group it has.
+	Group Grouping
 }
 
 // Options carries the details some actions need.
@@ -60,17 +69,19 @@ type Options struct {
 	// SnoozeUntil is when a snooze ends. Required for ActionSnooze.
 	SnoozeUntil time.Time
 	// ResolvedAt is when the alert was resolved, when the source says so.
-	// Zero means now.
+	// Zero means now, and so does a time in the future.
 	ResolvedAt time.Time
 }
 
 const alertColumns = `id::text, source_id::text, group_id::text, fingerprint, status, severity,
-	labels, annotations, started_at, last_received_at, acknowledged_at, snoozed_until, resolved_at`
+	labels, annotations, links, started_at, last_received_at, acknowledged_at, snoozed_until, resolved_at,
+	COALESCE(routing_rule_id::text, ''), COALESCE(team_id::text, ''), COALESCE(service, '')`
 
 func scanAlert(row interface{ Scan(...any) error }) (Alert, error) {
 	var a Alert
 	err := row.Scan(&a.ID, &a.SourceID, &a.GroupID, &a.Fingerprint, &a.Status, &a.Severity,
-		&a.Labels, &a.Annotations, &a.StartedAt, &a.LastReceivedAt, &a.AcknowledgedAt, &a.SnoozedUntil, &a.ResolvedAt)
+		&a.Labels, &a.Annotations, &a.Links, &a.StartedAt, &a.LastReceivedAt, &a.AcknowledgedAt, &a.SnoozedUntil, &a.ResolvedAt,
+		&a.RoutingRuleID, &a.TeamID, &a.Service)
 	return a, err
 }
 
@@ -83,7 +94,8 @@ func collectAlerts(rows pgx.Rows, err error) ([]Alert, error) {
 
 // Fire records that a source reports an alert as firing. If the source already
 // has an open alert with the fingerprint, that alert is refreshed and created
-// is false. Otherwise a new alert is opened in StatusFiring.
+// is false. Otherwise a new alert is opened in StatusFiring, in the group
+// that f.Group names.
 func (s *Store) Fire(ctx context.Context, f Firing) (a Alert, created bool, err error) {
 	if !f.Severity.Valid() {
 		return Alert{}, false, fmt.Errorf("unknown severity %q", f.Severity)
@@ -94,30 +106,29 @@ func (s *Store) Fire(ctx context.Context, f Firing) (a Alert, created bool, err 
 		}
 		now := s.now()
 		a, err = scanAlert(tx.QueryRow(ctx, `
-			UPDATE alerts SET severity = $3, labels = $4, annotations = $5, last_received_at = $6
+			UPDATE alerts SET severity = $3, labels = $4, annotations = $5, last_received_at = $6, links = $7
 			WHERE source_id = $1 AND fingerprint = $2 AND status <> 'resolved'
 			RETURNING `+alertColumns,
-			f.SourceID, f.Fingerprint, f.Severity, nonNil(f.Labels), nonNil(f.Annotations), now))
+			f.SourceID, f.Fingerprint, f.Severity, nonNil(f.Labels), nonNil(f.Annotations), now, nonNil(f.Links)))
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 
-		// Until grouping exists, every alert gets a group of its own.
-		var groupID string
-		err = tx.QueryRow(ctx, `INSERT INTO alert_groups (group_key, created_at) VALUES ($1, $2) RETURNING id::text`,
-			groupKey(f.SourceID, f.Fingerprint), now).Scan(&groupID)
+		groupID, err := s.joinGroup(ctx, tx, f, now)
 		if err != nil {
-			return fmt.Errorf("create alert group: %w", err)
+			return err
 		}
 		startedAt := f.StartsAt
 		if startedAt.IsZero() {
 			startedAt = now
 		}
 		a, err = scanAlert(tx.QueryRow(ctx, `
-			INSERT INTO alerts (source_id, fingerprint, severity, labels, annotations, group_id, started_at, last_received_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			INSERT INTO alerts (source_id, fingerprint, severity, labels, annotations, group_id, started_at, last_received_at, links,
+				routing_rule_id, team_id, service)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			RETURNING `+alertColumns,
-			f.SourceID, f.Fingerprint, f.Severity, nonNil(f.Labels), nonNil(f.Annotations), groupID, startedAt, now))
+			f.SourceID, f.Fingerprint, f.Severity, nonNil(f.Labels), nonNil(f.Annotations), groupID, startedAt, now, nonNil(f.Links),
+			nullable(f.RoutingRuleID), nullable(f.TeamID), nullable(f.Service)))
 		if err != nil {
 			return fmt.Errorf("create alert: %w", err)
 		}
@@ -338,7 +349,9 @@ func (s *Store) transition(ctx context.Context, tx pgx.Tx, a Alert, action Actio
 		data["until"] = opts.SnoozeUntil.UTC().Format(time.RFC3339)
 	case StatusResolved:
 		resolvedAt = &now
-		if !opts.ResolvedAt.IsZero() {
+		// A source's clock may run ahead of Beacon's. An alert is never
+		// resolved in the future.
+		if !opts.ResolvedAt.IsZero() && opts.ResolvedAt.Before(now) {
 			resolvedAt = &opts.ResolvedAt
 		}
 	}
@@ -359,11 +372,8 @@ func (s *Store) transition(ctx context.Context, tx pgx.Tx, a Alert, action Actio
 		return from, fmt.Errorf("%s alert: %w", action, err)
 	}
 	if to == StatusResolved {
-		// A group is resolved once all its alerts are.
-		_, err = tx.Exec(ctx, `UPDATE alert_groups SET status = 'resolved', resolved_at = $2
-			WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM alerts WHERE group_id = $1 AND status <> 'resolved')`, a.GroupID, now)
-		if err != nil {
-			return from, fmt.Errorf("resolve alert group: %w", err)
+		if err := s.afterResolve(ctx, tx, a.GroupID, actor.Type == ActorSource, now); err != nil {
+			return from, err
 		}
 	}
 	return a, s.record(ctx, tx, a, eventFor[action], actor, now, data)
@@ -389,13 +399,6 @@ func (s *Store) record(ctx context.Context, tx pgx.Tx, a Alert, typ EventType, a
 func lockFingerprint(ctx context.Context, tx pgx.Tx, sourceID, fingerprint string) error {
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, sourceID+"/"+fingerprint)
 	return err
-}
-
-// groupKey is the key of the group a new alert is put in. Each alert gets its
-// own group for now; grouping by labels replaces this.
-func groupKey(sourceID, fingerprint string) string {
-	sum := sha256.Sum256([]byte("alert/" + sourceID + "/" + fingerprint))
-	return hex.EncodeToString(sum[:])
 }
 
 func nullable(s string) *string {

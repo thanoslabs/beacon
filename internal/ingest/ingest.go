@@ -1,5 +1,7 @@
 // Package ingest receives alerts from sources over HTTP and hands them to the
-// alert model. docs/webhook.md describes the endpoint and the payload.
+// alert model. A source's type decides which payload its endpoint reads:
+// docs/webhook.md describes the generic one, docs/alertmanager.md
+// Alertmanager's and docs/grafana.md Grafana's.
 package ingest
 
 import (
@@ -18,16 +20,23 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/config"
+	"github.com/thanoslabs/beacon/internal/routing"
 )
 
 // Path is the route of the ingest endpoint. The last segment is the name of
 // the source.
 const Path = "/api/v1/ingest/{source}"
 
-// maxBodyBytes bounds a request body.
-const maxBodyBytes = 1 << 20
+// maxBodyBytes bounds the body of a request to a webhook source, which holds
+// one alert. maxGroupBodyBytes bounds a notification about a group of alerts.
+const (
+	maxBodyBytes      = 1 << 20
+	maxGroupBodyBytes = 4 << 20
+)
 
 // Source is a configured source and the identifier of its row in Postgres.
 type Source struct {
@@ -48,13 +57,35 @@ type Handler struct {
 	// sources is replaced as a whole when the configuration is reloaded, so
 	// a request sees either the old set or the new one.
 	sources atomic.Pointer[map[string]Source]
+	// router decides the team, service, escalation policy and group of a
+	// new alert. It follows the configuration like the sources do.
+	router atomic.Pointer[routing.Router]
+	// unmatched counts new alerts that no routing rule matched, by source.
+	unmatched *prometheus.CounterVec
 }
 
 // New returns a handler for the given sources.
 func New(logger *slog.Logger, alerts Alerts, sources []Source) *Handler {
-	h := &Handler{logger: logger, alerts: alerts}
+	h := &Handler{logger: logger, alerts: alerts, unmatched: prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "beacon_routing_unmatched_alerts_total",
+		Help: "Alerts opened that matched no routing rule and took the routing default, by source. Repeated deliveries of an open alert are not counted.",
+	}, []string{"source"})}
+	router, _ := routing.New(nil, routing.Refs{}) // without a routing block there is nothing to fail
+	h.SetRouter(router)
 	h.SetSources(sources)
 	return h
+}
+
+// SetRouter replaces the routing of new alerts. It is safe while requests
+// are being handled. Alerts that are open keep the route and the group they
+// have.
+func (h *Handler) SetRouter(r *routing.Router) {
+	h.router.Store(r)
+}
+
+// RegisterMetrics registers the handler's metrics on reg.
+func (h *Handler) RegisterMetrics(reg prometheus.Registerer) {
+	reg.MustRegister(h.unmatched)
 }
 
 // SetSources replaces the sources that the handler serves. It is safe while
@@ -63,6 +94,9 @@ func (h *Handler) SetSources(sources []Source) {
 	byName := make(map[string]Source, len(sources))
 	for _, s := range sources {
 		byName[s.Name] = s
+		// The series exists from the start, so a rate over it is never
+		// empty. The label is bounded by the configuration.
+		h.unmatched.WithLabelValues(s.Name)
 	}
 	h.sources.Store(&byName)
 }
@@ -72,7 +106,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("POST "+Path, h)
 }
 
-// response is the body of a successful request.
+// response is the body of a successful request to a webhook source.
 type response struct {
 	// Result is created, updated, resolved or not_found.
 	Result  string `json:"result"`
@@ -80,11 +114,46 @@ type response struct {
 	Status  string `json:"status,omitempty"`
 }
 
+// The values of response.Result.
+const (
+	resultCreated  = "created"
+	resultUpdated  = "updated"
+	resultResolved = "resolved"
+	resultNotFound = "not_found"
+)
+
+// groupResponse is the body of a successful request to a source that sends
+// several alerts at once: how many it held and what became of them.
+type groupResponse struct {
+	// Result is always accepted.
+	Result   string `json:"result"`
+	Received int    `json:"received"`
+	Created  int    `json:"created"`
+	Updated  int    `json:"updated"`
+	Resolved int    `json:"resolved"`
+	NotFound int    `json:"not_found"`
+}
+
 // errorResponse is the body of a failed request.
 type errorResponse struct {
 	Error string `json:"error"`
 	// Field names the part of the payload at fault, when there is one.
 	Field string `json:"field,omitempty"`
+}
+
+// delivery is one alert as a source reports it, whatever payload it came in.
+type delivery struct {
+	// Resolved is true when the source says the alert is over.
+	Resolved bool
+	// Fingerprint is the identity the source gave the alert. When it is
+	// empty the identity is computed from the labels.
+	Fingerprint string
+	Labels      map[string]string
+	Annotations map[string]string
+	Links       map[string]string
+	// StartsAt and EndsAt are zero when the source did not say.
+	StartsAt time.Time
+	EndsAt   time.Time
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -95,33 +164,108 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	limit := int64(maxBodyBytes)
+	if src.Type != config.SourceTypeWebhook {
+		limit = maxGroupBodyBytes
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			h.write(w, r, http.StatusRequestEntityTooLarge, errorResponse{Error: fmt.Sprintf("the body is larger than %d bytes", maxBodyBytes)})
+			h.write(w, r, http.StatusRequestEntityTooLarge, errorResponse{Error: fmt.Sprintf("the body is larger than %d bytes", limit)})
 			return
 		}
 		h.write(w, r, http.StatusBadRequest, errorResponse{Error: "could not read the body"})
 		return
 	}
-	p, err := parsePayload(body)
+
+	switch src.Type {
+	case config.SourceTypeAlertmanager:
+		g, err := parseAlertmanager(body)
+		h.serveGroup(w, r, src, g, err, AlertmanagerVersion)
+	case config.SourceTypeGrafana:
+		g, err := parseGrafana(body)
+		h.serveGroup(w, r, src, g, err, GrafanaVersion)
+	default:
+		p, err := parsePayload(body)
+		h.serveOne(w, r, src, p, err)
+	}
+}
+
+// serveOne handles the generic webhook: one alert per request.
+func (h *Handler) serveOne(w http.ResponseWriter, r *http.Request, src Source, p payload, err error) {
 	if err != nil {
-		var fe *fieldError
-		errors.As(err, &fe)
-		h.write(w, r, http.StatusBadRequest, errorResponse{Error: fe.msg, Field: fe.field})
+		h.invalid(w, r, err)
 		return
 	}
-
-	res, status, err := h.apply(r.Context(), src, p)
+	d := delivery{
+		Resolved: p.Status == statusResolved, Fingerprint: p.Fingerprint,
+		Labels: p.Labels, Annotations: p.Annotations, StartsAt: p.StartsAt, EndsAt: p.EndsAt,
+	}
+	res, err := h.apply(r.Context(), src, d)
 	if err != nil {
-		h.logger.ErrorContext(r.Context(), "store alert", slog.String("source", src.Name), slog.Any("error", err))
-		h.write(w, r, http.StatusInternalServerError, errorResponse{Error: "internal error"})
+		h.failed(w, r, src, err)
 		return
 	}
 	h.logger.InfoContext(r.Context(), "alert received",
 		slog.String("source", src.Name), slog.String("result", res.Result), slog.String("alert_id", res.AlertID))
+	status := http.StatusOK
+	if res.Result == resultCreated {
+		status = http.StatusCreated
+	}
 	h.write(w, r, status, res)
+}
+
+// serveGroup handles a notification about a group of alerts. Each alert is
+// stored on its own. If one cannot be stored the request fails as a whole
+// and the sender delivers it again, which is safe: the alerts that were
+// stored are recognised by their fingerprints.
+func (h *Handler) serveGroup(w http.ResponseWriter, r *http.Request, src Source, g alertGroup, err error, wantVersion string) {
+	if err != nil {
+		h.invalid(w, r, err)
+		return
+	}
+	ctx := r.Context()
+	if g.Version != wantVersion {
+		h.logger.WarnContext(ctx, "the payload has another version than the one Beacon reads; it is read all the same",
+			slog.String("source", src.Name), slog.String("type", src.Type), slog.String("version", g.Version), slog.String("expected", wantVersion))
+	}
+	if g.Truncated > 0 {
+		h.logger.WarnContext(ctx, "the sender left alerts out of the notification, so Beacon does not know about them; raise or remove its limit on alerts per notification",
+			slog.String("source", src.Name), slog.Int("truncated", g.Truncated))
+	}
+	out := groupResponse{Result: "accepted", Received: len(g.Deliveries)}
+	for _, d := range g.Deliveries {
+		res, err := h.apply(ctx, src, d)
+		if err != nil {
+			h.failed(w, r, src, err)
+			return
+		}
+		switch res.Result {
+		case resultCreated:
+			out.Created++
+		case resultUpdated:
+			out.Updated++
+		case resultResolved:
+			out.Resolved++
+		case resultNotFound:
+			out.NotFound++
+		}
+	}
+	h.logger.InfoContext(ctx, "alerts received", slog.String("source", src.Name), slog.Int("received", out.Received),
+		slog.Int("created", out.Created), slog.Int("updated", out.Updated), slog.Int("resolved", out.Resolved), slog.Int("not_found", out.NotFound))
+	h.write(w, r, http.StatusOK, out)
+}
+
+func (h *Handler) invalid(w http.ResponseWriter, r *http.Request, err error) {
+	var fe *fieldError
+	errors.As(err, &fe)
+	h.write(w, r, http.StatusBadRequest, errorResponse{Error: fe.msg, Field: fe.field})
+}
+
+func (h *Handler) failed(w http.ResponseWriter, r *http.Request, src Source, err error) {
+	h.logger.ErrorContext(r.Context(), "store alert", slog.String("source", src.Name), slog.Any("error", err))
+	h.write(w, r, http.StatusInternalServerError, errorResponse{Error: "internal error"})
 }
 
 // authenticate returns the source named in the path when the request carries
@@ -137,46 +281,65 @@ func (h *Handler) authenticate(r *http.Request) (Source, bool) {
 	return src, known && src.Token.IsSet() && strings.EqualFold(scheme, "Bearer") && match
 }
 
-// apply hands the payload to the alert model.
-func (h *Handler) apply(ctx context.Context, src Source, p payload) (response, int, error) {
-	fingerprint := p.Fingerprint
+// apply hands one alert to the alert model.
+func (h *Handler) apply(ctx context.Context, src Source, d delivery) (response, error) {
+	fingerprint := d.Fingerprint
 	if fingerprint == "" {
-		fingerprint = Fingerprint(p.Labels)
+		fingerprint = Fingerprint(d.Labels)
 	}
 
-	if p.Status == statusResolved {
-		a, found, err := h.alerts.ResolveFromSource(ctx, src.ID, fingerprint, p.EndsAt)
+	if d.Resolved {
+		a, found, err := h.alerts.ResolveFromSource(ctx, src.ID, fingerprint, d.EndsAt)
 		if err != nil {
-			return response{}, 0, err
+			return response{}, err
 		}
 		if !found {
-			return response{Result: "not_found"}, http.StatusOK, nil
+			return response{Result: resultNotFound}, nil
 		}
-		return response{Result: "resolved", AlertID: a.ID, Status: string(a.Status)}, http.StatusOK, nil
+		return response{Result: resultResolved, AlertID: a.ID, Status: string(a.Status)}, nil
 	}
 
-	labels := make(map[string]string, len(p.Labels)+len(src.Labels))
+	labels := make(map[string]string, len(d.Labels)+len(src.Labels))
 	for k, v := range src.Labels {
 		labels[k] = v
 	}
-	for k, v := range p.Labels {
+	for k, v := range d.Labels {
 		labels[k] = v
 	}
+	// Routing and grouping read the labels as they are stored, with the
+	// source's own. Groups form within a routing rule and across sources:
+	// the same problem seen by two sources is one group, and alerts that
+	// different rules matched never share one, because the rules may send
+	// them to different people.
+	route := h.router.Load().Route(labels)
+	key, groupLabels := alert.GroupKey(route.RuleID, route.Grouping.By, labels)
 	a, created, err := h.alerts.Fire(ctx, alert.Firing{
-		SourceID:    src.ID,
-		Fingerprint: fingerprint,
-		Severity:    src.Severity.Resolve(labels),
-		Labels:      labels,
-		Annotations: p.Annotations,
-		StartsAt:    p.StartsAt,
+		SourceID:      src.ID,
+		Fingerprint:   fingerprint,
+		Severity:      src.Severity.Resolve(labels),
+		Labels:        labels,
+		Annotations:   d.Annotations,
+		Links:         d.Links,
+		StartsAt:      d.StartsAt,
+		RoutingRuleID: route.RuleID,
+		TeamID:        route.TeamID,
+		Service:       route.Service,
+		Group: alert.Grouping{
+			Key: key, Labels: groupLabels, Wait: route.Grouping.Wait, Interval: route.Grouping.Interval,
+			RoutingRuleID: route.RuleID, TeamID: route.TeamID, EscalationPolicyID: route.PolicyID,
+		},
 	})
 	if err != nil {
-		return response{}, 0, err
+		return response{}, err
+	}
+	// Only an alert that this delivery opened was routed by it.
+	if created && !route.Matched() {
+		h.unmatched.WithLabelValues(src.Name).Inc()
 	}
 	if created {
-		return response{Result: "created", AlertID: a.ID, Status: string(a.Status)}, http.StatusCreated, nil
+		return response{Result: resultCreated, AlertID: a.ID, Status: string(a.Status)}, nil
 	}
-	return response{Result: "updated", AlertID: a.ID, Status: string(a.Status)}, http.StatusOK, nil
+	return response{Result: resultUpdated, AlertID: a.ID, Status: string(a.Status)}, nil
 }
 
 func (h *Handler) write(w http.ResponseWriter, r *http.Request, status int, body any) {

@@ -1,0 +1,14 @@
+{
+  "uid": "beacon-demo",
+  "title": "Beacon demo",
+  "schemaVersion": 39,
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Latency",
+      "gridPos": {"h": 4, "w": 12, "x": 0, "y": 0},
+      "options": {"mode": "markdown", "content": "The panel that the demonstration alert rule is linked to."}
+    }
+  ]
+}

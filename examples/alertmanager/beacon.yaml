@@ -1,0 +1,27 @@
+# Beacon behind an Alertmanager: one source that reads Alertmanager's webhook
+# notifications. docs/alertmanager.md is the guide, and
+# dev/alertmanager/alertmanager.yml is the Alertmanager side of it.
+#
+# Try the two together:
+#
+#   BEACON_CONFIG_DIR=./examples/alertmanager docker compose --profile alertmanager up --build
+#
+# The token is read from the environment; secrets are never written in files.
+
+sources:
+  - name: alertmanager
+    type: alertmanager
+    token: {env: BEACON_SOURCE_TOKEN}
+    # Added to every alert from this Alertmanager, unless the alert has the
+    # label already.
+    labels:
+      environment: production
+    # Prometheus rules often use other names than Beacon's three levels.
+    severity:
+      label: severity
+      mapping:
+        page: critical
+        critical: critical
+        warning: warning
+        info: info
+      default: warning

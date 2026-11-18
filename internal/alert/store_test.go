@@ -59,6 +59,7 @@ func (f *fixture) firing(fingerprint string) alert.Firing {
 		Severity:    alert.SeverityCritical,
 		Labels:      map[string]string{"alertname": "DiskFull", "host": "db1"},
 		Annotations: map[string]string{"summary": "Disk is full"},
+		Links:       map[string]string{alert.LinkGenerator: "https://prometheus.example.com/graph"},
 	}
 }
 
@@ -109,8 +110,8 @@ func TestFireStoresTheAlert(t *testing.T) {
 	if got.SourceID != f.sourceID || got.Fingerprint != "fp1" || got.Status != alert.StatusFiring || got.Severity != alert.SeverityCritical {
 		t.Errorf("alert = %+v", got)
 	}
-	if !reflect.DeepEqual(got.Labels, firing.Labels) || !reflect.DeepEqual(got.Annotations, firing.Annotations) {
-		t.Errorf("labels = %v, annotations = %v", got.Labels, got.Annotations)
+	if !reflect.DeepEqual(got.Labels, firing.Labels) || !reflect.DeepEqual(got.Annotations, firing.Annotations) || !reflect.DeepEqual(got.Links, firing.Links) {
+		t.Errorf("labels = %v, annotations = %v, links = %v", got.Labels, got.Annotations, got.Links)
 	}
 	if !got.StartedAt.Equal(started) || !got.LastReceivedAt.Equal(f.clock.Now()) {
 		t.Errorf("started_at = %v, last_received_at = %v", got.StartedAt, got.LastReceivedAt)

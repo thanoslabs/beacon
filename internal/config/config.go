@@ -7,6 +7,7 @@
 package config
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -245,14 +246,77 @@ type Target struct {
 
 // Routing decides which team and escalation policy an alert gets.
 type Routing struct {
-	GroupBy       []string     `yaml:"group_by" json:"group_by,omitempty"`
-	GroupWait     *Duration    `yaml:"group_wait" json:"group_wait,omitempty"`
+	// GroupBy lists the labels that define a group. Nil means
+	// DefaultGroupBy; an empty list puts every alert in one group.
+	GroupBy []string `yaml:"group_by" json:"group_by,omitempty"`
+	// GroupWait is how long a new group waits before its first
+	// notification. Nil means DefaultGroupWait; zero means no wait.
+	GroupWait *Duration `yaml:"group_wait" json:"group_wait,omitempty"`
+	// GroupInterval is the least time between notifications about a group.
+	// Nil means DefaultGroupInterval.
 	GroupInterval *Duration    `yaml:"group_interval" json:"group_interval,omitempty"`
 	Default       RouteDefault `yaml:"default" json:"default"`
 	// Rules are tried in order; the first match wins.
 	Rules []RoutingRule `yaml:"rules" json:"rules,omitempty"`
 
 	Origin Origin `yaml:"-" json:"-"`
+}
+
+// The grouping that applies unless the configuration says otherwise.
+const (
+	DefaultGroupWait     = Duration(30 * time.Second)
+	DefaultGroupInterval = Duration(5 * time.Minute)
+)
+
+// DefaultGroupBy are the labels that define a group unless the configuration
+// says otherwise.
+var DefaultGroupBy = []string{"alertname"}
+
+// Grouping says which alerts are told about together, and how often.
+type Grouping struct {
+	// By lists the labels that define a group: alerts with the same values
+	// for all of them share one. An empty list puts every alert in one group.
+	By []string
+	// Wait is how long a new group waits before its first notification.
+	Wait time.Duration
+	// Interval is the least time between two notifications about a group
+	// that its sources cause.
+	Interval time.Duration
+}
+
+// Grouping returns the grouping that the routing block asks for, with the
+// defaults for what it leaves out. A nil Routing gives the defaults.
+func (r *Routing) Grouping() Grouping {
+	g := Grouping{By: DefaultGroupBy, Wait: time.Duration(DefaultGroupWait), Interval: time.Duration(DefaultGroupInterval)}
+	if r == nil {
+		return g
+	}
+	if r.GroupBy != nil {
+		g.By = r.GroupBy
+	}
+	if r.GroupWait != nil {
+		g.Wait = time.Duration(*r.GroupWait)
+	}
+	if r.GroupInterval != nil {
+		g.Interval = time.Duration(*r.GroupInterval)
+	}
+	return g
+}
+
+// GroupingFor returns the grouping of the alerts that rule matches: the
+// routing block's, with what the rule sets in its place.
+func (r *Routing) GroupingFor(rule RoutingRule) Grouping {
+	g := r.Grouping()
+	if rule.GroupBy != nil {
+		g.By = rule.GroupBy
+	}
+	if rule.GroupWait != nil {
+		g.Wait = time.Duration(*rule.GroupWait)
+	}
+	if rule.GroupInterval != nil {
+		g.Interval = time.Duration(*rule.GroupInterval)
+	}
+	return g
 }
 
 // RouteDefault applies to alerts that match no rule.
@@ -372,35 +436,24 @@ func (o OIDC) RequestedScopes() []string {
 	return DefaultScopes
 }
 
-// ChannelTarget is a shared channel reached through an integration.
-type ChannelTarget struct {
-	Channel     string
-	Integration string
-}
+// MaxMatcherLength bounds a regular expression that matches label values,
+// in a routing rule or in a silence. Go's regular expressions run in time
+// linear in their input whatever the pattern, so the bound is on the cost of
+// compiling and keeping a pattern, not on a pathological one.
+const MaxMatcherLength = 1024
 
-// EveryAlertTargets returns the shared channels that are told about every
-// alert: the channel targets in the first step of the escalation policy that
-// routing names as its default.
-//
-// Temporary: it stands in for routing and escalation, which will decide who
-// is notified about what, and when. It reads only what the files already
-// say, so a configuration written for it keeps its meaning when they arrive.
-func (c Config) EveryAlertTargets() []ChannelTarget {
-	if c.Routing == nil {
-		return nil
+// CompileMatcher compiles a regular expression that matches label values.
+// It is anchored at both ends, as in Prometheus: "5.." matches "500" and not
+// "1500". The syntax is RE2's, which Go's regexp package implements.
+func CompileMatcher(expr string) (*regexp.Regexp, error) {
+	if len(expr) > MaxMatcherLength {
+		return nil, fmt.Errorf("is longer than %d characters", MaxMatcherLength)
 	}
-	var targets []ChannelTarget
-	for _, p := range c.EscalationPolicies {
-		if p.Name != c.Routing.Default.EscalationPolicy || len(p.Steps) == 0 {
-			continue
-		}
-		for _, t := range p.Steps[0].Notify {
-			if t.Channel != "" {
-				targets = append(targets, ChannelTarget{Channel: t.Channel, Integration: t.Integration})
-			}
-		}
+	re, err := regexp.Compile("^(?:" + expr + ")$")
+	if err != nil {
+		return nil, fmt.Errorf("is not a regular expression: %s", strings.TrimPrefix(err.Error(), "error parsing regexp: "))
 	}
-	return targets
+	return re, nil
 }
 
 var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)

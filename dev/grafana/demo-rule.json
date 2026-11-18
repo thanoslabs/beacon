@@ -1,0 +1,28 @@
+{
+  "uid": "beacon-demo",
+  "title": "HighLatency",
+  "orgID": 1,
+  "folderUID": "beacon",
+  "ruleGroup": "beacon-demo",
+  "condition": "A",
+  "for": "0s",
+  "noDataState": "NoData",
+  "execErrState": "Error",
+  "isPaused": false,
+  "data": [
+    {
+      "refId": "A",
+      "datasourceUid": "__expr__",
+      "relativeTimeRange": {"from": 0, "to": 0},
+      "model": {"refId": "A", "type": "math", "expression": "1 > 0"}
+    }
+  ],
+  "labels": {"severity": "critical", "instance": "api1"},
+  "annotations": {
+    "summary": "Latency is high on api1",
+    "description": "A demonstration rule that fires until it is paused.",
+    "runbook_url": "https://runbooks.example.com/latency",
+    "__dashboardUid__": "beacon-demo",
+    "__panelId__": "1"
+  }
+}
