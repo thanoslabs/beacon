@@ -58,7 +58,11 @@ A group is `open` while any of its alerts is not resolved, and `resolved` once a
 
 ## Severity
 
-Every alert has one of three fixed levels: `critical`, `warning` or `info`.
+Every alert has one of three fixed levels: `critical`, `warning` or `info`. The level is read from a label of the alert, as the alert's source says; see [[configuration#Severity]].
+
+## Routing
+
+When an alert is opened, the routing rules decide its team, its service and the escalation policy of its group; see [[configuration#How an alert is routed]]. The alert keeps what was decided for as long as it is open.
 
 ## Timeline
 

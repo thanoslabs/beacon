@@ -85,8 +85,8 @@ routing:
 
 The name of the integration is part of the address that Slack sends button presses to: `/api/v1/integrations/<name>/interactions`.
 
-> [!warning] Which alerts go where
-> Routing rules and escalation are not implemented yet. Until they are, Beacon posts **every** alert group to the channels named in the **first step** of the escalation policy that `routing.default` names, and ignores the rest: later steps, timeouts, people and routing rules. The configuration above keeps its meaning when they arrive.
+> [!note] Which alerts go where
+> An alert group is posted to the channels named in the **first step** of its escalation policy. With the configuration above there is one policy, the default, so every group goes to that channel. Routing rules send alerts to other policies, and so to other channels: see [[configuration#How an alert is routed]]. Later steps, timeouts and people are not acted on yet.
 
 Related alerts share one message: by default, alerts with the same `alertname`. The message of a new group is posted after `group_wait`, 30 seconds unless the `routing` block says otherwise; see [[configuration#Grouping]].
 

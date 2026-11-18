@@ -18,8 +18,14 @@ A notification is one message about one alert group to one destination, through 
 
 The message is built when it is delivered, from the state of the group at that moment. A notification that is delivered late therefore never shows an old state, and a change made while a notification is still waiting in the queue is shown by that notification and gets none of its own.
 
-> [!note] Who is notified
-> Routing and escalation policies will decide who is notified. Until they exist, the first notification of every group goes to the same fixed destinations: the channels in the first step of the default escalation policy. Updates go to every destination that was told about the group before.
+## Who is notified
+
+Routing gives every alert group an escalation policy ([[configuration#How an alert is routed]]). The first notification of the group goes to the `{channel, integration}` targets in the **first step** of that policy. Updates go to every destination that was told about the group before, also after a reload has changed the policy.
+
+> [!warning] Escalation is not implemented yet
+> Beacon does not yet resolve the schedule, team and user targets of a step to people, wait for a step's timeout, run later steps or repeat a policy. Those targets and steps are skipped, and `beacon serve` logs a warning for each policy that has any.
+
+When the first notification of a group has nowhere to go, nothing is queued and the group's timeline gets a `not_notified` event with the reason: the configuration had no `routing` block when the group opened, the policy has since left the configuration, or its first step names no channel that Beacon can deliver to.
 
 ## Groups
 

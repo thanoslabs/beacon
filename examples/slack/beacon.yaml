@@ -20,9 +20,9 @@ integrations:
       bot_token: {env: BEACON_SLACK_BOT_TOKEN}
       signing_secret: {env: BEACON_SLACK_SIGNING_SECRET}
 
-# Until routing rules and escalation are implemented, Beacon posts every alert
-# group to the channels named in the first step of the default escalation
-# policy.
+# An alert group is posted to the channels named in the first step of its
+# escalation policy. This is the only policy, so every group goes here; add
+# rules to the routing block to send some alerts to other policies.
 escalation_policies:
   - name: default
     steps:
