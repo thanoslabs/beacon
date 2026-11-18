@@ -34,6 +34,8 @@ type fixture struct {
 	mux   *http.ServeMux
 	logs  *bytes.Buffer
 	ids   map[string]string
+	// handler is the ingest handler behind mux.
+	handler *ingest.Handler
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -59,7 +61,8 @@ func newFixture(t *testing.T) *fixture {
 	for _, s := range sources {
 		configured = append(configured, ingest.Source{ID: f.ids[s.Name], Source: s})
 	}
-	ingest.New(slog.New(slog.NewJSONHandler(f.logs, nil)), f.store, configured).Register(f.mux)
+	f.handler = ingest.New(slog.New(slog.NewJSONHandler(f.logs, nil)), f.store, configured)
+	f.handler.Register(f.mux)
 	return f
 }
 

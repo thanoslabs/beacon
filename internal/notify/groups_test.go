@@ -13,6 +13,8 @@ import (
 
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/notify"
+	"github.com/thanoslabs/beacon/internal/provision"
+	"github.com/thanoslabs/beacon/internal/provision/provisiontest"
 )
 
 // clock is a settable time source shared by the store and the pipeline.
@@ -47,9 +49,19 @@ func newGroupFixture(t *testing.T) *groupFixture {
 	f.p = f.pipeline(fastConfig(), nil)
 	f.p.SetClock(f.clock.Now)
 	f.alerts.SetClock(f.clock.Now)
-	f.p.SetTargets([]notify.Target{{IntegrationID: f.integrationID, Destination: "#alerts"}})
+	f.p.SetPolicies(f.policy("#alerts"))
 	f.alerts.Observe(f.p.Observe)
 	return f
+}
+
+// policy is the fixture's escalation policy with these channels in its first
+// step.
+func (f *fixture) policy(channels ...string) map[string]notify.Policy {
+	p := notify.Policy{Name: "default"}
+	for _, c := range channels {
+		p.FirstStep = append(p.FirstStep, notify.Target{IntegrationID: f.integrationID, Destination: c})
+	}
+	return map[string]notify.Policy{f.policyID: p}
 }
 
 // join fires an alert into the DiskFull group: 30s wait, 5m interval.
@@ -59,7 +71,7 @@ func (f *groupFixture) join(host string) alert.Alert {
 	key, shared := alert.GroupKey("", []string{"alertname"}, labels)
 	a, _, err := f.alerts.Fire(context.Background(), alert.Firing{
 		SourceID: f.sourceID, Fingerprint: host, Severity: alert.SeverityCritical, Labels: labels,
-		Group: alert.Grouping{Key: key, Labels: shared, Wait: 30 * time.Second, Interval: 5 * time.Minute},
+		Group: alert.Grouping{Key: key, Labels: shared, Wait: 30 * time.Second, Interval: 5 * time.Minute, EscalationPolicyID: f.policyID},
 	})
 	if err != nil {
 		f.t.Fatalf("Fire: %v", err)
@@ -314,14 +326,14 @@ func TestWaitingNotificationShowsLaterChanges(t *testing.T) {
 
 func TestUpdatesGoToEveryoneWhoWasTold(t *testing.T) {
 	f := newGroupFixture(t)
-	f.p.SetTargets([]notify.Target{{IntegrationID: f.integrationID, Destination: "#alerts"}, {IntegrationID: f.integrationID, Destination: "#platform"}})
+	f.p.SetPolicies(f.policy("#alerts", "#platform"))
 	a := f.join("db1")
 	f.clock.Advance(30 * time.Second)
 	f.tick()
 	f.sent()
 	// The configuration changes: new groups go elsewhere. The group that
 	// was told about is updated where it was told.
-	f.p.SetTargets([]notify.Target{{IntegrationID: f.integrationID, Destination: "#elsewhere"}})
+	f.p.SetPolicies(f.policy("#elsewhere"))
 	f.clock.Advance(time.Hour)
 	f.resolveFromSource("db1")
 	f.tick()
@@ -347,7 +359,7 @@ func TestGroupTimersSurviveARestartAndFireOnce(t *testing.T) {
 		key, shared := alert.GroupKey("", []string{"alertname"}, labels)
 		a, _, err := f.alerts.Fire(context.Background(), alert.Firing{
 			SourceID: f.sourceID, Fingerprint: labels["alertname"], Severity: alert.SeverityWarning, Labels: labels,
-			Group: alert.Grouping{Key: key, Labels: shared, Wait: 30 * time.Second, Interval: 5 * time.Minute},
+			Group: alert.Grouping{Key: key, Labels: shared, Wait: 30 * time.Second, Interval: 5 * time.Minute, EscalationPolicyID: f.policyID},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -364,7 +376,7 @@ func TestGroupTimersSurviveARestartAndFireOnce(t *testing.T) {
 		store.SetClock(f.clock.Now)
 		p := notify.New(f.pool, store, slog.New(slog.DiscardHandler), fastConfig())
 		p.SetClock(f.clock.Now)
-		p.SetTargets([]notify.Target{{IntegrationID: f.integrationID, Destination: "#alerts"}})
+		p.SetPolicies(f.policy("#alerts"))
 		wg.Go(func() {
 			if _, err := p.NotifyDueGroups(context.Background()); err != nil {
 				t.Errorf("NotifyDueGroups: %v", err)
@@ -423,5 +435,85 @@ func TestGroupIsDeliveredAsOneMessage(t *testing.T) {
 	}
 	if fmt.Sprint(deliveries) != fmt.Sprint(want) {
 		t.Errorf("deliveries:\n%s\nwant:\n%s", strings.Join(deliveries, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// fireWith opens an alert whose group has the given escalation policy, with
+// no wait.
+func (f *groupFixture) fireWith(name, policyID string) alert.Alert {
+	f.t.Helper()
+	a, _, err := f.alerts.Fire(context.Background(), alert.Firing{
+		SourceID: f.sourceID, Fingerprint: name, Severity: alert.SeverityWarning, Labels: map[string]string{"alertname": name},
+		Group: alert.Grouping{Key: name, EscalationPolicyID: policyID},
+	})
+	if err != nil {
+		f.t.Fatalf("Fire: %v", err)
+	}
+	return a
+}
+
+// TestTheFirstNotificationFollowsTheGroupsPolicy: a group is told to the
+// channels in the first step of its own escalation policy.
+func TestTheFirstNotificationFollowsTheGroupsPolicy(t *testing.T) {
+	f := newGroupFixture(t)
+	dba := provisiontest.Row(t, f.pool, provision.EscalationPolicies, "dba")
+	f.p.SetPolicies(map[string]notify.Policy{
+		f.policyID: {Name: "default", FirstStep: []notify.Target{{IntegrationID: f.integrationID, Destination: "#alerts"}}},
+		dba:        {Name: "dba", FirstStep: []notify.Target{{IntegrationID: f.integrationID, Destination: "#dba"}, {IntegrationID: f.integrationID, Destination: "#dba-leads"}}},
+	})
+	general := f.fireWith("General", f.policyID)
+	database := f.fireWith("Database", dba)
+	if n := f.tick(); n != 2 {
+		t.Fatalf("%d groups notified, want 2", n)
+	}
+	destinations := func(groupID string) string {
+		rows, err := f.pool.Query(context.Background(), `SELECT destination FROM notifications WHERE alert_group_id = $1 ORDER BY destination`, groupID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(got, ",")
+	}
+	if got := destinations(general.GroupID); got != "#alerts" {
+		t.Errorf("the group of the default policy was told to %q", got)
+	}
+	if got := destinations(database.GroupID); got != "#dba,#dba-leads" {
+		t.Errorf("the group of the dba policy was told to %q", got)
+	}
+}
+
+// TestGroupThatNotifiesNobodySaysWhy: when the first notification of a group
+// has nowhere to go, nothing is queued, the group is not tried again, and
+// its timeline says why.
+func TestGroupThatNotifiesNobodySaysWhy(t *testing.T) {
+	f := newGroupFixture(t)
+	people := provisiontest.Row(t, f.pool, provision.EscalationPolicies, "people-only")
+	removed := provisiontest.Row(t, f.pool, provision.EscalationPolicies, "removed")
+	f.p.SetPolicies(map[string]notify.Policy{people: {Name: "people-only"}})
+
+	for name, tt := range map[string]struct{ policy, want string }{
+		"NoPolicy":   {"", "the group has no escalation policy"},
+		"PeopleOnly": {people, `the first step of escalation policy "people-only" names no channel that Beacon can deliver to`},
+		"Removed":    {removed, "the escalation policy of the group is no longer in the configuration"},
+	} {
+		a := f.fireWith(name, tt.policy)
+		if n := f.tick(); n != 1 {
+			t.Fatalf("%s: %d groups notified, want 1", name, n)
+		}
+		f.expect(name, a.GroupID, "")
+		events, err := f.alerts.GroupTimeline(context.Background(), a.GroupID)
+		if err != nil || len(events) != 2 || events[1].Type != notify.EventNotNotified || events[1].Actor.Type != alert.ActorSystem {
+			t.Fatalf("%s: timeline = %+v, %v; want fired and not_notified", name, events, err)
+		}
+		if reason, _ := events[1].Data["reason"].(string); !strings.Contains(reason, tt.want) {
+			t.Errorf("%s: reason = %q, want it to contain %q", name, reason, tt.want)
+		}
+		f.clock.Advance(time.Hour)
+		if n := f.tick(); n != 0 {
+			t.Errorf("%s: the group was tried again", name)
+		}
 	}
 }

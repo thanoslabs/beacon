@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"math/rand/v2"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,10 +60,10 @@ type Pipeline struct {
 	logger *slog.Logger
 	cfg    Config
 	now    func() time.Time
-	// channels and targets follow the configuration, and are replaced as a
+	// channels and policies follow the configuration, and are replaced as a
 	// whole when it is reloaded.
 	channels atomic.Pointer[map[string]Channel]
-	targets  atomic.Pointer[[]Target]
+	policies atomic.Pointer[map[string]Policy]
 }
 
 // New returns a pipeline. Register its channels before calling Run.
@@ -89,7 +88,7 @@ func New(db *pgxpool.Pool, alerts *alert.Store, logger *slog.Logger, cfg Config)
 	}
 	p := &Pipeline{db: db, alerts: alerts, logger: logger, cfg: cfg, now: time.Now}
 	p.SetChannels(nil)
-	p.SetTargets(nil)
+	p.SetPolicies(nil)
 	return p
 }
 
@@ -116,13 +115,15 @@ func (p *Pipeline) SetChannels(channels map[string]Channel) {
 	p.channels.Store(&channels)
 }
 
-// SetTargets replaces the targets that the first notification of every group
-// goes to. It is safe while alerts change.
-//
-// Temporary: routing will give each group its escalation policy.
-func (p *Pipeline) SetTargets(targets []Target) {
-	targets = slices.Clone(targets)
-	p.targets.Store(&targets)
+// SetPolicies replaces the escalation policies, by the identifier of their
+// rows. It is safe while alerts change. A group whose policy is not among
+// them notifies nobody when its first notification falls due.
+func (p *Pipeline) SetPolicies(policies map[string]Policy) {
+	policies = maps.Clone(policies)
+	if policies == nil {
+		policies = map[string]Policy{}
+	}
+	p.policies.Store(&policies)
 }
 
 // Enqueue queues n for delivery through tx, so the notification exists if and

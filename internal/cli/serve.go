@@ -138,6 +138,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 		auth:         signIn,
 	}
 	prov.registerMetrics(registry)
+	prov.ingest.RegisterMetrics(registry)
 	prov.auth.AfterSignIn(prov.refreshSkipped)
 	for _, route := range prov.routes() {
 		srv.Handle(route)

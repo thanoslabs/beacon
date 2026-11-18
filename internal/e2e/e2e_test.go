@@ -856,6 +856,161 @@ func TestGrouping(t *testing.T) {
 	}
 }
 
+// routingConfiguration routes by two rules and a default, each to a channel
+// of its own. The policy "urgent" also names a person and a second step,
+// which do nothing until the escalation engine exists.
+const routingConfiguration = `sources:
+  - name: e2e
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}
+    severity:
+      label: priority
+      mapping: {P1: critical, P2: warning}
+      default: info
+integrations:
+  - name: slack
+    type: slack
+    slack:
+      bot_token: {env: BEACON_SLACK_BOT_TOKEN}
+      signing_secret: {file: signing-secret}
+teams:
+  - name: dba
+  - name: platform
+escalation_policies:
+  - name: default
+    steps:
+      - notify: [{channel: C0ALERTS, integration: slack}]
+        timeout: 5m
+  - name: dba
+    steps:
+      - notify: [{channel: C0DBA, integration: slack}]
+        timeout: 5m
+  - name: urgent
+    repeat: 1
+    steps:
+      - notify:
+          - user: ada@example.com
+          - channel: C0URGENT
+            integration: slack
+        timeout: 5m
+      - notify: [{team: platform}]
+        timeout: 5m
+routing:
+  group_wait: 0s
+  group_interval: 1s
+  default:
+    team: platform
+    escalation_policy: default
+  rules:
+    - name: database
+      match: {team: dba}
+      team: dba
+      service: postgres
+      escalation_policy: dba
+    - name: pages
+      match_re: {priority: "P1|page"}
+      escalation_policy: urgent
+`
+
+// TestRouting sends alerts that match the first rule, a later rule and no
+// rule through the real binary, and follows each to its channel.
+func TestRouting(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, routingConfiguration))
+	b.slack.AddChannel("dba", "C0DBA")
+	b.slack.AddChannel("urgent", "C0URGENT")
+	b.waitUntilServing()
+	fire := func(labels string) string {
+		t.Helper()
+		code, res := b.webhook(`{"labels": ` + labels + `}`)
+		if code != http.StatusCreated {
+			t.Fatalf("webhook = %d %v", code, res)
+		}
+		return res["alert_id"]
+	}
+	// routed reads what routing stored for an alert.
+	routed := func(alertID string) string {
+		t.Helper()
+		var got string
+		err := b.db.QueryRow(context.Background(), `
+			SELECT 'rule=' || COALESCE(r.name, '-') || ' team=' || COALESCE(t.name, '-') || ' service=' || COALESCE(a.service, '-') ||
+				' policy=' || COALESCE(p.name, '-') || ' severity=' || a.severity
+			FROM alerts a JOIN alert_groups g ON g.id = a.group_id
+			LEFT JOIN routing_rules r ON r.id = a.routing_rule_id LEFT JOIN teams t ON t.id = a.team_id
+			LEFT JOIN escalation_policies p ON p.id = g.escalation_policy_id WHERE a.id = $1`, alertID).Scan(&got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	inChannel := func(channel, text string) func(slacktest.Message) bool {
+		return func(m slacktest.Message) bool { return m.Channel == channel && strings.Contains(m.JSON(), text) }
+	}
+
+	// 1. The first rule. The second would match too; the first one wins.
+	first := fire(`{"alertname": "ReplicationLag", "team": "dba", "priority": "P1", "service": "from-the-alert"}`)
+	if got, want := routed(first), "rule=database team=dba service=postgres policy=dba severity=critical"; got != want {
+		t.Errorf("first rule: %s, want %s", got, want)
+	}
+	b.find("the database alert in its channel", inChannel("C0DBA", "ReplicationLag"))
+
+	// 2. A later rule, by a regular expression.
+	second := fire(`{"alertname": "CheckoutDown", "priority": "page", "service": "checkout"}`)
+	if got, want := routed(second), "rule=pages team=- service=checkout policy=urgent severity=info"; got != want {
+		t.Errorf("later rule: %s, want %s", got, want)
+	}
+	b.find("the page in its channel", inChannel("C0URGENT", "CheckoutDown"))
+
+	// 3. No rule: the default. The pattern is anchored, so P10 is not P1.
+	third := fire(`{"alertname": "DiskFilling", "priority": "P10"}`)
+	if got, want := routed(third), "rule=- team=platform service=- policy=default severity=info"; got != want {
+		t.Errorf("default: %s, want %s", got, want)
+	}
+	b.find("the unmatched alert in the default channel", inChannel("C0ALERTS", "DiskFilling"))
+	if got, want := b.metrics("beacon_routing_unmatched_alerts_total"), `beacon_routing_unmatched_alerts_total{source="e2e"} 1`; got != want {
+		t.Errorf("metric:\n%s\nwant:\n%s", got, want)
+	}
+
+	// Each alert went to one channel, and the person in the first step of
+	// "urgent" was told nothing: the log says that such targets do nothing
+	// yet.
+	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
+		t.Errorf("%d messages were posted, want 3", n)
+	}
+	var destinations string
+	if err := b.db.QueryRow(context.Background(), `SELECT string_agg(destination, ',' ORDER BY destination) FROM notifications`).Scan(&destinations); err != nil || destinations != "C0ALERTS,C0DBA,C0URGENT" {
+		t.Errorf("notifications went to %q, %v", destinations, err)
+	}
+	if !strings.Contains(b.output(), `"msg":"escalation is not implemented yet: only the channel targets of a policy's first step are notified, once; its schedule, team and user targets, its later steps and its repeats do nothing","policy":"urgent","first_step_people_targets_skipped":1,"later_steps_skipped":1,"repeats_skipped":1`) {
+		t.Errorf("the log does not say what of the policy is skipped")
+	}
+
+	// 4. A reload changes the rules for alerts that arrive afterwards. The
+	// alert that is open keeps the route it was given.
+	b.reload(strings.Replace(routingConfiguration, "match: {team: dba}", "match: {team: storage}", 1), 1)
+	fourth := fire(`{"alertname": "SlowQueries", "team": "dba", "priority": "P2"}`)
+	if got, want := routed(fourth), "rule=- team=platform service=- policy=default severity=warning"; got != want {
+		t.Errorf("after the reload: %s, want %s", got, want)
+	}
+	b.find("the alert in the default channel after the reload", inChannel("C0ALERTS", "SlowQueries"))
+	if got, want := routed(first), "rule=database team=dba service=postgres policy=dba severity=critical"; got != want {
+		t.Errorf("the open alert after the reload: %s, want %s", got, want)
+	}
+	if got, want := b.metrics("beacon_routing_unmatched_alerts_total"), `beacon_routing_unmatched_alerts_total{source="e2e"} 2`; got != want {
+		t.Errorf("metric after the reload: %s", got)
+	}
+
+	// 5. A configuration whose rule has a broken pattern is rejected whole,
+	// and names the field.
+	logs := b.reload(strings.Replace(routingConfiguration, `"P1|page"`, `"P1|(page"`, 1), 2)
+	if !strings.Contains(logs, `"object":"routing rule \"pages\"","field":"match_re.priority","problem":"is not a regular expression: missing closing )`) {
+		t.Errorf("the rejected pattern is not named in the logs")
+	}
+	if got := routed(fire(`{"alertname": "StillRouted", "priority": "page"}`)); !strings.HasPrefix(got, "rule=pages ") {
+		t.Errorf("after the rejected reload: %s, want the rules that were active", got)
+	}
+}
+
 // TestReloadChangesGrouping: the labels that define a group follow the
 // configuration. Alerts that arrive after a reload are grouped the new way;
 // the groups that exist stay as they are.
@@ -889,7 +1044,7 @@ func TestReloadChangesGrouping(t *testing.T) {
 	}
 
 	logs := b.reload(strings.Replace(configuration, "routing:\n", "routing:\n  group_by: [host]\n", 1), 1)
-	if !strings.Contains(logs, `"msg":"alerts are grouped","group_by":["host"]`) {
+	if !strings.Contains(logs, `"msg":"alerts are routed and grouped","rules":0,"group_by":["host"]`) {
 		t.Errorf("the new grouping is not in the logs")
 	}
 	fire("DiskFull", "db3")
