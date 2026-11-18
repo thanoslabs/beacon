@@ -51,6 +51,8 @@ type Firing struct {
 	Severity    Severity
 	Labels      map[string]string
 	Annotations map[string]string
+	// Links are web addresses that belong to the alert, by name.
+	Links map[string]string
 	// StartsAt is when the source says the alert began. Zero means now.
 	StartsAt time.Time
 }
@@ -65,12 +67,12 @@ type Options struct {
 }
 
 const alertColumns = `id::text, source_id::text, group_id::text, fingerprint, status, severity,
-	labels, annotations, started_at, last_received_at, acknowledged_at, snoozed_until, resolved_at`
+	labels, annotations, links, started_at, last_received_at, acknowledged_at, snoozed_until, resolved_at`
 
 func scanAlert(row interface{ Scan(...any) error }) (Alert, error) {
 	var a Alert
 	err := row.Scan(&a.ID, &a.SourceID, &a.GroupID, &a.Fingerprint, &a.Status, &a.Severity,
-		&a.Labels, &a.Annotations, &a.StartedAt, &a.LastReceivedAt, &a.AcknowledgedAt, &a.SnoozedUntil, &a.ResolvedAt)
+		&a.Labels, &a.Annotations, &a.Links, &a.StartedAt, &a.LastReceivedAt, &a.AcknowledgedAt, &a.SnoozedUntil, &a.ResolvedAt)
 	return a, err
 }
 
@@ -94,10 +96,10 @@ func (s *Store) Fire(ctx context.Context, f Firing) (a Alert, created bool, err 
 		}
 		now := s.now()
 		a, err = scanAlert(tx.QueryRow(ctx, `
-			UPDATE alerts SET severity = $3, labels = $4, annotations = $5, last_received_at = $6
+			UPDATE alerts SET severity = $3, labels = $4, annotations = $5, last_received_at = $6, links = $7
 			WHERE source_id = $1 AND fingerprint = $2 AND status <> 'resolved'
 			RETURNING `+alertColumns,
-			f.SourceID, f.Fingerprint, f.Severity, nonNil(f.Labels), nonNil(f.Annotations), now))
+			f.SourceID, f.Fingerprint, f.Severity, nonNil(f.Labels), nonNil(f.Annotations), now, nonNil(f.Links)))
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
@@ -114,10 +116,10 @@ func (s *Store) Fire(ctx context.Context, f Firing) (a Alert, created bool, err 
 			startedAt = now
 		}
 		a, err = scanAlert(tx.QueryRow(ctx, `
-			INSERT INTO alerts (source_id, fingerprint, severity, labels, annotations, group_id, started_at, last_received_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			INSERT INTO alerts (source_id, fingerprint, severity, labels, annotations, group_id, started_at, last_received_at, links)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			RETURNING `+alertColumns,
-			f.SourceID, f.Fingerprint, f.Severity, nonNil(f.Labels), nonNil(f.Annotations), groupID, startedAt, now))
+			f.SourceID, f.Fingerprint, f.Severity, nonNil(f.Labels), nonNil(f.Annotations), groupID, startedAt, now, nonNil(f.Links)))
 		if err != nil {
 			return fmt.Errorf("create alert: %w", err)
 		}

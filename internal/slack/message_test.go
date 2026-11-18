@@ -302,3 +302,33 @@ func TestButtonsFollowTheState(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderLinks(t *testing.T) {
+	a := firingAlert()
+	a.Links = map[string]string{
+		alert.LinkGenerator: "http://prometheus.example.com:9090/graph?g0.expr=up+%3C+1&g0.tab=1",
+		alert.LinkDashboard: "https://grafana.example.com/d/abc",
+		alert.LinkPanel:     "https://grafana.example.com/d/abc?viewPanel=2",
+		alert.LinkSilence:   "javascript:alert(1)",
+		"other":             "https://example.com/not-shown",
+	}
+	msg, out := rendered(t, notify.Message{Alerts: []alert.Alert{a}})
+	want := "<http://prometheus.example.com:9090/graph?g0.expr=up+%3C+1&amp;g0.tab=1|:mag: Source> · " +
+		"<https://grafana.example.com/d/abc|:bar_chart: Dashboard> · " +
+		"<https://grafana.example.com/d/abc?viewPanel=2|:chart_with_upwards_trend: Panel>"
+	if len(msg.Blocks) != 5 || msg.Blocks[2].Type != "section" || msg.Blocks[2].Text.Text != want {
+		t.Errorf("links block = %+v, want %s", msg.Blocks[2], want)
+	}
+	if strings.Contains(out, "javascript") || strings.Contains(out, "not-shown") {
+		t.Errorf("the message has a link it should not:\n%s", out)
+	}
+
+	// Four links of the greatest length shown still fit in a section, and a
+	// longer one is left out rather than cut.
+	long := "https://grafana.example.com/" + strings.Repeat("d", maxLinkURL-len("https://grafana.example.com/"))
+	a.Links = map[string]string{alert.LinkGenerator: long, alert.LinkDashboard: long, alert.LinkPanel: long, alert.LinkSilence: long + "x"}
+	msg, _ = rendered(t, notify.Message{Alerts: []alert.Alert{a}})
+	if got := strings.Count(msg.Blocks[2].Text.Text, long); got != 3 || strings.Contains(msg.Blocks[2].Text.Text, "Silence") {
+		t.Errorf("links block has %d long links, want the three that fit: %s", got, msg.Blocks[2].Text.Text)
+	}
+}

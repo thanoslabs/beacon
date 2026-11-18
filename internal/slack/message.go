@@ -89,6 +89,7 @@ const (
 	maxSummary     = 300
 	maxDescription = 1500
 	maxRunbookURL  = 500
+	maxLinkURL     = 700
 	maxLabel       = 200
 	maxLabels      = 2000
 )
@@ -133,6 +134,10 @@ func render(m notify.Message) message {
 		blocks = append(blocks, block{Type: "section", Text: mrkdwn(labels)})
 	}
 
+	if links := linkLine(a.Links); links != "" {
+		blocks = append(blocks, block{Type: "section", Text: mrkdwn(links)})
+	}
+
 	detail := statusLine(a, m.Events)
 	if more := len(m.Alerts) - 1; more > 0 {
 		detail += fmt.Sprintf(" · and %d more in this group", more)
@@ -159,15 +164,42 @@ func alertTitle(a alert.Alert) string {
 }
 
 // runbookLink returns a link to the runbook when the annotation holds a web
-// address, and nothing otherwise: only http and https links are made, so an
-// alert cannot put another kind of link in the message.
+// address, and nothing otherwise.
 func runbookLink(raw string) string {
+	return link(raw, ":book: Runbook", maxRunbookURL)
+}
+
+// link returns a Slack link to raw with the given text, or nothing: only
+// http and https links of a bounded length are made, so an alert cannot put
+// another kind of link in the message or make it too long to send.
+func link(raw, label string, maxLen int) string {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
-		len(raw) > maxRunbookURL || strings.ContainsAny(raw, "|<> \n") {
+		len(raw) > maxLen || strings.ContainsAny(raw, "|<> \n") {
 		return ""
 	}
-	return "<" + escape(raw) + "|:book: Runbook>"
+	return "<" + escape(raw) + "|" + label + ">"
+}
+
+// shownLinks are the links of an alert that a message offers, in order, with
+// their text.
+var shownLinks = []struct{ name, label string }{
+	{alert.LinkGenerator, ":mag: Source"},
+	{alert.LinkDashboard, ":bar_chart: Dashboard"},
+	{alert.LinkPanel, ":chart_with_upwards_trend: Panel"},
+	{alert.LinkSilence, ":no_bell: Silence at the source"},
+}
+
+// linkLine shows the links the source sent with the alert. There are at most
+// four, each bounded, so together they fit in a section.
+func linkLine(links map[string]string) string {
+	var parts []string
+	for _, l := range shownLinks {
+		if s := link(links[l.name], l.label, maxLinkURL); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, " · ")
 }
 
 // labelLine shows the labels in name order as `name=value`.

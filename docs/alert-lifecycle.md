@@ -33,7 +33,7 @@ Only the moves in the diagram are allowed. Anything else is refused and changes 
 
 - **Snooze** needs an end time in the future. The snooze button in Slack snoozes for one hour. When it passes, Beacon returns the alert to `firing` by itself, within a few seconds.
 - **Resolve** can come from a person or from the source. A resolved alert never changes again: if the source reports the same problem later, Beacon opens a new alert.
-- While an alert is open, repeated deliveries of it from the source refresh its labels, annotations, severity and the time it was last received. They do not change its state.
+- While an alert is open, repeated deliveries of it from the source refresh its labels, annotations, links, severity and the time it was last received. They do not change its state.
 
 ## Severity
 

@@ -99,6 +99,9 @@ type Alert struct {
 	Severity    Severity
 	Labels      map[string]string
 	Annotations map[string]string
+	// Links are the web addresses the source sent with the alert, by name:
+	// see the Link constants.
+	Links map[string]string
 
 	StartedAt      time.Time
 	LastReceivedAt time.Time
@@ -106,6 +109,20 @@ type Alert struct {
 	SnoozedUntil   *time.Time
 	ResolvedAt     *time.Time
 }
+
+// The names of the links an alert can carry. Which ones an alert has depends
+// on its source.
+const (
+	// LinkGenerator is where the alert was generated: the expression in
+	// Prometheus, or the alert rule in Grafana.
+	LinkGenerator = "generator"
+	// LinkDashboard and LinkPanel are the Grafana dashboard and panel of the
+	// alert rule.
+	LinkDashboard = "dashboard"
+	LinkPanel     = "panel"
+	// LinkSilence is the page that silences the alert at its source.
+	LinkSilence = "silence"
+)
 
 // ActorType says what kind of thing caused an event.
 type ActorType string

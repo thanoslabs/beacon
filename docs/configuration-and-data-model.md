@@ -396,6 +396,7 @@ The **bootstrap admin** has a row in `users` with the email address `bootstrap-a
 | `status` | `text` | `firing`, `acknowledged`, `snoozed` or `resolved` |
 | `severity` | `text` | `critical`, `warning` or `info` |
 | `labels`, `annotations` | `jsonb` | |
+| `links` | `jsonb` | Web addresses the source sent with the alert, by name: `generator`, and for Grafana `dashboard`, `panel` and `silence`. Added with the Alertmanager receiver (issue 23); the first version of this design had nowhere to keep them. |
 | `group_id` | `uuid` | References `alert_groups` |
 | `routing_rule_id` | `uuid` | Null when the default applied |
 | `team_id` | `uuid` | Nullable |
