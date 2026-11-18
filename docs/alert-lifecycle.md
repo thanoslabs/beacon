@@ -87,6 +87,6 @@ Each event has the time it happened and an actor:
 | Actor | Who |
 |---|---|
 | `source` | The source that sent the alert or its resolution |
-| `user` | A person. When they acted from a chat service and their account there is not linked to a Beacon user yet, the event holds the chat service and their identifier in it, so it can be attributed once the link exists. |
+| `user` | A person. When they acted from a chat service, the event holds the chat service and their identifier in it, and the Beacon user when the account is linked to one ([[access#Chat accounts]]). An account that is not linked may still act; its events name the chat account alone. |
 | `api_token` | A client using an API token |
 | `system` | Beacon itself, for example when a snooze ends |

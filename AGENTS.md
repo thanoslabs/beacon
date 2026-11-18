@@ -55,6 +55,7 @@ Tooling:
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
 │   ├── config/               # Typed provisioned objects, the YAML loader and the Secret type
 │   ├── e2e/                  # End-to-end tests: the real binary, Postgres and a fake Slack
+│   ├── identity/             # Which Slack or Discord account belongs to which user: lookup by email, link codes
 │   ├── ingest/               # Receivers for Alertmanager, Grafana and the generic webhook: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
 │   ├── notify/               # Notification queue, workers, retries and the Channel interface
@@ -188,6 +189,15 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - The identity provider is discovered lazily, so Beacon starts and handles alerts while it is down. Do not make the start depend on it.
 - Tests that need a real provider use `oidctest` against the Dex in `compose.yaml` (`dev/dex/config.yaml` holds its users). Without `BEACON_TEST_OIDC_ISSUER` they are skipped locally and fail in CI. Use the hand-written provider in `internal/auth/fake_test.go` only for what a real one will not do, such as a token that is wrong in one way. Beacon has no account at any hosted provider; say in the PR that those are unverified.
 
+### Chat identities
+
+- `internal/identity` owns `user_identities`, `identity_lookups` and `identity_link_codes`. `docs/access.md` (Chat accounts) and `docs/slack.md` (People) describe it; keep them true.
+- An identity belongs to a user and an integration. An account is never moved from one user to another: `Store.Link` returns `ErrTaken`, and callers log it and leave things as they are.
+- `Linker` finds Slack accounts by email address. Whom it has asked about is in `identity_lookups`, claimed in the statement that selects them, so replicas do not repeat each other and Slack's rate limit is respected; do not replace it with a cache in the process. A failed lookup ends the pass for that integration.
+- A new chat service is an `identity.Integration` that the provisioner builds: with a `Lookup` when the service can be asked by email address, without one when people link their accounts themselves (`StartLink`, `CompleteLink`).
+- Link codes are random, short-lived and stored as SHA-256 hashes, like session tokens. `CompleteLink` trusts its caller to have verified that the request comes from the chat service and from that account; a route that calls it must check the service's signature first.
+- Whoever acts from chat is turned into an actor in one place, `slack.Interactions.actor`: the linked user when there is one, the chat account alone otherwise. A failed lookup must never lose the action.
+
 ### Ingestion
 
 - `internal/ingest` serves `POST /api/v1/ingest/<source>`. The type of the source decides which payload is read: `docs/webhook.md` is the contract for the generic JSON payload, `docs/alertmanager.md` for Alertmanager's and `docs/grafana.md` for Grafana's. Every payload error must name the field at fault.
@@ -224,11 +234,11 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 ### Slack
 
-- `internal/slack` is the Slack channel. It calls two Web API methods, `chat.postMessage` and `chat.update`, with the standard library; there is no Slack SDK.
+- `internal/slack` is the Slack channel. It calls three Web API methods, `chat.postMessage`, `chat.update` and `users.lookupByEmail`, with the standard library; there is no Slack SDK. `users.lookupByEmail` takes its argument in the query, not as JSON, and the fake refuses to read it from a JSON body.
 - Beacon has no Slack credentials for testing. Test against `slacktest`, the fake Slack, which checks requests against the documented shapes and limits. When you change what is sent, read Slack's current documentation rather than trusting memory, teach the fake the same rule, and say in the PR that real delivery is unverified.
 - A message is about an alert group. `render` shows a group of one alert as that alert, and a larger group as what its alerts share and a bounded list of them; the state shown and the buttons offered are derived from all the alerts.
 - Everything that comes from an alert passes through `escape` before it goes into message text, and each part is clipped so a message stays within Block Kit's limits.
-- Button presses arrive at `POST /api/v1/integrations/<name>/interactions`. The handler verifies the Slack signature over the raw body before it parses anything; keep it that way. It answers within Slack's three seconds, and changes alerts only through `alert.Store.ApplyToGroup` with `alert.ChatUser`, so the timeline records the Slack user in the form that identity linking will use.
+- Button presses arrive at `POST /api/v1/integrations/<name>/interactions`. The handler verifies the Slack signature over the raw body before it parses anything; keep it that way. It answers within Slack's three seconds, and changes alerts only through `alert.Store.ApplyToGroup`, as the Beacon user the Slack account is linked to (`alert.LinkedChatUser`) or, when it is linked to nobody, as the Slack account alone (`alert.ChatUser`).
 - The buttons a message offers are derived from the state machine (`alert.Next`), so they cannot drift from what is allowed.
 - `docs/slack.md` is the setup guide. Update it when scopes or settings change.
 

@@ -27,6 +27,7 @@ You need permission to add apps to your workspace.
        bot:
          - chat:write
          - chat:write.public
+         - users:read.email
    settings:
      interactivity:
        is_enabled: true
@@ -49,8 +50,9 @@ Slack renames the pages and buttons of its settings from time to time, so the na
 |---|---|
 | `chat:write` | Post messages, and edit the messages Beacon posted |
 | `chat:write.public` | Post to public channels without being invited first. Leave it out if you prefer to invite the app to each channel. |
+| `users:read.email` | Find the Slack account of a Beacon user by their email address; see [People](#people). Without it nobody is linked: actions in Slack are recorded with the Slack account only. |
 
-Beacon asks for nothing else: it does not read messages, channels or users.
+Beacon asks for nothing else: it does not read messages or channels, and of users it asks one question, which account has a given email address.
 
 ## Configure Beacon
 
@@ -141,7 +143,17 @@ A press acts on the whole group: every alert of the group whose state allows the
 If the alert has changed in the meantime, for example because someone else acknowledged it a moment earlier, nothing happens and Slack shows a note that only you can see, such as "Nothing changed: this alert is already acknowledged."
 
 > [!note] Who can act
-> Anyone who can see the message in Slack can press its buttons. Beacon has no users of its own yet; once it does, Slack accounts will be linked to them and the same actions will be attributed to the Beacon user.
+> Anyone who can see the message in Slack can press its buttons, whether or not they are a user of Beacon. Slack decides who sees a channel; Beacon records who acted. See [People](#people).
+
+## People
+
+Beacon links each of its users to their account in your workspace, so that it knows who a person in Slack is.
+
+- **By email address.** For every user who has signed in to Beacon ([[access]]), Beacon asks Slack which member has that email address (`users.lookupByEmail`), and stores the answer. It asks shortly after the person's first sign-in, and when a Slack integration is added.
+- **Someone Slack does not know** is logged as a warning, `no account in the chat service has this user's email address`, and counted in the metric `beacon_users_without_identity{integration="..."}`. Beacon asks again every hour, and at once when the person's address in Beacon changes. A member whom Slack has deactivated is not found either.
+- **The addresses must be the same** in the identity provider and in Slack. Nothing else is tried: a name or a similar address is not a match.
+- **An action in Slack is attributed to the linked user.** When someone whose account is linked presses a button, the timeline records the Beacon user together with the Slack account, the alert names them as the person who acknowledged it, and the message shows their name in Beacon. When the account is not linked, the action is still taken, and the timeline records the Slack account alone.
+- A person sees their linked accounts at `GET /api/v1/me/identities`.
 
 ### Request URL
 
@@ -166,7 +178,7 @@ Every attempt is recorded on the alert's timeline with Slack's error. The common
 | `not_in_channel` | The app is not in the channel | Gives up at once. Invite the app, or add `chat:write.public`. |
 | `channel_not_found` | The channel does not exist, or is private and the app is not in it | Gives up at once |
 | `invalid_auth`, `token_revoked`, `account_inactive` | The bot token is wrong or no longer valid | Gives up at once |
-| `missing_scope` | The app lacks `chat:write` | Gives up at once |
+| `missing_scope` | The app lacks `chat:write`. For finding people by email address it is `users:read.email`: that failure is in Beacon's log as `link identities`, and nobody is linked until the scope is added and the app reinstalled. | Gives up at once |
 | Rate limited (HTTP 429) | Too many messages | Retries, no sooner than Slack asks |
 | HTTP 5xx, timeouts, `internal_error` and codes Beacon does not know | Slack is having trouble | Retries with backoff, up to the limit |
 
