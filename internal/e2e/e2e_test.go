@@ -1532,6 +1532,106 @@ func TestTeamMembersFromConfiguration(t *testing.T) {
 	}
 }
 
+// scheduleConfiguration adds a daily rotation of Grace and Ada to the
+// configuration with sign-in.
+func scheduleConfiguration(t *testing.T) string {
+	t.Helper()
+	return signInConfiguration(t) + `schedules:
+  - name: primary
+    team: platform
+    time_zone: Australia/Sydney
+    rotation:
+      members: [grace@example.com, ada@example.com]
+      shift_length: 1d
+      handoff:
+        time: "09:00"
+`
+}
+
+// onCall returns who the position of a schedule says is on call, and how
+// many shifts it has recorded.
+func (b *beacon) onCall(name string) (email string, shifts int) {
+	b.t.Helper()
+	err := b.db.QueryRow(context.Background(), `
+		SELECT COALESCE(u.email, ''), (SELECT count(*) FROM shifts f WHERE f.schedule_id = s.id)
+		FROM schedules s JOIN schedule_positions p ON p.schedule_id = s.id LEFT JOIN users u ON u.id = p.user_id
+		WHERE s.name = $1`, name).Scan(&email, &shifts)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		b.t.Fatalf("read the position of %s: %v", name, err)
+	}
+	return email, shifts
+}
+
+// TestScheduleRotation runs a schedule in the real binary. Its members have
+// not signed in when it starts, so nobody is on call and the logs say so;
+// the first of them to sign in takes the shift, and a restart in the middle
+// of that shift leaves it alone.
+func TestScheduleRotation(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	dir := writeConfig(t, scheduleConfiguration(t))
+	b := launch(t, dbURL, dir)
+	b.waitUntilServing()
+
+	if who, shifts := b.onCall("primary"); who != "" || shifts != 0 {
+		t.Fatalf("before anyone signed in, %q is on call with %d shifts", who, shifts)
+	}
+	logs := b.output()
+	for _, email := range []string{"grace@example.com", "ada@example.com"} {
+		if want := `"msg":"rotation member skipped: no user has this email address; they take their place in the rotation once they have signed in","schedule":"primary","email":"` + email + `"`; !strings.Contains(logs, want) {
+			t.Errorf("the logs do not contain %s", want)
+		}
+	}
+	if got := b.metrics("beacon_schedule_members_skipped"); got != `beacon_schedule_members_skipped{schedule="primary"} 2` {
+		t.Errorf("metric at start: %s", got)
+	}
+
+	// Ada is second in the rotation and the first to be a user.
+	if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), oidctest.Ada, oidctest.Password); code != http.StatusOK {
+		t.Fatalf("sign-in = %d %s", code, body)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		who, shifts := b.onCall("primary")
+		if who == oidctest.Ada && shifts == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%q is on call with %d shifts, want Ada with one\n%s", who, shifts, b.output())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var started time.Time
+	if err := b.db.QueryRow(context.Background(), `SELECT starts_at FROM shifts WHERE ends_at IS NULL`).Scan(&started); err != nil {
+		t.Fatalf("read the shift: %v", err)
+	}
+
+	// A restart in the middle of the shift.
+	if code := b.terminate(); code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	b = launch(t, dbURL, dir)
+	b.waitUntilServing()
+	var again time.Time
+	err := b.db.QueryRow(context.Background(), `SELECT starts_at FROM shifts WHERE ends_at IS NULL`).Scan(&again)
+	if who, shifts := b.onCall("primary"); err != nil || who != oidctest.Ada || shifts != 1 || !again.Equal(started) {
+		t.Errorf("after a restart %q is on call with %d shifts, the open one since %s (%v); want Ada with the shift from %s", who, shifts, again, err, started)
+	}
+	if got := b.metrics("beacon_schedule_members_skipped"); got != `beacon_schedule_members_skipped{schedule="primary"} 1` {
+		t.Errorf("metric after the restart: %s", got)
+	}
+
+	// The schedule leaves the configuration: its shift ends and is kept.
+	logs = b.reload(signInConfiguration(t), 1)
+	if !strings.Contains(logs, `"msg":"schedule ended: it left the configuration; its recorded shifts are kept","schedule":"primary"`) {
+		t.Errorf("the logs do not say that the schedule ended:\n%s", logs)
+	}
+	var open, closed int
+	err = b.db.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE ends_at IS NULL), count(*) FILTER (WHERE ends_at IS NOT NULL) FROM shifts`).Scan(&open, &closed)
+	if who, _ := b.onCall("primary"); err != nil || open != 0 || closed != 1 || who != "" {
+		t.Errorf("after the schedule was removed: %d open and %d closed shifts, %q on call (%v)", open, closed, who, err)
+	}
+}
+
 // TestRolesAreEnforced signs in a member and an admin through the identity
 // provider and sends both to a route that only an admin may use.
 func TestRolesAreEnforced(t *testing.T) {

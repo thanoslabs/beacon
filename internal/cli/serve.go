@@ -20,6 +20,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/logging"
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres"
+	"github.com/thanoslabs/beacon/internal/schedule"
 	"github.com/thanoslabs/beacon/internal/server"
 	"github.com/thanoslabs/beacon/internal/silence"
 	"github.com/thanoslabs/beacon/internal/slack"
@@ -33,6 +34,11 @@ const snoozeExpiryInterval = 5 * time.Second
 // sessionCleanupInterval is how often expired sessions are deleted. They are
 // refused from the moment they expire; this only keeps the table small.
 const sessionCleanupInterval = 5 * time.Minute
+
+// scheduleInterval is how often the server looks for handoffs that have
+// fallen due. A handoff is recorded at the moment it was due, however late
+// it is carried out.
+const scheduleInterval = 5 * time.Second
 
 func runServe(ctx context.Context, e env, args []string) error {
 	var (
@@ -129,6 +135,8 @@ func runServe(ctx context.Context, e env, args []string) error {
 	silences.OnExpire(alerts.WakeGroupsWaitingFor)
 	pipeline.SetSilences(silences)
 
+	schedules := schedule.NewStore(pool)
+
 	registry := server.NewRegistry()
 	srvCfg.Authenticator = signIn
 	srv := server.New(srvCfg, logger, pool, registry)
@@ -143,6 +151,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 		pipeline:     pipeline,
 		auth:         signIn,
 		silences:     silence.NewHandler(logger, silences),
+		schedules:    schedules,
 	}
 	prov.registerMetrics(registry)
 	prov.ingest.RegisterMetrics(registry)
@@ -166,6 +175,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 	background.Go(func() { pipeline.Run(ctx) })
 	background.Go(func() { pipeline.RunGroups(ctx, notify.DefaultGroupPollInterval) })
 	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
+	background.Go(func() { schedules.Run(ctx, logger, scheduleInterval) })
 	background.Go(func() { sessions.RunCleanup(ctx, logger, sessionCleanupInterval) })
 	background.Go(func() {
 		for {

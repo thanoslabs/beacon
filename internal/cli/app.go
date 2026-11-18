@@ -21,6 +21,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/provision"
 	"github.com/thanoslabs/beacon/internal/routing"
+	"github.com/thanoslabs/beacon/internal/schedule"
 	"github.com/thanoslabs/beacon/internal/silence"
 	"github.com/thanoslabs/beacon/internal/slack"
 )
@@ -42,6 +43,7 @@ type provisioner struct {
 	pipeline     *notify.Pipeline
 	auth         *auth.Handler
 	silences     *silence.Handler
+	schedules    *schedule.Store
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -51,6 +53,8 @@ type provisioner struct {
 	successful prometheus.Gauge
 	lastOK     prometheus.Gauge
 	skipped    *prometheus.GaugeVec
+	// rotationSkipped counts the rotation members that are not users.
+	rotationSkipped *prometheus.GaugeVec
 
 	// teams are the teams of the active configuration.
 	teams atomic.Pointer[[]config.Team]
@@ -158,7 +162,11 @@ func (p *provisioner) registerMetrics(reg prometheus.Registerer) {
 		Name: "beacon_team_members_skipped",
 		Help: "Email addresses in a team's members list that belong to no user, by team, as of the last time this process applied the configuration or completed a sign-in. Such a person joins the team when they first sign in.",
 	}, []string{"team"})
-	reg.MustRegister(p.reloads, p.successful, p.lastOK, p.skipped)
+	p.rotationSkipped = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "beacon_schedule_members_skipped",
+		Help: "Email addresses in a schedule's rotation that belong to no user, by schedule, as of the last time this process applied the configuration. Such a member is passed over until the person has signed in.",
+	}, []string{"schedule"})
+	reg.MustRegister(p.reloads, p.successful, p.lastOK, p.skipped, p.rotationSkipped)
 	// Both results exist from the start, so a rate over them is never empty.
 	p.reloads.WithLabelValues(resultSuccess)
 	p.reloads.WithLabelValues(resultFailure)
@@ -183,6 +191,12 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	// Positions are runtime state that follows the rows: a new schedule
+	// starts its rotation here, and one that left the files ends.
+	rotations, err := p.applySchedules(ctx, cfg, rows.IDs[provision.Schedules])
+	if err != nil {
+		return err
+	}
 	for _, c := range rows.Changes {
 		p.logger.InfoContext(ctx, "provisioned object "+string(c.Action), slog.String("kind", string(c.Kind)), slog.String("name", c.Name))
 	}
@@ -197,6 +211,7 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 	p.teams.Store(&cfg.Teams)
 	p.countSkipped(cfg.Teams, rows.Skipped)
 
+	p.reportSchedules(ctx, cfg, rotations)
 	p.applySources(ctx, cfg, rows.IDs[provision.Sources])
 	p.applyRouting(ctx, cfg, router)
 	p.applyNotifications(ctx, cfg, rows.IDs[provision.Integrations], rows.IDs[provision.EscalationPolicies])
@@ -276,6 +291,40 @@ func (p *provisioner) reloadFrom(ctx context.Context) error {
 		return err
 	}
 	return p.apply(ctx, cfg)
+}
+
+// applySchedules gives every schedule of the configuration a position in its
+// rotation. ids maps each schedule to its row.
+func (p *provisioner) applySchedules(ctx context.Context, cfg config.Config, ids map[string]string) (schedule.Applied, error) {
+	provisioned := make([]schedule.Provisioned, 0, len(cfg.Schedules))
+	for _, s := range cfg.Schedules {
+		provisioned = append(provisioned, schedule.Provisioned{ID: ids[s.Name], Schedule: s})
+	}
+	return p.schedules.Apply(ctx, provisioned)
+}
+
+// reportSchedules logs what applying the schedules did, and counts the
+// rotation members that were passed over.
+func (p *provisioner) reportSchedules(ctx context.Context, cfg config.Config, applied schedule.Applied) {
+	for _, name := range applied.Started {
+		p.logger.InfoContext(ctx, "schedule started its rotation", slog.String("schedule", name))
+	}
+	for _, name := range applied.Ended {
+		p.logger.InfoContext(ctx, "schedule ended: it left the configuration; its recorded shifts are kept", slog.String("schedule", name))
+	}
+	// Reset first, so that a schedule that left the configuration leaves
+	// the metric too.
+	p.rotationSkipped.Reset()
+	for _, s := range cfg.Schedules {
+		p.rotationSkipped.WithLabelValues(s.Name).Set(0)
+	}
+	// As for a team: an error in the log, as the requirements ask, and not
+	// a failure.
+	for _, s := range applied.Skipped {
+		p.rotationSkipped.WithLabelValues(s.Schedule).Inc()
+		p.logger.ErrorContext(ctx, "rotation member skipped: no user has this email address; they take their place in the rotation once they have signed in",
+			slog.String("schedule", s.Schedule), slog.String("email", s.Email))
+	}
 }
 
 // applySources makes the ingest endpoint serve the configured sources. ids
