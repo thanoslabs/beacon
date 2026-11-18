@@ -23,7 +23,7 @@ schedules:
 ```
 
 > [!warning] What works today
-> Beacon runs the rotation, records the shifts and applies changes to a definition safely. There are no overrides yet, and escalation policies do not page the person on call yet.
+> Beacon runs the rotation, records the shifts, applies changes to a definition safely and takes overrides. Escalation policies do not page the person on call yet.
 
 ## The file is the intent, the database is the position
 
@@ -114,6 +114,87 @@ schedule platform-primary: changed. The new definition takes over at the next ha
 - Members who are not users are listed as passed over, as they would be.
 - `--format json` prints the same for a program to read. `--schedule <name>` limits the output to one schedule. `--weeks` sets how far ahead to look (default 8).
 - **In CI**: `beacon preview` exits `0` whatever it finds, so its output can be posted to a pull request. With `--fail-on-moves` it exits `1` when any upcoming shift would move or a running schedule would end, for teams that want such a change to need a second look.
+
+## Overrides
+
+An override puts one person on call for a schedule for a period, in place of whoever the rotation has: someone covers a holiday, a doctor's appointment or a night. Overrides are runtime state. People create and remove them through the API; they are not part of the configuration files, and a reload does not touch them.
+
+| Part | Meaning |
+|---|---|
+| Person | Any user, by email address. They need not be a member of the rotation. |
+| Start | When the override begins. Now, unless a later time is given. |
+| End | When it ends. From this moment the rotation's person is on call again. |
+| Author | Who created it: the signed-in user, or the API token. Beacon records it; it cannot be chosen. |
+| Reason | Why. Optional. |
+
+- **The rotation goes on underneath.** An override does not move the rotation: handoffs happen when they would have, and when the override ends, the person on call is whoever the rotation has by then.
+- **Overlapping overrides are refused.** A schedule has at most one override at any moment. A request for a period that overlaps an existing override is answered `409` and names the override in the way; remove that one, or choose a period beside it. Periods that touch, one ending as the next begins, do not overlap. Beacon does not pick a winner between two overrides, because whichever rule it used would surprise one of the two people.
+- **Overrides are recorded as shifts.** When an override begins, a shift of kind `override` is written for its person, with the override's identifier, beside the rotation's shift, which stays as it is. It is closed when the override ends or is removed. Who was really on call at a past moment is the person of the override shift that covers it, and otherwise the person of the rotation shift.
+- An override cannot be edited. Remove it and create another.
+- When a schedule leaves the configuration, its overrides end with it.
+
+### Who may do what
+
+Every route needs a signed-in user or an API token; see [[access]]. **Members and admins alike may list, create and remove overrides**, for themselves and for other people, including overrides that someone else created: covering for a colleague is part of being on call. The author and the time are stored with each override, and creating and removing are logged with who did it.
+
+### API
+
+```
+GET    /api/v1/schedules/<name>/overrides             the overrides in force and to come
+GET    /api/v1/schedules/<name>/overrides?past=true   those, the ended and the removed ones
+POST   /api/v1/schedules/<name>/overrides             create one
+DELETE /api/v1/schedules/<name>/overrides/<id>        remove one
+```
+
+```sh
+curl -X POST https://beacon.example.com/api/v1/schedules/platform-primary/overrides \
+  -H "Authorization: Bearer $BEACON_TOKEN" \
+  -d '{
+    "user": "grace@example.com",
+    "starts_at": "2026-12-24T09:00:00Z",
+    "ends_at": "2026-12-27T09:00:00Z",
+    "reason": "covering the holidays"
+  }'
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `user` | yes | Email address of the person who covers. They must be a user, which a person becomes at their first sign-in. |
+| `starts_at` | no | When the override begins, in RFC 3339 form. Defaults to now; a time in the past is taken as now. At most a year ahead. |
+| `ends_at` | one of | When it ends, in RFC 3339 form. In the future, after the start, and at most a year after it. |
+| `duration` | one of | How long it lasts from its start, such as `8h`, `1d` or `1w`, in place of `ends_at` |
+| `reason` | no | Why, at most 500 characters |
+
+The body may be at most 16 KiB, and a field that is not in this table is an error. The answer is `201` with the override:
+
+```json
+{
+  "id": "0d6f3b52-7a0e-4a0f-9d0b-0a6e5f1f3c77",
+  "schedule": "platform-primary",
+  "user": "grace@example.com",
+  "starts_at": "2026-12-24T09:00:00Z",
+  "ends_at": "2026-12-27T09:00:00Z",
+  "reason": "covering the holidays",
+  "created_by": "ada@example.com",
+  "created_at": "2026-12-01T10:12:00Z",
+  "state": "pending"
+}
+```
+
+`state` is `pending` before the start, `active` during the period, `ended` afterwards and `cancelled` when the override was removed; a removed override also has `cancelled_at`. `created_by` is the email address of the user who created it; an override created with an API token has `created_by_token`, the name of the token, in its place. Times are answered in UTC.
+
+A list answers `{"overrides": [...]}`, by start, at most 1000.
+
+`DELETE` answers `204`. An override that has not begun never will; one that is in force ends now. Removing one that is over, or was removed before, changes nothing and also answers `204`.
+
+| Status | Meaning |
+|---|---|
+| `400` | The request is not an override. `error` says why and `field` names the part at fault. |
+| `401` | No valid session or token |
+| `403` | A request from another site in a browser |
+| `404` | No schedule has this name, or it has no override with this identifier |
+| `409` | The period overlaps another override of the schedule |
+| `413` | The body is larger than 16 KiB |
 
 ## When a schedule leaves the configuration
 
