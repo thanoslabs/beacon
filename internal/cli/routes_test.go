@@ -49,6 +49,10 @@ var wantRoutes = []string{
 	"member POST /api/v1/silences",
 	"member GET /api/v1/silences/{id}",
 	"member DELETE /api/v1/silences/{id}",
+	"member GET /api/v1/schedules",
+	"member GET /api/v1/schedules/{name}",
+	"member GET /api/v1/schedules/{name}/shifts",
+	"member GET /api/v1/teams/{name}/on-call",
 	"member GET /api/v1/schedules/{name}/overrides",
 	"member POST /api/v1/schedules/{name}/overrides",
 	"member DELETE /api/v1/schedules/{name}/overrides/{id}",
@@ -104,10 +108,10 @@ func TestRoutes(t *testing.T) {
 			closed++
 		}
 	}
-	if closed != 13 {
-		t.Errorf("%d routes refused a stranger, want 13", closed)
+	if closed != 17 {
+		t.Errorf("%d routes refused a stranger, want 17", closed)
 	}
-	for _, probe := range []string{"GET /", "GET /api/v1/alerts", "GET /api/v1/schedules/x/overrides/y", "PUT /api/v1/schedules/x/overrides", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
+	for _, probe := range []string{"GET /", "GET /api/v1/alerts", "GET /api/v1/teams", "GET /api/v1/teams/x", "POST /api/v1/schedules", "DELETE /api/v1/schedules/x", "GET /api/v1/schedules/x/overrides/y", "PUT /api/v1/schedules/x/overrides", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
 		method, path, _ := strings.Cut(probe, " ")
 		if code, body := request(method, path); code != http.StatusUnauthorized {
 			t.Errorf("%s without a session = %d %s, want 401", probe, code, body)

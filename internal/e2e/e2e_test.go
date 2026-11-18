@@ -1634,6 +1634,28 @@ func TestScheduleRotation(t *testing.T) {
 	if open, closed := overrideShifts(); open != 1 || closed != 0 {
 		t.Errorf("%d open and %d closed override shifts after the override began, want 1 and 0", open, closed)
 	}
+	// Who is on call, for the schedule and for its team: Grace, covering Ada.
+	onCallNow := func(path string) map[string]any {
+		t.Helper()
+		code, body := b.api(member, "GET", path, "", "")
+		if code != http.StatusOK {
+			t.Fatalf("GET %s = %d %v", path, code, body)
+		}
+		if list, ok := body["on_call"].([]any); ok && len(list) == 1 {
+			return list[0].(map[string]any)
+		}
+		on, _ := body["on_call"].(map[string]any)
+		return on
+	}
+	for _, path := range []string{"/api/v1/schedules/primary", "/api/v1/teams/platform/on-call"} {
+		if on := onCallNow(path); on["user"] != "grace@example.com" || on["rotation_user"] != "ada@example.com" || on["override"] == nil {
+			t.Errorf("GET %s during the override: on call %v", path, on)
+		}
+	}
+	code, timeline := b.api(member, "GET", "/api/v1/schedules/primary/shifts", "", "")
+	if upcoming, _ := timeline["shifts"].([]any); code != http.StatusOK || len(upcoming) < 10 || upcoming[0].(map[string]any)["user"] != "grace@example.com" || upcoming[1].(map[string]any)["user"] != "ada@example.com" {
+		t.Errorf("GET shifts = %d %v", code, timeline)
+	}
 	if code, body := b.api(admin, "POST", "/api/v1/schedules/primary/overrides", "", `{"user": "ada@example.com", "duration": "30m"}`); code != http.StatusConflict {
 		t.Errorf("an overlapping override = %d %v, want 409", code, body)
 	}
@@ -1642,6 +1664,9 @@ func TestScheduleRotation(t *testing.T) {
 	}
 	if open, closed := overrideShifts(); open != 0 || closed != 1 {
 		t.Errorf("%d open and %d closed override shifts after the override was removed, want 0 and 1", open, closed)
+	}
+	if on := onCallNow("/api/v1/schedules/primary"); on["user"] != "ada@example.com" || on["override"] != nil {
+		t.Errorf("on call after the override was removed: %v", on)
 	}
 
 	// A restart in the middle of the shift.
