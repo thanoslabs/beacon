@@ -193,6 +193,7 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 - `internal/slack` is the Slack channel. It calls two Web API methods, `chat.postMessage` and `chat.update`, with the standard library; there is no Slack SDK.
 - Beacon has no Slack credentials for testing. Test against `slacktest`, the fake Slack, which checks requests against the documented shapes and limits. When you change what is sent, read Slack's current documentation rather than trusting memory, teach the fake the same rule, and say in the PR that real delivery is unverified.
+- A message is about an alert group. `render` shows a group of one alert as that alert, and a larger group as what its alerts share and a bounded list of them; the state shown and the buttons offered are derived from all the alerts.
 - Everything that comes from an alert passes through `escape` before it goes into message text, and each part is clipped so a message stays within Block Kit's limits.
 - Button presses arrive at `POST /api/v1/integrations/<name>/interactions`. The handler verifies the Slack signature over the raw body before it parses anything; keep it that way. It answers within Slack's three seconds, and changes alerts only through `alert.Store.ApplyToGroup` with `alert.ChatUser`, so the timeline records the Slack user in the form that identity linking will use.
 - The buttons a message offers are derived from the state machine (`alert.Next`), so they cannot drift from what is allowed.

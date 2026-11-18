@@ -575,7 +575,10 @@ func TestAlertmanagerSource(t *testing.T) {
 		t.Fatalf("firing = %v, want two alerts created", got)
 	}
 	// Both alerts are DiskFull, so they are one group and one message.
-	b.message("the group in Slack", contains("*Firing*", "and 1 more in this group", "`team=platform`"))
+	msg := b.message("the group in Slack", contains("*Firing* · critical", "2 alerts: 2 firing", "Disk is full on db1", "Disk is filling up on db2"))
+	if msg.Text != "[FIRING] critical: DiskFull (2 alerts)" || !strings.Contains(msg.JSON(), "`instance=db1.example.com:9100`") {
+		t.Errorf("message = %s", msg.JSON())
+	}
 
 	// The repeat that Alertmanager sends every repeat_interval changes
 	// nothing and tells nobody.
@@ -585,10 +588,11 @@ func TestAlertmanagerSource(t *testing.T) {
 	if got := deliver("alertmanager/some-resolved.json"); got["updated"] != 1 || got["resolved"] != 1 {
 		t.Fatalf("one resolved = %v", got)
 	}
+	b.message("the partly resolved group in Slack", contains("*Firing* · critical", "2 alerts: 1 firing, 1 resolved"))
 	if got := deliver("alertmanager/resolved.json"); got["resolved"] != 1 {
 		t.Fatalf("all resolved = %v", got)
 	}
-	msg := b.message("the resolved group in Slack", contains("*Resolved*", "Resolved by the source", "and 1 more in this group"))
+	msg = b.message("the resolved group in Slack", contains("*Resolved*", "2 alerts: 2 resolved", "Resolved by the source"))
 	if strings.Contains(msg.JSON(), `"actions"`) {
 		t.Errorf("the resolved message still has buttons:\n%s", msg.JSON())
 	}
@@ -706,7 +710,7 @@ func TestConcurrentDeliveries(t *testing.T) {
 		t.Fatalf("%d groups, want 2", groups)
 	}
 	b.waitForMessages("one message per group", 2, func(m slacktest.Message) bool {
-		return strings.Contains(m.JSON(), "and 2 more in this group") || strings.Contains(m.JSON(), "Latency is high on api1")
+		return strings.Contains(m.JSON(), "3 alerts: 3 firing") || strings.Contains(m.JSON(), "Latency is high on api1")
 	})
 
 	storm(map[string]string{"e2e": diskFullResolved, "am": captured(t, "alertmanager/resolved.json"), "grafana": captured(t, "grafana/resolved.json")})
@@ -715,7 +719,7 @@ func TestConcurrentDeliveries(t *testing.T) {
 		t.Fatalf("%d alerts, %d resolved, want 4 and 3", alerts, resolved)
 	}
 	b.waitForMessages("the resolutions in Slack", 2, func(m slacktest.Message) bool {
-		return strings.Contains(m.JSON(), "and 2 more in this group") || strings.Contains(m.JSON(), "*Resolved*")
+		return strings.Contains(m.JSON(), "3 alerts: 1 firing, 2 resolved") || strings.Contains(m.JSON(), "*Resolved*")
 	})
 	// Each alert fired once and resolved once, whatever was repeated.
 	if got := count(`SELECT count(*) FROM alert_events WHERE type IN ('fired', 'resolved')`); got != 7 {
@@ -723,6 +727,132 @@ func TestConcurrentDeliveries(t *testing.T) {
 	}
 	if n := len(b.slack.Calls("chat.postMessage")); n != 2 {
 		t.Errorf("%d messages were posted to Slack, want 2", n)
+	}
+}
+
+// groupStates reads the states of the alerts with an alert name, as
+// "host=state" in host order.
+func (b *beacon) groupStates(alertname string) string {
+	b.t.Helper()
+	rows, err := b.db.Query(context.Background(), `SELECT (labels->>'host') || '=' || status FROM alerts WHERE labels->>'alertname' = $1 ORDER BY 1`, alertname)
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	states, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	return strings.Join(states, " ")
+}
+
+// find waits for the one Slack message that satisfies cond, among others.
+func (b *beacon) find(what string, cond func(slacktest.Message) bool) slacktest.Message {
+	b.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var found []slacktest.Message
+		for _, m := range b.slack.Messages() {
+			if cond(m) {
+				found = append(found, m)
+			}
+		}
+		if len(found) == 1 {
+			return found[0]
+		}
+		if time.Now().After(deadline) {
+			b.t.Fatalf("timed out waiting for %s; Slack has: %+v", what, b.slack.Messages())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestGrouping follows a group through the real binary: it forms, gains
+// alerts, is acknowledged from Slack as a whole, and resolves, in one Slack
+// message throughout.
+func TestGrouping(t *testing.T) {
+	b := start(t)
+	fire := func(alertname, host string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"labels": {"alertname": %q, "host": %q, "severity": "warning"}, "annotations": {"summary": %q}}`, alertname, host, alertname+" on "+host)
+		if code, res := b.webhook(body); code != http.StatusCreated {
+			t.Fatalf("webhook = %d %v", code, res)
+		}
+	}
+	resolve := func(alertname, host string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"status": "resolved", "labels": {"alertname": %q, "host": %q, "severity": "warning"}}`, alertname, host)
+		if code, res := b.webhook(body); code != http.StatusOK || res["result"] != "resolved" {
+			t.Fatalf("resolve webhook = %d %v", code, res)
+		}
+	}
+	diskFull := func(substrings ...string) func(slacktest.Message) bool {
+		return contains(append([]string{"DiskFull"}, substrings...)...)
+	}
+
+	// 1. One alert: the message is about that alert.
+	fire("DiskFull", "db1")
+	msg := b.find("the first alert in Slack", diskFull("*Firing* · warning", "*DiskFull on db1*"))
+	if msg.Text != "[FIRING] warning: DiskFull on db1" {
+		t.Errorf("text = %q", msg.Text)
+	}
+
+	// 2. A second alert with the same name joins: the same message now
+	// shows the group. An alert with another name gets a message of its own.
+	fire("DiskFull", "db2")
+	fire("HighLoad", "web1")
+	msg = b.find("the group in Slack", diskFull("2 alerts: 2 firing", "DiskFull on db1 `host=db1`", "DiskFull on db2 `host=db2`"))
+	if msg.Text != "[FIRING] warning: DiskFull (2 alerts)" {
+		t.Errorf("text = %q", msg.Text)
+	}
+	b.find("the other alert in Slack", contains("*HighLoad on web1*"))
+
+	// 3. Acknowledging the group from Slack acknowledges its alerts, and
+	// only its alerts.
+	alice := slacktest.User{ID: "U0ALICE", Username: "alice"}
+	if code := b.click(msg, "beacon_acknowledge", alice); code != http.StatusOK {
+		t.Fatalf("acknowledge = %d", code)
+	}
+	if got := b.groupStates("DiskFull"); got != "db1=acknowledged db2=acknowledged" {
+		t.Fatalf("DiskFull alerts = %s, want both acknowledged", got)
+	}
+	if got := b.groupStates("HighLoad"); got != "web1=firing" {
+		t.Errorf("HighLoad alerts = %s, want it untouched", got)
+	}
+	b.find("the acknowledgement in Slack", diskFull("*Acknowledged*", "2 alerts: 2 acknowledged", "Acknowledged by alice"))
+
+	// 4. A third alert joins the acknowledged group: it is new, so the
+	// group fires again.
+	fire("DiskFull", "db3")
+	msg = b.find("the new alert in the group", diskFull("*Firing*", "3 alerts: 1 firing, 2 acknowledged"))
+	if !strings.Contains(msg.JSON(), "beacon_acknowledge") {
+		t.Errorf("the message does not offer to acknowledge the new alert:\n%s", msg.JSON())
+	}
+
+	// 5. The source resolves them one by one; the message follows, and ends
+	// resolved without buttons.
+	resolve("DiskFull", "db3")
+	b.find("one resolution in Slack", diskFull("*Acknowledged*", "3 alerts: 2 acknowledged, 1 resolved"))
+	resolve("DiskFull", "db1")
+	resolve("DiskFull", "db2")
+	msg = b.find("the resolved group in Slack", diskFull("*Resolved*", "3 alerts: 3 resolved"))
+	if strings.Contains(msg.JSON(), `"actions"`) {
+		t.Errorf("the resolved message still has buttons:\n%s", msg.JSON())
+	}
+
+	// 6. Two groups, two messages, however many alerts and changes.
+	if n := len(b.slack.Calls("chat.postMessage")); n != 2 {
+		t.Errorf("%d messages were posted, want 2", n)
+	}
+	var open, resolved int
+	if err := b.db.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE status = 'open'), count(*) FILTER (WHERE status = 'resolved') FROM alert_groups`).Scan(&open, &resolved); err != nil || open != 1 || resolved != 1 {
+		t.Errorf("%d open and %d resolved groups, %v; want 1 and 1", open, resolved, err)
+	}
+
+	// 7. The same problem again is a new group with a new message.
+	fire("DiskFull", "db1")
+	b.find("the new group in Slack", diskFull("*Firing*", "*DiskFull on db1*"))
+	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
+		t.Errorf("%d messages were posted, want 3", n)
 	}
 }
 

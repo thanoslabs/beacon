@@ -86,7 +86,9 @@ routing:
 The name of the integration is part of the address that Slack sends button presses to: `/api/v1/integrations/<name>/interactions`.
 
 > [!warning] Which alerts go where
-> Routing and escalation are not implemented yet. Until they are, Beacon posts **every** alert to the channels named in the **first step** of the escalation policy that `routing.default` names, and ignores the rest: later steps, timeouts, people and routing rules. The configuration above keeps its meaning when they arrive.
+> Routing rules and escalation are not implemented yet. Until they are, Beacon posts **every** alert group to the channels named in the **first step** of the escalation policy that `routing.default` names, and ignores the rest: later steps, timeouts, people and routing rules. The configuration above keeps its meaning when they arrive.
+
+Related alerts share one message: by default, alerts with the same `alertname`. The message of a new group is posted after `group_wait`, 30 seconds unless the `routing` block says otherwise; see [[configuration#Grouping]].
 
 [`examples/slack`](https://github.com/thanoslabs/beacon/tree/main/examples/slack) holds this configuration with a webhook source. Copy it, put in your channel ID, and start Beacon:
 
@@ -103,7 +105,7 @@ Then send an alert as described in [[webhook]], and a message appears in the cha
 
 ## The message
 
-A message shows:
+A message is about one alert group and is edited in place as the group changes. For a group of one alert it shows:
 
 - the state (firing, acknowledged, snoozed or resolved) and the severity;
 - the `summary` annotation, or the `alertname` label when there is none;
@@ -112,6 +114,13 @@ A message shows:
 - the labels;
 - the links the source sent with the alert, when they are `http` or `https` addresses: **Source** for where the alert was generated, which Alertmanager and Grafana send, and **Dashboard**, **Panel** and **Silence at the source**, which Grafana sends;
 - what last happened: since when it fires, or who acknowledged, snoozed or resolved it and when, shown in each reader's time zone.
+
+For a group of several alerts it shows instead:
+
+- the state and the severity of the group: firing while any alert fires, then acknowledged, then snoozed, and resolved once all are; the highest severity among the alerts that are not resolved;
+- the label values the alerts share, and how many alerts are in which state;
+- a list of the alerts, those that fire first, each with its `summary` and the labels that tell it apart. Ten are listed and the rest are counted;
+- what last happened, as above.
 
 Text from an alert is escaped, so an alert cannot add links or mentions such as `@channel` to the message.
 
@@ -125,7 +134,7 @@ A message carries a button for each thing that can be done to the alert in its c
 | **Snooze 1h** | Snoozes it for one hour, after which it fires again | firing or acknowledged |
 | **Resolve** | Resolves it | not yet resolved |
 
-The message then changes to show the new state, who acted and when, and the buttons that still apply. The action is recorded on the alert's timeline with the Slack user who pressed the button (see [[alert-lifecycle]]).
+A press acts on the whole group: every alert of the group whose state allows the action takes it, and a button is offered when at least one alert does. The message then changes to show the new state, who acted and when, and the buttons that still apply. The action is recorded on the alert's timeline with the Slack user who pressed the button (see [[alert-lifecycle]]).
 
 If the alert has changed in the meantime, for example because someone else acknowledged it a moment earlier, nothing happens and Slack shows a note that only you can see, such as "Nothing changed: this alert is already acknowledged."
 
