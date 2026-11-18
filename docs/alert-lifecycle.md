@@ -35,6 +35,21 @@ Only the moves in the diagram are allowed. Anything else is refused and changes 
 - **Resolve** can come from a person or from the source. A resolved alert never changes again: if the source reports the same problem later, Beacon opens a new alert.
 - While an alert is open, repeated deliveries of it from the source refresh its labels, annotations, links, severity and the time it was last received. They do not change its state.
 
+## Deduplication and auto-resolve
+
+Sources repeat themselves: Alertmanager and Grafana send a firing alert again on every repeat interval, senders retry a request that timed out, and a pair of Alertmanagers may both deliver the same notification. Beacon recognises an alert by its **source and fingerprint**. The fingerprint is the one the source sends, or is computed from the labels; see [[webhook#Identity]], [[alertmanager]] and [[grafana]].
+
+| Delivery | The source has an open alert with the fingerprint | It has none |
+|---|---|---|
+| Firing | The alert is refreshed: labels, annotations, links, severity and the time it was last received. Its state stays, no event is written and nobody is notified. | A new alert is opened, `firing`. |
+| Resolved | The alert is resolved, and a `resolved` event by the source is written. | Nothing happens, and the request still succeeds. |
+
+- **One open alert per source and fingerprint, whatever arrives at once.** Deliveries of the same alert take turns, so of several that arrive together one opens the alert and the others refresh it; none fails. A unique index in the database refuses a second open alert outright, so the rule holds even against a fault in Beacon.
+- **A resolved alert that fires again is a new alert**, with its own timeline. The resolved one is never reopened.
+- **The time of the resolution** is the one the source gives, when it gives one and it is not in the future. The event on the timeline carries the time Beacon learned of it.
+- **The same fingerprint from two sources** is two alerts. Point the members of an Alertmanager cluster at one source.
+- **A resolution that never arrives** leaves the alert open. Beacon does not guess that a silent source means a solved problem. Resolve such an alert by hand.
+
 ## Severity
 
 Every alert has one of three fixed levels: `critical`, `warning` or `info`.

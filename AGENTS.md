@@ -135,6 +135,7 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 ### Alerts
 
 - `internal/alert` owns the `alerts`, `alert_groups` and `alert_events` tables. Change alert state only through `alert.Store`, so that every change passes the state machine (`alert.Next`) and is written with its timeline event in one transaction. `docs/alert-lifecycle.md` describes the states.
+- One open alert per source and fingerprint is kept by two things, and both must stay: `lockFingerprint` makes concurrent deliveries of one alert take turns, so that none fails, and the unique index `alerts_open_fingerprint_key` refuses a duplicate whatever the code does. A repeated delivery must not write an event or queue a notification.
 - To react to a state change, register an `alert.Observer`. It runs inside the transaction that makes the change, so what it writes commits or rolls back with it.
 - The store takes the time from its clock, not from Postgres, so tests can move time with `SetClock`.
 - Background work started by `beacon serve` watches the command's context and is waited for before the command returns. Anything it needs to remember goes in Postgres.
