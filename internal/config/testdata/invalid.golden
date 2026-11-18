@@ -75,3 +75,7 @@ testdata/invalid/teams/platform.yaml:56: routing rule "r1": match: "bad-label" i
 testdata/invalid/teams/platform.yaml:57: routing rule "r1": match_re: "also bad" is not a label name
 testdata/invalid/teams/platform.yaml:57: routing rule "r1": match_re.severity: is not a regular expression: missing closing ): `^(?:(critical)$`
 testdata/invalid/teams/platform.yaml:58: routing rule "r1": group_interval: must be longer than zero
+testdata/invalid/teams/platform.yaml:60: routing rule "r3": match.severity: the label is in match and in match_re; use one of them
+testdata/invalid/teams/platform.yaml:60: routing rule "r3": match.team: is longer than 1024 characters
+testdata/invalid/teams/platform.yaml:61: routing rule "r3": match_re.instance: is longer than 1024 characters
+testdata/invalid/teams/platform.yaml:62: routing rule "r3": service: must be at most 100 characters, without control characters
