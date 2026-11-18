@@ -277,7 +277,11 @@ func (p *provisioner) applySources(ctx context.Context, cfg config.Config, ids m
 	if len(sources) == 0 {
 		p.logger.WarnContext(ctx, "no source is configured, so every request to the ingest endpoint is refused; add a source to the configuration")
 	}
+	grouping := cfg.Routing.Grouping()
+	p.logger.InfoContext(ctx, "alerts are grouped", slog.Any("group_by", grouping.By),
+		slog.String("group_wait", config.Duration(grouping.Wait).String()), slog.String("group_interval", config.Duration(grouping.Interval).String()))
 	p.ingest.SetSources(sources)
+	p.ingest.SetGrouping(grouping)
 }
 
 // applyNotifications gives the pipeline a channel for each configured

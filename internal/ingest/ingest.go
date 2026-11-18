@@ -54,13 +54,23 @@ type Handler struct {
 	// sources is replaced as a whole when the configuration is reloaded, so
 	// a request sees either the old set or the new one.
 	sources atomic.Pointer[map[string]Source]
+	// grouping says which group a new alert joins. It follows the
+	// configuration like the sources do.
+	grouping atomic.Pointer[config.Grouping]
 }
 
 // New returns a handler for the given sources.
 func New(logger *slog.Logger, alerts Alerts, sources []Source) *Handler {
 	h := &Handler{logger: logger, alerts: alerts}
 	h.SetSources(sources)
+	h.SetGrouping((*config.Routing)(nil).Grouping())
 	return h
+}
+
+// SetGrouping replaces the grouping of new alerts. It is safe while requests
+// are being handled. Alerts that are open stay in the group they have.
+func (h *Handler) SetGrouping(g config.Grouping) {
+	h.grouping.Store(&g)
 }
 
 // SetSources replaces the sources that the handler serves. It is safe while
@@ -278,6 +288,11 @@ func (h *Handler) apply(ctx context.Context, src Source, d delivery) (response, 
 	for k, v := range d.Labels {
 		labels[k] = v
 	}
+	// Groups are formed from the labels as they are stored, with the
+	// source's own, and across sources: the same problem seen by two
+	// sources is one group.
+	grouping := *h.grouping.Load()
+	key, groupLabels := alert.GroupKey("", grouping.By, labels)
 	a, created, err := h.alerts.Fire(ctx, alert.Firing{
 		SourceID:    src.ID,
 		Fingerprint: fingerprint,
@@ -286,6 +301,7 @@ func (h *Handler) apply(ctx context.Context, src Source, d delivery) (response, 
 		Annotations: d.Annotations,
 		Links:       d.Links,
 		StartsAt:    d.StartsAt,
+		Group:       alert.Grouping{Key: key, Labels: groupLabels, Wait: grouping.Wait, Interval: grouping.Interval},
 	})
 	if err != nil {
 		return response{}, err

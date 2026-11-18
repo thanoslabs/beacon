@@ -72,7 +72,8 @@ func TestMain(m *testing.M) {
 
 // configuration is what the tests provision: one webhook source, one Slack
 // integration, and a default escalation policy whose first step names the
-// channel that is told about every alert. Secrets are references, as they
+// channel that is told about every alert group. A group is told about at
+// once and may be updated every second, so the tests need not wait long. Secrets are references, as they
 // must be; the values are in the process environment.
 const configuration = `sources:
   - name: e2e
@@ -92,6 +93,8 @@ escalation_policies:
             integration: slack
         timeout: 5m
 routing:
+  group_wait: 0s
+  group_interval: 1s
   default:
     escalation_policy: default
 `
@@ -571,11 +574,8 @@ func TestAlertmanagerSource(t *testing.T) {
 	if got := deliver("alertmanager/firing.json"); got["received"] != 2 || got["created"] != 2 {
 		t.Fatalf("firing = %v, want two alerts created", got)
 	}
-	msgs := b.waitForMessages("both alerts in Slack", 2, contains("*Firing*", "|:mag: Source", "`team=platform`"))
-	if all := msgs[0].JSON() + msgs[1].JSON(); !strings.Contains(all, "Disk is full on db1") || !strings.Contains(all, "Disk is filling up on db2") ||
-		!strings.Contains(all, `http://prometheus.example.com:9090/graph?g0.expr=node_filesystem_avail_bytes+%3C+1e9`) {
-		t.Errorf("the messages do not show both alerts with their links:\n%s", all)
-	}
+	// Both alerts are DiskFull, so they are one group and one message.
+	b.message("the group in Slack", contains("*Firing*", "and 1 more in this group", "`team=platform`"))
 
 	// The repeat that Alertmanager sends every repeat_interval changes
 	// nothing and tells nobody.
@@ -588,12 +588,18 @@ func TestAlertmanagerSource(t *testing.T) {
 	if got := deliver("alertmanager/resolved.json"); got["resolved"] != 1 {
 		t.Fatalf("all resolved = %v", got)
 	}
-	b.waitForMessages("both resolutions in Slack", 2, contains("*Resolved*", "Resolved by the source"))
+	msg := b.message("the resolved group in Slack", contains("*Resolved*", "Resolved by the source", "and 1 more in this group"))
+	if strings.Contains(msg.JSON(), `"actions"`) {
+		t.Errorf("the resolved message still has buttons:\n%s", msg.JSON())
+	}
 
-	var alerts, notifications int
-	err := b.db.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM alerts WHERE status = 'resolved'), (SELECT count(*) FROM notifications)`).Scan(&alerts, &notifications)
-	if err != nil || alerts != 2 || notifications != 4 {
-		t.Errorf("%d resolved alerts and %d notifications, %v; want 2 and 4: one firing and one resolved message each, and nothing for the repeat", alerts, notifications, err)
+	var alerts, groups int
+	err := b.db.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM alerts WHERE status = 'resolved'), (SELECT count(*) FROM alert_groups WHERE status = 'resolved')`).Scan(&alerts, &groups)
+	if err != nil || alerts != 2 || groups != 1 {
+		t.Errorf("%d resolved alerts in %d resolved groups, %v; want 2 in 1", alerts, groups, err)
+	}
+	if n := len(b.slack.Calls("chat.postMessage")); n != 1 {
+		t.Errorf("%d messages were posted, want 1", n)
 	}
 	if strings.Contains(b.output(), sourceToken) {
 		t.Errorf("the logs contain the source token")
@@ -693,40 +699,123 @@ func TestConcurrentDeliveries(t *testing.T) {
 	if alerts, firing := count(`SELECT count(*) FROM alerts`), count(`SELECT count(*) FROM alerts WHERE status = 'firing'`); alerts != 4 || firing != 4 {
 		t.Fatalf("%d alerts, %d firing, after %d deliveries to each source; want the 4 distinct alerts", alerts, firing, clients*repeats)
 	}
-	b.waitForMessages("one message per alert", 4, contains("*Firing*"))
+	// The three DiskFull alerts, from two sources, are one group; Grafana's
+	// HighLatency is another. Groups, like alerts, are not duplicated by
+	// deliveries that arrive together.
+	if groups := count(`SELECT count(*) FROM alert_groups`); groups != 2 {
+		t.Fatalf("%d groups, want 2", groups)
+	}
+	b.waitForMessages("one message per group", 2, func(m slacktest.Message) bool {
+		return strings.Contains(m.JSON(), "and 2 more in this group") || strings.Contains(m.JSON(), "Latency is high on api1")
+	})
 
 	storm(map[string]string{"e2e": diskFullResolved, "am": captured(t, "alertmanager/resolved.json"), "grafana": captured(t, "grafana/resolved.json")})
 	// Alertmanager's last notification resolved one of its two alerts.
 	if alerts, resolved := count(`SELECT count(*) FROM alerts`), count(`SELECT count(*) FROM alerts WHERE status = 'resolved'`); alerts != 4 || resolved != 3 {
 		t.Fatalf("%d alerts, %d resolved, want 4 and 3", alerts, resolved)
 	}
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		resolved := 0
-		msgs := b.slack.Messages()
-		for _, m := range msgs {
-			if strings.Contains(m.JSON(), "*Resolved*") {
-				resolved++
-			}
-		}
-		if len(msgs) == 4 && resolved == 3 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("Slack has %d messages, %d resolved; want 4 and 3", len(msgs), resolved)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	// One notification when each alert fired and one when it resolved:
-	// repeats and duplicate resolves told nobody.
+	b.waitForMessages("the resolutions in Slack", 2, func(m slacktest.Message) bool {
+		return strings.Contains(m.JSON(), "and 2 more in this group") || strings.Contains(m.JSON(), "*Resolved*")
+	})
+	// Each alert fired once and resolved once, whatever was repeated.
 	if got := count(`SELECT count(*) FROM alert_events WHERE type IN ('fired', 'resolved')`); got != 7 {
 		t.Errorf("%d fired and resolved events, want 7", got)
 	}
-	if got := count(`SELECT count(*) FROM notifications`); got != 7 {
-		t.Errorf("%d notifications, want 7", got)
+	if n := len(b.slack.Calls("chat.postMessage")); n != 2 {
+		t.Errorf("%d messages were posted to Slack, want 2", n)
 	}
-	if n := len(b.slack.Calls("chat.postMessage")); n != 4 {
-		t.Errorf("%d messages were posted to Slack, want 4", n)
+}
+
+// TestReloadChangesGrouping: the labels that define a group follow the
+// configuration. Alerts that arrive after a reload are grouped the new way;
+// the groups that exist stay as they are.
+func TestReloadChangesGrouping(t *testing.T) {
+	b := start(t)
+	fire := func(alertname, host string) {
+		t.Helper()
+		if code, res := b.webhook(fmt.Sprintf(`{"labels": {"alertname": %q, "host": %q}}`, alertname, host)); code != http.StatusCreated && code != http.StatusOK {
+			t.Fatalf("webhook = %d %v", code, res)
+		}
+	}
+	groups := func() string {
+		t.Helper()
+		rows, err := b.db.Query(context.Background(), `SELECT string_agg(a.labels->>'alertname' || '@' || (a.labels->>'host'), '+' ORDER BY a.labels->>'alertname', a.labels->>'host')
+			FROM alerts a GROUP BY a.group_id ORDER BY 1`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(got, " | ")
+	}
+
+	fire("DiskFull", "db1")
+	fire("DiskFull", "db2")
+	fire("HighLoad", "db1")
+	if got, want := groups(), "DiskFull@db1+DiskFull@db2 | HighLoad@db1"; got != want {
+		t.Fatalf("groups by alertname = %s, want %s", got, want)
+	}
+
+	logs := b.reload(strings.Replace(configuration, "routing:\n", "routing:\n  group_by: [host]\n", 1), 1)
+	if !strings.Contains(logs, `"msg":"alerts are grouped","group_by":["host"]`) {
+		t.Errorf("the new grouping is not in the logs")
+	}
+	fire("DiskFull", "db3")
+	fire("HighLoad", "db3")
+	fire("HighLoad", "db1")
+	// db3's two alerts share a group now. HighLoad@db1 is open already and
+	// stays in its group.
+	if got, want := groups(), "DiskFull@db1+DiskFull@db2 | DiskFull@db3+HighLoad@db3 | HighLoad@db1"; got != want {
+		t.Errorf("groups after the reload = %s, want %s", got, want)
+	}
+}
+
+// TestGroupWaitSurvivesARestart stops the process while a group waits for
+// its first notification. The wait is a row in Postgres, not a timer in the
+// process: two new processes start on the database, and between them they
+// send the notification once.
+func TestGroupWaitSurvivesARestart(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	cfg := strings.Replace(configuration, "group_wait: 0s", "group_wait: 3s", 1)
+	first := launch(t, dbURL, writeConfig(t, cfg))
+	first.waitUntilServing()
+	if code, res := first.webhook(diskFull); code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	if code := first.terminate(); code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	sentByFirst := len(first.slack.Messages())
+
+	replicas := []*beacon{launch(t, dbURL, writeConfig(t, cfg)), launch(t, dbURL, writeConfig(t, cfg))}
+	for _, r := range replicas {
+		r.waitUntilServing()
+	}
+	total := func() int { return sentByFirst + len(replicas[0].slack.Messages()) + len(replicas[1].slack.Messages()) }
+	deadline := time.Now().Add(30 * time.Second)
+	for total() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no process sent the notification of the group that was waiting")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// The notification is on record as sent, once, and nothing else is due.
+	var sent, due int
+	for {
+		err := first.db.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM notifications WHERE status = 'sent'),
+			(SELECT count(*) FROM notifications WHERE status = 'pending') + (SELECT count(*) FROM alert_groups WHERE notify_at IS NOT NULL)`).Scan(&sent, &due)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (sent > 0 && due == 0) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if sent != 1 || due != 0 || total() != 1 {
+		t.Errorf("%d notifications sent, %d due, %d messages in Slack; want 1, 0 and 1", sent, due, total())
 	}
 }
 

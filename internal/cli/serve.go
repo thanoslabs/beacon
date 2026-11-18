@@ -129,7 +129,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 	if err := srv.Listen(); err != nil {
 		return err
 	}
-	alerts.Observe(pipeline.NotifyAll(nil))
+	alerts.Observe(pipeline.Observe)
 	prov := &provisioner{
 		logger: logger, pool: pool, path: cfgPath, getenv: e.getenv, slackAPIURL: slackAPIURL,
 		ingest:       ingest.New(logger, alerts, nil),
@@ -156,6 +156,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 	// Background work stops with the server: it watches the same context.
 	var background sync.WaitGroup
 	background.Go(func() { pipeline.Run(ctx) })
+	background.Go(func() { pipeline.RunGroups(ctx, notify.DefaultGroupPollInterval) })
 	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
 	background.Go(func() { sessions.RunCleanup(ctx, logger, sessionCleanupInterval) })
 	background.Go(func() {

@@ -116,8 +116,10 @@ func (p *Pipeline) SetChannels(channels map[string]Channel) {
 	p.channels.Store(&channels)
 }
 
-// SetTargets replaces the targets that NotifyAll notifies. It is safe while
-// alerts change.
+// SetTargets replaces the targets that the first notification of every group
+// goes to. It is safe while alerts change.
+//
+// Temporary: routing will give each group its escalation policy.
 func (p *Pipeline) SetTargets(targets []Target) {
 	targets = slices.Clone(targets)
 	p.targets.Store(&targets)
@@ -142,38 +144,6 @@ func (p *Pipeline) Enqueue(ctx context.Context, tx pgx.Tx, n Notification) error
 type Target struct {
 	IntegrationID string
 	Destination   string
-}
-
-// reasons maps the state changes that are worth a notification to its reason.
-var reasons = map[alert.EventType]Reason{
-	alert.EventFired:        ReasonEscalationStep,
-	alert.EventAcknowledged: ReasonGroupUpdate,
-	alert.EventSnoozed:      ReasonGroupUpdate,
-	alert.EventSnoozeEnded:  ReasonGroupUpdate,
-	alert.EventResolved:     ReasonResolved,
-}
-
-// NotifyAll returns an alert observer that queues a notification to every
-// target whenever an alert changes state. SetTargets changes the targets
-// later.
-//
-// Temporary: it stands in for routing and escalation policies, which will
-// decide who is notified about what.
-func (p *Pipeline) NotifyAll(targets []Target) alert.Observer {
-	p.SetTargets(targets)
-	return func(ctx context.Context, tx pgx.Tx, ev alert.Event, _ alert.Alert) error {
-		reason, ok := reasons[ev.Type]
-		if !ok {
-			return nil
-		}
-		for _, t := range *p.targets.Load() {
-			err := p.Enqueue(ctx, tx, Notification{GroupID: ev.GroupID, IntegrationID: t.IntegrationID, Destination: t.Destination, Reason: reason})
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	}
 }
 
 // Run delivers queued notifications until ctx is cancelled. Deliveries that
@@ -266,6 +236,9 @@ func (p *Pipeline) send(ctx context.Context, n Notification) (ref string, err er
 		return "", Permanent(errors.New("no channel is configured for the integration"))
 	}
 	m := Message{Notification: n}
+	if m.Group, err = p.alerts.Group(ctx, n.GroupID); err != nil {
+		return "", fmt.Errorf("load group: %w", err)
+	}
 	if m.Alerts, err = p.alerts.GroupAlerts(ctx, n.GroupID); err != nil {
 		return "", fmt.Errorf("load alerts: %w", err)
 	}
