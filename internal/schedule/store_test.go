@@ -636,3 +636,145 @@ func TestStatedTimeInThePast(t *testing.T) {
 		"ada Jan 1 12:00..Jan 3 09:00", "grace Jan 3 09:00..Jan 3 15:00", "linus Jan 3 15:00..",
 	})
 }
+
+// positions dumps every position, to show that nothing wrote to them.
+func (f *fixture) positions() string {
+	f.t.Helper()
+	rows, err := f.pool.Query(context.Background(), `SELECT p::text FROM schedule_positions p ORDER BY schedule_id`)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return strings.Join(out, "\n")
+}
+
+func (f *fixture) preview(until time.Time, schedules ...config.Schedule) map[string]schedule.Preview {
+	f.t.Helper()
+	list, err := f.store.Preview(context.Background(), schedules, until)
+	if err != nil {
+		f.t.Fatalf("Preview: %v", err)
+	}
+	out := map[string]schedule.Preview{}
+	for _, p := range list {
+		out[p.Schedule] = p
+	}
+	return out
+}
+
+func moves(p schedule.Preview) []string {
+	var out []string
+	for _, m := range p.Moves {
+		short := func(s string) string {
+			if s == "" {
+				return "nobody"
+			}
+			return strings.TrimSuffix(s, "@example.com")
+		}
+		out = append(out, m.Start.UTC().Format("Jan 2 15:04")+".."+m.End.UTC().Format("Jan 2 15:04")+" "+short(m.Was)+">"+short(m.Becomes))
+	}
+	return out
+}
+
+// TestPreview asks what a configuration would do before it is applied, for
+// every state a schedule can be in, and checks that asking changes nothing.
+func TestPreview(t *testing.T) {
+	f := newFixture(t)
+	f.users(ada, grace, linus)
+	f.apply(rota("primary", "UTC", ada, grace, linus), rota("secondary", "UTC", grace, ada), rota("old", "UTC", linus))
+	f.advance(day(3, 9, 0))
+	f.clock.Set(day(3, 15, 0))
+	stored, shifts := f.positions(), strings.Join(f.shifts("primary", time.UTC), "\n")
+
+	previews := f.preview(day(8, 9, 0),
+		// Grace is on call until the 4th. Without Linus, Ada follows her.
+		rota("primary", "UTC", ada, grace, "nobody@example.com"),
+		rota("secondary", "UTC", grace, ada),
+		rota("brand-new", "UTC", linus, ada),
+	)
+	if f.positions() != stored || strings.Join(f.shifts("primary", time.UTC), "\n") != shifts {
+		t.Error("the preview changed what is stored")
+	}
+
+	p := previews["primary"]
+	if p.Status != schedule.PreviewChanged || !p.TakesOverAt.Equal(day(4, 9, 0)) || p.Stated {
+		t.Errorf("primary: %s, takes over %s, stated %v", p.Status, p.TakesOverAt, p.Stated)
+	}
+	equal(t, "primary moves", moves(p), []string{
+		"Jan 4 09:00..Jan 5 09:00 linus>ada",
+		"Jan 5 09:00..Jan 6 09:00 ada>grace",
+		"Jan 6 09:00..Jan 7 09:00 grace>ada",
+		"Jan 7 09:00..Jan 8 09:00 linus>grace",
+	})
+	if len(p.Skipped) != 1 || p.Skipped[0] != "nobody@example.com" {
+		t.Errorf("primary skipped = %v", p.Skipped)
+	}
+	if p := previews["secondary"]; p.Status != schedule.PreviewUnchanged || len(p.Moves) != 0 || len(p.Upcoming) == 0 {
+		t.Errorf("secondary: %s with %d moves and %d shifts", p.Status, len(p.Moves), len(p.Upcoming))
+	}
+	if p := previews["brand-new"]; p.Status != schedule.PreviewNew || len(p.Upcoming) == 0 || p.Upcoming[0].Member != linus || !p.Upcoming[0].Start.Equal(day(3, 15, 0)) {
+		t.Errorf("brand-new: %s, upcoming %+v", p.Status, p.Upcoming)
+	}
+	if p := previews["old"]; p.Status != schedule.PreviewRemoved {
+		t.Errorf("old: %s, want removed", p.Status)
+	}
+
+	// Once the change is applied, the same files are no longer a change:
+	// the preview says it is waiting, and nothing more moves.
+	changed := rota("primary", "UTC", ada, grace, "nobody@example.com")
+	f.apply(changed, rota("secondary", "UTC", grace, ada))
+	if p := f.preview(day(8, 9, 0), changed)["primary"]; p.Status != schedule.PreviewPending || len(p.Moves) != 0 || !p.TakesOverAt.Equal(day(4, 9, 0)) {
+		t.Errorf("after applying: %s with moves %v", p.Status, moves(p))
+	}
+}
+
+// TestPreviewIsWhatHappens previews a change, applies it, lets the time pass
+// and compares the shifts that were recorded with the ones the preview
+// showed. They must be the same, shift for shift.
+func TestPreviewIsWhatHappens(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func() config.Schedule
+	}{
+		{"members", func() config.Schedule { return rota("primary", "UTC", linus, ada) }},
+		{"handoff time and zone", func() config.Schedule {
+			s := rota("primary", "Australia/Sydney", grace, linus, ada)
+			s.Rotation.Handoff.Time = "17:30"
+			return s
+		}},
+		{"weekly, at a stated time", func() config.Schedule {
+			s := rota("primary", "America/New_York", ada, linus)
+			s.Rotation.ShiftLength, s.Rotation.Handoff.Day = config.Duration(config.Week), "friday"
+			return at(s, day(6, 13, 0))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.users(ada, grace, linus)
+			f.apply(rota("primary", "UTC", ada, grace, linus))
+			f.advance(day(3, 9, 0))
+			f.clock.Set(day(3, 15, 0))
+
+			until := day(28, 0, 0)
+			p := f.preview(until, tc.change())["primary"]
+			var want []string
+			for _, s := range p.Upcoming {
+				want = append(want, strings.TrimSuffix(s.Member, "@example.com")+" "+s.Start.UTC().Format("Jan 2 15:04")+".."+s.End.UTC().Format("Jan 2 15:04"))
+			}
+
+			f.apply(tc.change())
+			last := p.Upcoming[len(p.Upcoming)-1].End
+			for now := day(3, 15, 0); !now.After(last); now = now.Add(7 * time.Hour) {
+				f.advance(now)
+			}
+			f.advance(last)
+			got := f.shifts("primary", time.UTC)
+			// The preview begins with the shift in progress, and the record
+			// goes one shift further: the one that began at the end.
+			got = got[1 : len(got)-1]
+			equal(t, "recorded shifts against the preview", got, want)
+		})
+	}
+}

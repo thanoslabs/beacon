@@ -216,3 +216,40 @@ func TestChangeThatIsTakenBack(t *testing.T) {
 		t.Errorf("a stated time without a change left %+v pending at %v", s.Pending, s.PendingAt)
 	}
 }
+
+// TestCompare lists the stretches of time in which two plans differ.
+func TestCompare(t *testing.T) {
+	span := func(who string, fromDay, toDay int) Span {
+		return Span{Member: who, Start: jan(fromDay, 9, 0), End: jan(toDay, 9, 0)}
+	}
+	was := []Span{span("ada", 5, 12), span("grace", 12, 19), span("linus", 19, 26)}
+	for _, tc := range []struct {
+		name    string
+		becomes []Span
+		want    string
+	}{
+		{"the same", was, ""},
+		{"one shift goes to someone else", []Span{span("ada", 5, 12), span("ken", 12, 19), span("linus", 19, 26)}, "Jan 12 09:00..Jan 19 09:00 grace>ken"},
+		{"two shifts in a row", []Span{span("ada", 5, 12), span("linus", 12, 19), span("grace", 19, 26)}, "Jan 12 09:00..Jan 19 09:00 grace>linus\nJan 19 09:00..Jan 24 09:00 linus>grace"},
+		{"a handoff moves", []Span{span("ada", 5, 14), span("grace", 14, 19), span("linus", 19, 26)}, "Jan 12 09:00..Jan 14 09:00 grace>ada"},
+		{"one person takes two shifts", []Span{span("ada", 5, 12), span("ken", 12, 26)}, "Jan 12 09:00..Jan 19 09:00 grace>ken\nJan 19 09:00..Jan 24 09:00 linus>ken"},
+		{"nobody", []Span{span("ada", 5, 12), span("", 12, 19), span("linus", 19, 26)}, "Jan 12 09:00..Jan 19 09:00 grace>nobody"},
+		{"what lies outside the window is not compared", []Span{span("x", 1, 12), span("grace", 12, 19), span("y", 19, 30)}, "Jan 5 09:00..Jan 12 09:00 ada>x\nJan 19 09:00..Jan 24 09:00 linus>y"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			for _, m := range Compare(was, tc.becomes, jan(5, 9, 0), jan(24, 9, 0)) {
+				name := func(s string) string {
+					if s == "" {
+						return "nobody"
+					}
+					return s
+				}
+				got = append(got, m.Start.In(london).Format("Jan 2 15:04")+".."+m.End.In(london).Format("Jan 2 15:04")+" "+name(m.Was)+">"+name(m.Becomes))
+			}
+			if strings.Join(got, "\n") != tc.want {
+				t.Errorf("moves:\n%s\nwant:\n%s", strings.Join(got, "\n"), tc.want)
+			}
+		})
+	}
+}
