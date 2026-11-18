@@ -1846,16 +1846,18 @@ func TestSilencesAPI(t *testing.T) {
 		t.Errorf("list after the expiry = %d %v, want the one that is left", code, list)
 	}
 
-	// What is stored: the matchers, the period, and exactly one author each.
+	// What is stored: the matchers, exactly one author each, and a period
+	// that the expiry cut short. The periods are compared with each other, not
+	// with the database's clock, which need not agree with Beacon's.
 	rows, err := b.db.Query(context.Background(), `SELECT comment || ': ' || matchers::text || ' user=' || (created_by IS NOT NULL)::text || ' token=' || (created_by_token IS NOT NULL)::text ||
-		' over=' || (ends_at <= now())::text FROM silences ORDER BY created_at`)
+		' cut_short=' || (ends_at - starts_at < interval '30 minutes')::text FROM silences ORDER BY created_at`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	stored, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	want := []string{
-		`replacing the disk: [{"label": "alertname", "value": "DiskFull", "operator": "="}] user=false token=true over=false`,
-		`migration: [{"label": "team", "value": "dba|storage", "operator": "=~"}] user=true token=false over=true`,
+		`replacing the disk: [{"label": "alertname", "value": "DiskFull", "operator": "="}] user=false token=true cut_short=false`,
+		`migration: [{"label": "team", "value": "dba|storage", "operator": "=~"}] user=true token=false cut_short=true`,
 	}
 	if err != nil || strings.Join(stored, "\n") != strings.Join(want, "\n") {
 		t.Errorf("stored:\n%s\n%v\nwant:\n%s", strings.Join(stored, "\n"), err, strings.Join(want, "\n"))
