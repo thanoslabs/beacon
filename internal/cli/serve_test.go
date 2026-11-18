@@ -81,7 +81,7 @@ func startServe(t *testing.T, environ map[string]string) *serving {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &serving{logs: &lockedBuffer{}, cancel: cancel, exit: make(chan int, 1)}
 	go func() {
-		s.exit <- Run(ctx, []string{"serve"}, func(k string) string { return env[k] }, io.Discard, s.logs)
+		s.exit <- Run(ctx, []string{"serve"}, func(k string) string { return env[k] }, strings.NewReader(""), io.Discard, s.logs)
 	}()
 	t.Cleanup(func() {
 		cancel()

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	// Time zones are checked against the embedded database, so that the
 	// answer does not depend on the machine that runs the check.
 	_ "time/tzdata"
@@ -322,6 +324,10 @@ func (c Config) validate(v *validator) {
 	}
 }
 
+// MinBcryptCost is the lowest bcrypt cost accepted for the bootstrap admin's
+// password hash.
+const MinBcryptCost = 10
+
 // The shortest and longest session lifetimes accepted.
 const (
 	minSessionLifetime = time.Minute
@@ -347,6 +353,19 @@ func (a Auth) validate(o object) {
 		o.groups("roles.member", r.Member)
 		if len(r.Admin) == 0 && len(r.Member) == 0 {
 			o.errorf("roles", "needs admin, member or both; leave roles out to make everyone a member")
+		}
+	}
+	if a.OIDC == nil && a.BootstrapAdmin == nil {
+		o.errorf("", "needs oidc, bootstrap_admin or both: without either, nobody can sign in")
+	}
+	if b := a.BootstrapAdmin; b != nil {
+		o.required("bootstrap_admin.password_hash", b.PasswordHash)
+		// The value is checked only once it has been read. The message must
+		// not repeat it: someone may have put the password itself there.
+		if h := b.PasswordHash; h.IsSet() {
+			if cost, err := bcrypt.Cost([]byte(h.Reveal())); err != nil || cost < MinBcryptCost {
+				o.errorf("bootstrap_admin.password_hash", "must be a bcrypt hash with a cost of at least %d, as `beacon hash-password` prints it; it must not be the password itself", MinBcryptCost)
+			}
 		}
 	}
 	if a.OIDC == nil {

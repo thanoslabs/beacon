@@ -380,7 +380,9 @@ Applying a configuration makes these rows match the files, in one transaction, s
 
 **`team_members`**: `team_id`, `user_id`, `origin` (`config` or `group`), `created_at`. Primary key on all three of `team_id`, `user_id`, `origin`.
 
-**`api_tokens`**: `id`, `name`, `token_hash`, `role`, `created_by`, `created_at`, `expires_at`, `last_used_at`, `revoked_at`.
+**`api_tokens`**: `id`, `name`, `token_hash`, `role`, `created_by`, `created_at`, `expires_at`, `last_used_at`, `revoked_at`. The token is 256 random bits behind the prefix `bcn_`, shown once; `token_hash` is its SHA-256, which is enough for a secret that cannot be guessed. `created_by` is null for a token created with another token. `last_used_at` is exact to the minute, so a busy token does not write its row on every request. A revoked token keeps its row.
+
+The **bootstrap admin** has a row in `users` with the email address `bootstrap-admin@beacon.invalid`, the admin role and no issuer or subject. Its password is not in the database at all: the configuration gives Beacon a bcrypt hash through a secret reference (`auth.bootstrap_admin.password_hash`). Removing that from the configuration sets the row's `disabled_at` and deletes its sessions.
 
 ### Alerts
 

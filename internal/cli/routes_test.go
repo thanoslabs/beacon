@@ -24,7 +24,10 @@ import (
 //   - /healthz, /readyz and /metrics are called by machines with no session;
 //   - the ingest endpoint checks the source's own token;
 //   - the interactions endpoint checks Slack's signature;
-//   - /auth/login and /auth/callback are how a person gets a session.
+//   - /auth/login and /auth/callback are how a person gets a session;
+//   - /auth/bootstrap is how the bootstrap admin gets one: it checks the
+//     password and bounds the attempts, and answers 404 unless the account
+//     is enabled.
 var wantRoutes = []string{
 	"public GET /healthz",
 	"public GET /readyz",
@@ -36,6 +39,10 @@ var wantRoutes = []string{
 	"public GET /auth/callback",
 	"member POST /auth/logout",
 	"member GET /api/v1/me",
+	"public POST /auth/bootstrap",
+	"admin  GET /api/v1/tokens",
+	"admin  POST /api/v1/tokens",
+	"admin  DELETE /api/v1/tokens/{id}",
 }
 
 var pathParamRE = regexp.MustCompile(`\{[a-z]+\}`)
@@ -88,10 +95,10 @@ func TestRoutes(t *testing.T) {
 			closed++
 		}
 	}
-	if closed != 3 {
-		t.Errorf("%d routes refused a stranger, want 3", closed)
+	if closed != 6 {
+		t.Errorf("%d routes refused a stranger, want 6", closed)
 	}
-	for _, probe := range []string{"GET /", "GET /api/v1/alerts", "POST /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
+	for _, probe := range []string{"GET /", "GET /api/v1/alerts", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
 		method, path, _ := strings.Cut(probe, " ")
 		if code, body := request(method, path); code != http.StatusUnauthorized {
 			t.Errorf("%s without a session = %d %s, want 401", probe, code, body)

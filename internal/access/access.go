@@ -20,9 +20,12 @@ func (r Role) Valid() bool { return r == RoleAdmin || r == RoleMember }
 type Principal struct {
 	// UserID is the user's row. It is empty for an API token.
 	UserID string
-	Email  string
-	Name   string
-	Role   Role
+	// TokenID is the API token's row. It is empty for a signed-in user.
+	TokenID string
+	Email   string
+	// Name is the user's display name or the token's name.
+	Name string
+	Role Role
 }
 
 type contextKey struct{}

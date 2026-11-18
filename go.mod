@@ -8,7 +8,9 @@ require (
 	github.com/pressly/goose/v3 v3.30.1
 	github.com/prometheus/client_golang v1.25.0
 	go.yaml.in/yaml/v3 v3.0.6
+	golang.org/x/crypto v0.59.0
 	golang.org/x/oauth2 v0.38.0
+	golang.org/x/term v0.48.0
 )
 
 require (
