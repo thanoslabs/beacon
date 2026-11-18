@@ -147,7 +147,8 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 ### Schedules
 
 - `internal/schedule` owns the `schedule_positions` and `shifts` tables. `docs/schedules.md` describes the rules; keep it true. The file is the intent and the database is the position: nothing may work out who is on call from the files alone.
-- The arithmetic is pure and lives in `rotation.go`: `Start` and `State.Handoff` say what happens next, and `Store` only applies them. Change the rules there, with a test, so that everything that looks ahead agrees with what the store will do.
+- The arithmetic is pure and lives in `rotation.go`: `Start`, `State.WithDefinition` and `State.Next` say what happens, and `Store` only applies them. Change the rules there and nowhere else.
+- A change of definition never moves the shift in progress. `Store.Apply` stores it as pending, and it takes over in `State.Next`: at a handoff, or at the stated time, where the person on call stays unless the new rotation no longer has them. Do not write `definition` anywhere else.
 - A handoff instant is always found from a calendar date in the schedule's zone (`instant`), never by adding hours. Any change to the arithmetic needs cases in `TestDaylightSaving` for both directions in a northern and a southern zone.
 - A shift is recorded when it begins and closed once. Never update or delete a closed shift; a trigger refuses the update. A handoff is recorded at the instant it was due, not at the time the worker ran.
 - Read a row that is locked with `FOR UPDATE` from its own table alone, and load what belongs to it in further statements. A locking read that waited sees the locked row as the other transaction left it and the joined rows as they were before, which once made the wrong person hand over; `TestReplicasHandOverOnce` is the guard.

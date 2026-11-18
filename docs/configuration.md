@@ -7,7 +7,7 @@ date: 2026-11-17
 Beacon's provisioned objects are defined in YAML files that live in version control: sources, integrations, teams, schedules, escalation policies and routing. So is how people sign in. This page is the reference for those files. Why they look the way they do is in [[configuration-and-data-model]].
 
 > [!warning] Loaded and checked, not all acted on yet
-> Beacon reads and validates every kind described here. What it does with them is still growing: every type of source, routing, grouping, Slack integrations and schedule rotations work today. The other integration types, changes to a running schedule and escalation beyond the first step of a policy arrive with later releases. Each section says what is in use.
+> Beacon reads and validates every kind described here. What it does with them is still growing: every type of source, routing, grouping, Slack integrations and schedule rotations work today. The other integration types and escalation beyond the first step of a policy arrive with later releases. Each section says what is in use.
 
 ## Files
 
@@ -116,14 +116,12 @@ A schedule is one rotation: its members take turns being on call, in the order o
 | `rotation.shift_length` | yes | A whole number of days or weeks: `1d`, `3d`, `1w`, `2w` |
 | `rotation.handoff.time` | yes | Local time of the handoff, quoted: `"09:00"` |
 | `rotation.handoff.day` | for weeks | Weekday of the handoff, such as `monday`. Required when the shift length is whole weeks, and not allowed otherwise. |
-| `effective_from` | no | When a changed definition takes over. Without it, the change applies at the next handoff. |
+| `effective_from` | no | When a changed definition takes over, in RFC 3339 form such as `2026-12-07T09:00:00Z`. Without it, the change takes over at the next handoff. A time that has passed means now. |
 
 - The file has no start date and no "current person". A new schedule starts when it is first applied, with the first member, and Beacon keeps its position in the database from then on.
 - A member whose address belongs to no user yet is passed over, logged as an error and counted in `beacon_schedule_members_skipped{schedule="..."}`. They take their place once they have signed in.
 - Members need not belong to the owning team, so someone from another team can be part of a rotation.
-
-> [!warning]
-> A change to the rotation of a schedule that is already running is stored but not applied yet, and `effective_from` is read and checked and does nothing.
+- Editing a running schedule never moves the shift in progress; see [[schedules#Changing a schedule]].
 
 ## Escalation policies
 

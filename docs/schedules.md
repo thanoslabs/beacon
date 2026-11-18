@@ -23,7 +23,7 @@ schedules:
 ```
 
 > [!warning] What works today
-> Beacon runs the rotation and records the shifts. A change to the definition of a schedule that is already running is not picked up yet, there are no overrides, and escalation policies do not page the person on call yet.
+> Beacon runs the rotation, records the shifts and applies changes to a definition safely. There are no overrides yet, and escalation policies do not page the person on call yet.
 
 ## The file is the intent, the database is the position
 
@@ -68,6 +68,29 @@ Every shift is a row: who, on which schedule, from when and until when. The row 
 - **Late is not lost.** A handoff is carried out by a worker that looks for due handoffs every five seconds, and it is recorded at the moment it was due, not the moment it was carried out. If Beacon was not running when handoffs fell due, the next process to start records each shift that began in the meantime, with the times it began and ended at.
 - **A restart in the middle of a shift changes nothing.** The position is in the database, not in the process.
 - **Once, with several replicas.** The timer is a column in Postgres. A replica that carries out a handoff holds the schedule's position while it does, and the others skip it.
+
+## Changing a schedule
+
+Edit the schedule in the files and reload. **Applying a change never moves the shift in progress.** Beacon stores the new definition beside the position, as *pending*, and the rotation in force keeps running until the change takes over:
+
+| The file | The change takes over |
+|---|---|
+| has no `effective_from` | at the next handoff of the rotation in force |
+| has `effective_from` | at that time. Until then the rotation in force hands over as before. A time that has passed means now. |
+
+**At a handoff** (the first row), the handoff happens when it would have, and the person who takes over is whoever follows the person on call *in the new order*. If the handoff time, the day or the time zone changed, that first shift under the new rotation ends at the first new handoff that leaves it a full shift, as for a new schedule.
+
+**At a stated time** in the middle of a shift, whoever is on call stays on call. Their shift now ends at the first handoff of the new rotation after that time, which may be sooner or later than it would have been. A shift ends early in one case only: the new rotation no longer has the person on call. Whoever follows them takes the rest of that shift, from the stated time to the next handoff.
+
+### Who is next
+
+The position is the person on call, so everyone else keeps their place when the list changes:
+
+- **Adding a member** puts them where the list puts them. Nobody else's turn changes order.
+- **Removing a member** closes the gap. If they are on call, they finish their shift (unless a stated time relieves them), and the next person is the first member of the new list who came after them in the old order.
+- **Reordering** takes effect from the person on call: the next person is whoever follows them in the new list.
+
+Taking a change back before it takes over, by restoring the old definition, leaves nothing pending. Remove `effective_from` from the file once its time has passed: left in place, the next edit of the schedule would take over at once instead of at the next handoff.
 
 ## When a schedule leaves the configuration
 
