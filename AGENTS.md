@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules, escalation beyond a policy's first step and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules run their rotations and record every shift. Paging the person on call, escalation beyond a policy's first step and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -64,6 +64,7 @@ Tooling:
 │   ├── provision/            # Reconciles provisioned objects into Postgres
 │   ├── routing/              # Routing rules: which team, service, policy and grouping an alert gets
 │   │   └── provisiontest/    # Test helper: a provisioned row to reference
+│   ├── schedule/             # On-call rotations: handoff arithmetic, positions and recorded shifts
 │   ├── server/               # HTTP server, middleware, health, readiness and metrics endpoints
 │   ├── silence/              # Silences: matchers, the store and the API
 │   ├── slack/                # Slack channel: Web API client, message rendering and button presses
@@ -142,6 +143,15 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - To react to a state change, register an `alert.Observer`. It runs inside the transaction that makes the change, so what it writes commits or rolls back with it.
 - The store takes the time from its clock, not from Postgres, so tests can move time with `SetClock`.
 - Background work started by `beacon serve` watches the command's context and is waited for before the command returns. Anything it needs to remember goes in Postgres.
+
+### Schedules
+
+- `internal/schedule` owns the `schedule_positions` and `shifts` tables. `docs/schedules.md` describes the rules; keep it true. The file is the intent and the database is the position: nothing may work out who is on call from the files alone.
+- The arithmetic is pure and lives in `rotation.go`: `Start` and `State.Handoff` say what happens next, and `Store` only applies them. Change the rules there, with a test, so that everything that looks ahead agrees with what the store will do.
+- A handoff instant is always found from a calendar date in the schedule's zone (`instant`), never by adding hours. Any change to the arithmetic needs cases in `TestDaylightSaving` for both directions in a northern and a southern zone.
+- A shift is recorded when it begins and closed once. Never update or delete a closed shift; a trigger refuses the update. A handoff is recorded at the instant it was due, not at the time the worker ran.
+- Read a row that is locked with `FOR UPDATE` from its own table alone, and load what belongs to it in further statements. A locking read that waited sees the locked row as the other transaction left it and the joined rows as they were before, which once made the wrong person hand over; `TestReplicasHandOverOnce` is the guard.
+- The store takes the time from its clock (`SetClock`), never from Postgres. The provisioner calls `Store.Apply` after reconciliation, which starts new schedules and ends removed ones; the worker (`Store.Run`) carries out handoffs.
 
 ### Configuration and secrets
 

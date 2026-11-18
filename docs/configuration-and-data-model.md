@@ -466,14 +466,16 @@ A worker claims a due row by moving its `next_attempt_at` into the future in the
 | Column | Type | Notes |
 |---|---|---|
 | `schedule_id` | `uuid` | Primary key |
-| `user_id` | `uuid` | Who is on call under the rotation, ignoring overrides |
+| `user_id` | `uuid` | Who is on call under the rotation, ignoring overrides. Null while no member of the rotation is a user. |
 | `shift_started_at` | `timestamptz` | |
-| `next_handoff_at` | `timestamptz` | |
-| `definition` | `jsonb` | The rotation in force, which may be older than the file |
+| `next_handoff_at` | `timestamptz` | The timer of the rotation. Workers take due rows with `SELECT ... FOR UPDATE SKIP LOCKED`, so a handoff happens once when several replicas run. |
+| `definition` | `jsonb` | The rotation in force, which may be older than the file: `time_zone`, `members`, `shift_days`, `handoff_time`, `handoff_day` |
 | `pending_definition` | `jsonb` | A changed rotation waiting to take over; nullable |
 | `pending_effective_at` | `timestamptz` | |
 
-**`shifts`**: `id`, `schedule_id`, `user_id`, `starts_at`, `ends_at`, `kind` (`rotation` or `override`), `override_id`. A row is inserted when a shift begins, with `ends_at` null, and closed at the handoff. Rows are never updated after they are closed.
+A schedule has a row from the moment a configuration that has it is first applied. When the schedule leaves the files the row is deleted, so that a schedule that returns starts afresh; its `shifts` are kept. `user_id` is nullable, which the first version of this design did not allow: a rotation whose members have not signed in yet has nobody on call, and its position still has to hold the handoff time. The two `pending` columns are added with the change that applies definition changes (issue 30).
+
+**`shifts`**: `id`, `schedule_id`, `user_id`, `starts_at`, `ends_at`, `kind` (`rotation` or `override`), `override_id`. A row is inserted when a shift begins, with `ends_at` null, and closed at the handoff. Rows are never updated after they are closed: a trigger on the table refuses any update of a closed row, and any change to an open row but setting its end, so the rule does not depend on the code that writes shifts. A unique index allows one open rotation shift per schedule. `override_id` is added with overrides (issue 31). [[schedules]] describes how shifts are recorded.
 
 **`schedule_overrides`**: `id`, `schedule_id`, `user_id`, `starts_at`, `ends_at`, `created_by`, `reason`, `created_at`, `cancelled_at`.
 
@@ -493,7 +495,9 @@ A user is a member if either row exists. Removing someone from `members` does no
 - A changed definition in the files is stored as `pending_definition`. It takes over at the next handoff, or at `effective_from`. Until then the definition in force keeps running, so the shift in progress is not touched.
 - When the pending definition takes over, the rotation continues from the current person: the next person is whoever follows them in the new order. If the current person is no longer in the list, the next person is the first member of the new list who came after them in the old order.
 - A new schedule starts with the first member, at the moment it is first applied. Its first handoff is the next occurrence of the handoff time that is at least one full shift length away, so the first shift is never shorter than a normal one.
-- The handoff is a local time in the schedule's zone. Each handoff instant is computed from the calendar date, so a daylight saving change moves the instant and not the local time.
+- The handoff is a local time in the schedule's zone. Each handoff instant is computed from the calendar date, so a daylight saving change moves the instant and not the local time. A handoff in an hour that the clocks skip happens after the gap, by the length of the gap; one in an hour that comes twice happens the first time.
+- A handoff is recorded at the instant it was due, however late a worker carries it out, so shifts that began while no process ran are recorded when one starts.
+- A member whose address no user has is passed over. With no member who is a user, nobody is on call, and the first member to sign in takes the shift from that moment until the handoff that was planned.
 
 ## Decisions for review
 
