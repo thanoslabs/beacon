@@ -386,7 +386,7 @@ func TestFirstPath(t *testing.T) {
 	// Slack has the message a moment before Beacon has recorded that it was
 	// delivered. The press must come after that, as a person's would, or
 	// the two events can reach the timeline in either order.
-	b.timeline(alertID, 2)
+	b.timeline(alertID, 3)
 
 	// 3. Someone acknowledges it from Slack.
 	if code := b.click(msg, "beacon_acknowledge", alice); code != http.StatusOK {
@@ -413,7 +413,7 @@ func TestFirstPath(t *testing.T) {
 
 	// 4. The source reports that the problem is over, once the delivery of
 	// the acknowledgement is on record too.
-	b.timeline(alertID, 4)
+	b.timeline(alertID, 5)
 	code, res = b.webhook(diskFullResolved)
 	if code != http.StatusOK || res["result"] != "resolved" || res["alert_id"] != alertID {
 		t.Fatalf("resolve webhook = %d %v, want the alert resolved", code, res)
@@ -429,6 +429,7 @@ func TestFirstPath(t *testing.T) {
 	}
 	want := []string{
 		"fired by source",
+		"escalated by system",
 		"notification_sent by system",
 		"acknowledged by user slack:U0ALICE",
 		"notification_sent by system",
@@ -495,7 +496,7 @@ func TestSourceResolvesAnAlertNobodyTook(t *testing.T) {
 	if len(responses) != 1 || responses[0]["text"] != "Nothing changed: this alert is already resolved." {
 		t.Errorf("answer to the late acknowledge = %v", responses)
 	}
-	want := []string{"fired by source", "notification_sent by system", "resolved by source", "notification_sent by system"}
+	want := []string{"fired by source", "escalated by system", "notification_sent by system", "resolved by source", "notification_sent by system"}
 	if got := b.timeline(alertID, len(want)); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("timeline:\n  %s\nwant:\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
 	}
@@ -912,6 +913,13 @@ routing:
       escalation_policy: urgent
 `
 
+// inChannel matches a message in a channel, or a direct conversation, that
+// contains every one of the substrings.
+func inChannel(channel string, substrings ...string) func(slacktest.Message) bool {
+	all := contains(substrings...)
+	return func(m slacktest.Message) bool { return m.Channel == channel && all(m) }
+}
+
 // TestRouting sends alerts that match the first rule, a later rule and no
 // rule through the real binary, and follows each to its channel.
 func TestRouting(t *testing.T) {
@@ -943,9 +951,6 @@ func TestRouting(t *testing.T) {
 		}
 		return got
 	}
-	inChannel := func(channel, text string) func(slacktest.Message) bool {
-		return func(m slacktest.Message) bool { return m.Channel == channel && strings.Contains(m.JSON(), text) }
-	}
 
 	// 1. The first rule. The second would match too; the first one wins.
 	first := fire(`{"alertname": "ReplicationLag", "team": "dba", "priority": "P1", "service": "from-the-alert"}`)
@@ -971,9 +976,9 @@ func TestRouting(t *testing.T) {
 		t.Errorf("metric:\n%s\nwant:\n%s", got, want)
 	}
 
-	// Each alert went to one channel, and the person in the first step of
-	// "urgent" was told nothing: the log says that such targets do nothing
-	// yet.
+	// Each alert went to one channel. The person in the first step of
+	// "urgent" has never signed in, so that target was skipped: the step on
+	// the timeline and the log say so.
 	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
 		t.Errorf("%d messages were posted, want 3", n)
 	}
@@ -981,8 +986,14 @@ func TestRouting(t *testing.T) {
 	if err := b.db.QueryRow(context.Background(), `SELECT string_agg(destination, ',' ORDER BY destination) FROM notifications`).Scan(&destinations); err != nil || destinations != "C0ALERTS,C0DBA,C0URGENT" {
 		t.Errorf("notifications went to %q, %v", destinations, err)
 	}
-	if !strings.Contains(b.output(), `"msg":"escalation is not implemented yet: only the channel targets of a policy's first step are notified, once; its schedule, team and user targets, its later steps and its repeats do nothing","policy":"urgent","first_step_people_targets_skipped":1,"later_steps_skipped":1,"repeats_skipped":1`) {
-		t.Errorf("the log does not say what of the policy is skipped")
+	var skipped string
+	err := b.db.QueryRow(context.Background(), `SELECT e.data->'skipped'->0->>'target' || ': ' || (e.data->'skipped'->0->>'reason')
+		FROM alert_events e WHERE e.type = 'escalated' AND e.data->>'policy' = 'urgent'`).Scan(&skipped)
+	if err != nil || skipped != "user ada@example.com: no user has this email address" {
+		t.Errorf("the step of the urgent policy skipped %q, %v; want the person who is not a user", skipped, err)
+	}
+	if !strings.Contains(b.output(), `"msg":"escalation target not notified"`) {
+		t.Errorf("the log does not say that a target was not notified")
 	}
 
 	// 4. A reload changes the rules for alerts that arrive afterwards. The
@@ -1320,6 +1331,24 @@ func TestReload(t *testing.T) {
 	if got := b.metrics("beacon_config_"); !strings.Contains(got, "beacon_config_last_reload_successful 1") || !strings.Contains(got, `beacon_config_reloads_total{result="success"} 2`) {
 		t.Errorf("metrics after the last reload:\n%s", got)
 	}
+
+	// 4. The escalation engine follows the configuration too. The policy
+	// gets a second step and a short timeout; a group that opens afterwards
+	// is escalated by the policy as it is now.
+	b.slack.AddChannel("second-line", "C0SECOND")
+	twoSteps := strings.Replace(fixed, "        timeout: 5m\n", "        timeout: 1s\n      - notify:\n          - channel: C0SECOND\n            integration: slack\n        timeout: 5m\n", 1)
+	if twoSteps == fixed {
+		t.Fatal("the configuration has no step to change")
+	}
+	logs = b.reload(twoSteps, 4)
+	if !strings.Contains(logs, `"msg":"escalation policy configured","policy":"default","steps":2,"repeat":0`) {
+		t.Errorf("the logs do not show the policy with two steps")
+	}
+	if code, res := b.webhookTo("second", `{"labels": {"alertname": "AfterReload", "severity": "critical"}}`); code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	b.find("the first step of the reloaded policy", inChannel("C0ALERTS", "AfterReload"))
+	b.find("the second step of the reloaded policy", inChannel("C0SECOND", "AfterReload"))
 
 	if code := b.terminate(); code != 0 {
 		t.Errorf("exit code after SIGTERM = %d, want 0", code)
@@ -1810,6 +1839,79 @@ func TestSlackIdentity(t *testing.T) {
 	}
 	if logs := b.output(); strings.Contains(logs, botToken) || strings.Contains(logs, signingSecret) {
 		t.Error("the logs contain a Slack credential")
+	}
+}
+
+// escalationSteps reads the escalation events of the one group as
+// "pass.step: who was notified", and the state of its escalation.
+func (b *beacon) escalationSteps() (steps []string, status string) {
+	b.t.Helper()
+	rows, err := b.db.Query(context.Background(), `
+		SELECT (e.data->>'pass') || '.' || (e.data->>'step') || ': ' || COALESCE((
+			SELECT string_agg((n->>'target') || COALESCE(' ' || (n->>'user'), ''), ', ' ORDER BY (n->>'target'), (n->>'user'))
+			FROM jsonb_array_elements(e.data->'notified') n), 'nobody')
+		FROM alert_events e WHERE e.type = 'escalated' ORDER BY e.id`)
+	if err != nil {
+		b.t.Fatalf("read escalation events: %v", err)
+	}
+	if steps, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+		b.t.Fatalf("read escalation events: %v", err)
+	}
+	err = b.db.QueryRow(context.Background(), `SELECT status || CASE WHEN next_step_at IS NULL THEN '' ELSE ', timer running' END FROM escalations`).Scan(&status)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		b.t.Fatalf("read escalation: %v", err)
+	}
+	return steps, status
+}
+
+// TestEscalationSurvivesARestart stops the process between two steps of a
+// policy. The timer of the second step is in Postgres: two processes that
+// start afterwards find it, and exactly one of them runs the step. The
+// policy then runs out, which is recorded once.
+func TestEscalationSurvivesARestart(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	cfg := strings.Replace(configuration, "        timeout: 5m\n", "        timeout: 3s\n      - notify:\n          - channel: C0SECOND\n            integration: slack\n        timeout: 2s\n", 1)
+	first := launch(t, dbURL, writeConfig(t, cfg))
+	first.waitUntilServing()
+	if code, res := first.webhook(diskFull); code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	first.message("the first step", contains("Disk is full on db1"))
+	if code := first.terminate(); code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if steps, status := first.escalationSteps(); len(steps) != 1 || status != "active, timer running" {
+		t.Fatalf("when the process stopped: %s after %v", status, steps)
+	}
+
+	replicas := []*beacon{launch(t, dbURL, writeConfig(t, cfg)), launch(t, dbURL, writeConfig(t, cfg))}
+	for _, r := range replicas {
+		r.slack.AddChannel("second-line", "C0SECOND")
+	}
+	for _, r := range replicas {
+		r.waitUntilServing()
+	}
+	first.waitFor("the policy to run out", func() bool {
+		var n int
+		err := first.db.QueryRow(context.Background(), `SELECT count(*) FROM alert_events WHERE type = 'escalation_exhausted'`).Scan(&n)
+		return err == nil && n > 0
+	})
+	steps, status := first.escalationSteps()
+	if want := "1.1: channel C0ALERTS | 1.2: channel C0SECOND"; strings.Join(steps, " | ") != want || status != "exhausted" {
+		t.Errorf("escalation: %s after %q; want exhausted after %q", status, strings.Join(steps, " | "), want)
+	}
+	var exhausted, pages int
+	err := first.db.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM alert_events WHERE type = 'escalation_exhausted'),
+		(SELECT count(*) FROM notifications WHERE reason = 'escalation_step')`).Scan(&exhausted, &pages)
+	if err != nil || exhausted != 1 || pages != 2 {
+		t.Errorf("%d exhausted events and %d pages, %v; want 1 and 2", exhausted, pages, err)
+	}
+	// The second step reached Slack once, through one of the two.
+	first.waitFor("the second step in Slack", func() bool {
+		return len(replicas[0].slack.Calls("chat.postMessage"))+len(replicas[1].slack.Calls("chat.postMessage")) >= 1
+	})
+	if n := len(replicas[0].slack.Calls("chat.postMessage")) + len(replicas[1].slack.Calls("chat.postMessage")); n != 1 {
+		t.Errorf("the second step was posted %d times, want once", n)
 	}
 }
 
