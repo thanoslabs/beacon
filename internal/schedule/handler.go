@@ -214,7 +214,7 @@ func (h *Handler) shifts(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]shiftBody, 0, len(timeline))
 	for _, s := range timeline {
-		out = append(out, shiftBody(s))
+		out = append(out, shiftBody{User: s.User, StartsAt: s.StartsAt, EndsAt: s.EndsAt, Kind: s.Kind, OverrideID: s.OverrideID, Planned: s.Planned})
 	}
 	h.write(w, r, http.StatusOK, map[string]any{"schedule": name, "from": from.UTC(), "to": to.UTC(), "shifts": out})
 }
@@ -299,17 +299,12 @@ func (h *Handler) createOverride(w http.ResponseWriter, r *http.Request) {
 	// The author is whoever makes the request, never something in the body.
 	by, _ := access.FromContext(r.Context())
 	created, err := h.store.CreateOverride(r.Context(), n, by)
-	var (
-		bad     *Error
-		overlap *OverlapError
-	)
+	var bad *Error
 	switch {
 	case errors.Is(err, ErrNotFound):
 		h.fail(w, r, http.StatusNotFound, "", "no such schedule")
 	case errors.As(err, &bad):
 		h.fail(w, r, http.StatusBadRequest, bad.Field, bad.Msg)
-	case errors.As(err, &overlap):
-		h.fail(w, r, http.StatusConflict, "starts_at", overlap.Error())
 	case err != nil:
 		h.internal(w, r, "create override", err)
 	default:

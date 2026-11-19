@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -93,18 +94,6 @@ func invalid(field, format string, args ...any) *Error {
 	return &Error{Field: field, Msg: fmt.Sprintf(format, args...)}
 }
 
-// OverlapError is returned for an override whose period overlaps one that
-// the schedule already has.
-type OverlapError struct {
-	// Existing is the override in the way.
-	Existing Override
-}
-
-func (e *OverlapError) Error() string {
-	return fmt.Sprintf("the period overlaps the override of %s from %s to %s; remove that one first, or choose a period beside it",
-		e.Existing.User, e.Existing.StartsAt.UTC().Format(time.RFC3339), e.Existing.EndsAt.UTC().Format(time.RFC3339))
-}
-
 // NewOverride is an override that someone asks for.
 type NewOverride struct {
 	// Schedule is the name of the schedule.
@@ -137,12 +126,11 @@ func scanOverride(row pgx.Row, now time.Time) (Override, error) {
 	return o, err
 }
 
-// lockSchedule finds a schedule of the configuration by name and holds its
-// position until the transaction ends, which makes everything that changes
-// the overrides of one schedule take turns.
-func lockSchedule(ctx context.Context, tx pgx.Tx, name string) (id string, err error) {
-	err = tx.QueryRow(ctx, `SELECT schedule_id::text FROM schedule_positions p
-		WHERE schedule_id = (SELECT id FROM schedules WHERE name = $1 AND removed_at IS NULL) FOR UPDATE`, name).Scan(&id)
+// findSchedule returns the identifier of the running schedule of the
+// configuration with a name.
+func findSchedule(ctx context.Context, q querier, name string) (id string, err error) {
+	err = q.QueryRow(ctx, `SELECT schedule_id::text FROM schedule_positions p
+		WHERE schedule_id = (SELECT id FROM schedules WHERE name = $1 AND removed_at IS NULL)`, name).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -152,10 +140,13 @@ func lockSchedule(ctx context.Context, tx pgx.Tx, name string) (id string, err e
 // CreateOverride stores an override that by asks for and returns it. An
 // override that begins now is recorded as a shift at once.
 //
-// It returns ErrNotFound when no schedule has the name, an *Error when
-// something is wrong with the request, and an *OverlapError when the period
-// overlaps another override of the schedule: one person covers at a time,
-// and Beacon does not guess which of two overrides was meant to win.
+// Overrides of one schedule may overlap. Each new one lies on top of the
+// ones before it: where two cover the same time, the one created last is in
+// force, and the earlier one still holds outside that time. Nothing has to
+// be checked or locked for that; the order is the column layer.
+//
+// It returns ErrNotFound when no schedule has the name, and an *Error when
+// something is wrong with the request.
 func (s *Store) CreateOverride(ctx context.Context, n NewOverride, by access.Principal) (Override, error) {
 	now := s.now()
 	reason := strings.TrimSpace(n.Reason)
@@ -187,7 +178,7 @@ func (s *Store) CreateOverride(ctx context.Context, n NewOverride, by access.Pri
 
 	var out Override
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
-		scheduleID, err := lockSchedule(ctx, tx, n.Schedule)
+		scheduleID, err := findSchedule(ctx, tx, n.Schedule)
 		if err != nil {
 			return err
 		}
@@ -199,15 +190,6 @@ func (s *Store) CreateOverride(ctx context.Context, n NewOverride, by access.Pri
 		userID := users[email]
 		if userID == "" {
 			return invalid("user", "no user has this email address; a person becomes a user when they first sign in")
-		}
-		existing, err := scanOverride(tx.QueryRow(ctx, `SELECT `+overrideColumns+` FROM `+overrideTables+`
-			WHERE o.schedule_id = $1 AND o.cancelled_at IS NULL AND o.starts_at < $3 AND o.ends_at > $2
-			ORDER BY o.starts_at LIMIT 1`, scheduleID, starts, n.EndsAt), now)
-		if err == nil {
-			return &OverlapError{Existing: existing}
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("look for overlapping overrides: %w", err)
 		}
 		var id string
 		err = tx.QueryRow(ctx, `
@@ -240,14 +222,16 @@ func recordOverride(ctx context.Context, tx pgx.Tx, id, scheduleID, userID strin
 
 // CancelOverride removes an override of a schedule and returns it as it is
 // afterwards. One that has not begun never will; one that is in force ends
-// now, and its shift is closed. Removing an override that is over or was
+// now, and its shift is closed. Whatever it covered is uncovered: an earlier
+// override that lay beneath it is in force again for the time that is left,
+// and where there is none, the rotation. Removing an override that is over or was
 // removed before changes nothing and is not an error. It returns ErrNotFound
 // or ErrOverrideNotFound when there is no such schedule or override.
 func (s *Store) CancelOverride(ctx context.Context, scheduleName, id string) (Override, error) {
 	now := s.now()
 	var out Override
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
-		scheduleID, err := lockSchedule(ctx, tx, scheduleName)
+		scheduleID, err := findSchedule(ctx, tx, scheduleName)
 		if err != nil {
 			return err
 		}
@@ -297,14 +281,53 @@ func (s *Store) Overrides(ctx context.Context, scheduleName string, past bool) (
 }
 
 // activeOverride returns the override of a schedule that is in force at a
-// time, if there is one. Overrides of one schedule never overlap.
+// time, if there is one: of the overrides that cover the time, the one that
+// was created last.
 func activeOverride(ctx context.Context, q querier, scheduleID string, at time.Time) (Override, bool, error) {
 	o, err := scanOverride(q.QueryRow(ctx, `SELECT `+overrideColumns+` FROM `+overrideTables+`
-		WHERE o.schedule_id = $1 AND o.cancelled_at IS NULL AND o.starts_at <= $2 AND o.ends_at > $2`, scheduleID, at), at)
+		WHERE o.schedule_id = $1 AND o.cancelled_at IS NULL AND o.starts_at <= $2 AND o.ends_at > $2
+		ORDER BY o.layer DESC LIMIT 1`, scheduleID, at), at)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Override{}, false, nil
 	}
 	return o, err == nil, err
+}
+
+// overrideLayers returns when which override of a schedule is, was or will
+// be in force between from and to, in the order of time: the overrides laid
+// on top of each other, the one created last on top, and each cut down to
+// the time in which nothing lies above it. An override that was removed
+// counts until the moment it was removed, and one that was removed before
+// it began not at all.
+//
+// This is the one place where overlapping overrides are resolved. Who is on
+// call now, the timeline and the preview all ask it, so they cannot
+// disagree.
+func overrideLayers(ctx context.Context, q querier, scheduleID string, from, to, now time.Time) ([]TimelineShift, error) {
+	rows, err := q.Query(ctx, `
+		SELECT u.email, o.user_id::text, o.starts_at, COALESCE(o.cancelled_at, o.ends_at), o.id::text
+		FROM schedule_overrides o JOIN users u ON u.id = o.user_id
+		WHERE o.schedule_id = $1 AND o.starts_at < $3 AND COALESCE(o.cancelled_at, o.ends_at) > $2
+			AND COALESCE(o.cancelled_at, o.ends_at) > o.starts_at
+		ORDER BY o.layer DESC`, scheduleID, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("read overrides: %w", err)
+	}
+	var flat []TimelineShift
+	o := TimelineShift{Kind: KindOverride}
+	_, err = pgx.ForEachRow(rows, []any{&o.User, &o.UserID, &o.StartsAt, &o.EndsAt, &o.OverrideID}, func() error {
+		// What lies above is in flat already; this one gets what is left.
+		flat = append(flat, cover([]TimelineShift{o}, flat)...)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read overrides: %w", err)
+	}
+	for i := range flat {
+		flat[i].Planned = flat[i].EndsAt.After(now)
+	}
+	slices.SortStableFunc(flat, func(a, b TimelineShift) int { return a.StartsAt.Compare(b.StartsAt) })
+	return flat, nil
 }
 
 // recordOverrides brings the shifts of overrides up to date: an override

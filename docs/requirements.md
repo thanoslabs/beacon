@@ -48,6 +48,7 @@ Each requirement is marked **MVP** (needed for the first usable release) or **La
 |---|---|
 | Rotations (daily, weekly, custom length) | MVP |
 | Overrides | MVP |
+| Layered overrides: overrides of a schedule may overlap, and the one created last is in force where they do | MVP |
 | "Who is on call now" view | MVP |
 | Past shifts are recorded and never recomputed when a schedule definition changes | MVP |
 | A changed definition takes effect at the next handoff, or at a stated date, and continues from whoever is on call | MVP |
@@ -198,4 +199,5 @@ Beacon exposes a Prometheus `/metrics` endpoint. It covers both how Beacon is ru
 | Configuration format | YAML | It is what the Prometheus audience already uses |
 | Frontend | A separate single-page app that uses the REST API | The API is exercised by a real client from the start |
 | Paging again | One page per alert group. New alerts that join an acknowledged group, or one whose policy ran out, update its messages and page nobody. A snooze that runs out pages again. Paging again after a stated time is a later, opt-in policy (#100) | Whoever acknowledged a group has taken the problem; being paged for every further alert of it is how people learn to ignore pages |
+| Overlapping overrides | Layered: any override takes precedence over the rotation, the override created last takes precedence over earlier ones for the time they share, and removing it reveals the one beneath | Someone can take an evening out of a colleague's week of cover without anyone having to remove and recreate anything |
 | A schedule with nobody on call | A gap in coverage is allowed and is logged as a warning, not an error | Some teams do not want cover at all times, and a rotation whose members have not signed in yet is not a fault |

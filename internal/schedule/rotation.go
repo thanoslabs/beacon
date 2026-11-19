@@ -318,6 +318,9 @@ type Span struct {
 	Member string
 	Start  time.Time
 	End    time.Time
+	// Override says that an override, not the rotation, puts the person on
+	// call. Project never sets it; the preview does.
+	Override bool
 }
 
 // maxProjected bounds how many shifts Project works out.

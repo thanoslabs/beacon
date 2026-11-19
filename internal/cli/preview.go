@@ -155,7 +155,11 @@ func writePreviewText(w io.Writer, previews []schedule.Preview, weeks int) {
 		if p.Status != schedule.PreviewUnchanged && len(p.Upcoming) > 0 {
 			fmt.Fprintln(w, "  shifts with this configuration:")
 			for _, s := range p.Upcoming {
-				fmt.Fprintf(w, "    %s to %s: %s\n", when(s.Start), when(s.End), person(s.Member))
+				note := ""
+				if s.Override {
+					note = " (override)"
+				}
+				fmt.Fprintf(w, "    %s to %s: %s%s\n", when(s.Start), when(s.End), person(s.Member), note)
 			}
 		}
 	}
@@ -172,6 +176,8 @@ func writePreviewJSON(w io.Writer, previews []schedule.Preview, from, until time
 		Start time.Time `json:"start"`
 		End   time.Time `json:"end"`
 		User  string    `json:"user"`
+		// Kind is rotation or override.
+		Kind string `json:"kind"`
 	}
 	type item struct {
 		Schedule    string     `json:"schedule"`
@@ -197,7 +203,11 @@ func writePreviewJSON(w io.Writer, previews []schedule.Preview, from, until time
 			it.Moves = append(it.Moves, move{Start: m.Start.UTC(), End: m.End.UTC(), Was: m.Was, Becomes: m.Becomes})
 		}
 		for _, s := range p.Upcoming {
-			it.Shifts = append(it.Shifts, shift{Start: s.Start.UTC(), End: s.End.UTC(), User: s.Member})
+			kind := schedule.KindRotation
+			if s.Override {
+				kind = schedule.KindOverride
+			}
+			it.Shifts = append(it.Shifts, shift{Start: s.Start.UTC(), End: s.End.UTC(), User: s.Member, Kind: kind})
 		}
 		out.Schedules = append(out.Schedules, it)
 	}
