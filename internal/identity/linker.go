@@ -31,6 +31,10 @@ type Integration struct {
 	// Lookup finds accounts by email address. It is nil for a service in
 	// which people link their accounts themselves.
 	Lookup Lookup
+	// LinkCommand is what a person types in the service to give Beacon a
+	// link code, such as "/beacon-link code:", for a service in which people
+	// link their accounts themselves.
+	LinkCommand string
 }
 
 // How often the linker asks, and how much at a time.

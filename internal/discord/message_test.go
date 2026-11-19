@@ -280,3 +280,50 @@ func TestPagedLine(t *testing.T) {
 		t.Errorf("fields = %s", fieldsOf(msg))
 	}
 }
+
+// TestButtonsFollowTheState: a message offers what the state machine allows
+// for at least one alert of the group, and nothing once all are resolved.
+func TestButtonsFollowTheState(t *testing.T) {
+	ids := func(m message) string {
+		var out []string
+		for _, row := range m.Components {
+			for _, b := range row.Components {
+				if b.Type != 2 || b.Label == "" {
+					t.Errorf("button = %+v", b)
+				}
+				out = append(out, b.CustomID)
+			}
+		}
+		return strings.Join(out, " ")
+	}
+	group := firingAlert().GroupID
+	at := t0
+	a := firingAlert()
+	tests := []struct {
+		status alert.Status
+		want   string
+	}{
+		{alert.StatusFiring, "beacon_acknowledge:" + group + " beacon_snooze:" + group + " beacon_resolve:" + group},
+		{alert.StatusAcknowledged, "beacon_snooze:" + group + " beacon_resolve:" + group},
+		{alert.StatusSnoozed, "beacon_acknowledge:" + group + " beacon_resolve:" + group},
+		{alert.StatusResolved, ""},
+	}
+	for _, tt := range tests {
+		a.Status, a.AcknowledgedAt, a.SnoozedUntil, a.ResolvedAt = tt.status, &at, &at, &at
+		msg, body := rendered(t, notify.Message{Alerts: []alert.Alert{a}})
+		if got := ids(msg); got != tt.want {
+			t.Errorf("%s: buttons = %q, want %q", tt.status, got, tt.want)
+		}
+		// An edit must be able to take the buttons away.
+		if tt.want == "" && !strings.Contains(body, `"components":[]`) {
+			t.Errorf("a message without buttons does not send an empty list: %s", body)
+		}
+	}
+	// A group offers an action when one of its alerts allows it.
+	resolved, firing := firingAlert(), firingAlert()
+	resolved.Status, resolved.ResolvedAt = alert.StatusResolved, &at
+	firing.ID = "alert-2"
+	if msg, _ := rendered(t, notify.Message{Alerts: []alert.Alert{resolved, firing}}); !strings.Contains(ids(msg), "beacon_acknowledge:") {
+		t.Errorf("buttons of a group with one firing alert = %q", ids(msg))
+	}
+}

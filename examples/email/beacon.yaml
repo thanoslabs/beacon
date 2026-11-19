@@ -1,0 +1,43 @@
+# One webhook source, and every alert group sent as email to one address.
+# docs/email.md describes the settings. Copy this directory, put your SMTP
+# server, sender and recipient in place of the ones below, and point Beacon
+# at the copy:
+#
+#   BEACON_CONFIG_DIR=./my-config docker compose up --build
+#
+# The SMTP password is read from the environment: BEACON_SMTP_PASSWORD.
+
+sources:
+  - name: default
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}
+
+integrations:
+  - name: email
+    type: email
+    email:
+      host: smtp.example.com
+      port: 587
+      # starttls for a port that is upgraded to TLS (usually 587), implicit
+      # for one that is TLS from the start (usually 465).
+      tls: starttls
+      username: beacon
+      password: {env: BEACON_SMTP_PASSWORD}
+      from: beacon@example.com
+
+# For an email integration, the channel of a target is the address the
+# message is sent to. Every change to a group is a further message.
+escalation_policies:
+  - name: default
+    steps:
+      - notify:
+          - channel: oncall@example.com
+            integration: email
+        timeout: 5m
+
+routing:
+  group_by: [alertname]
+  group_wait: 10s
+  group_interval: 5m
+  default:
+    escalation_policy: default

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/thanoslabs/beacon/internal/access"
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/config"
 )
 
@@ -58,9 +59,9 @@ var ErrNoToken = errors.New("no such token")
 func (s *Store) CreateToken(ctx context.Context, name string, role access.Role, lifetime time.Duration, userID string) (Token, string, error) {
 	secret := tokenPrefix + newToken()
 	now := s.now()
-	t := Token{Name: name, Role: role, CreatedAt: now}
+	t := Token{Name: name, Role: role, CreatedAt: now.UTC()}
 	if lifetime > 0 {
-		expires := now.Add(lifetime)
+		expires := now.Add(lifetime).UTC()
 		t.ExpiresAt = &expires
 	}
 	var createdBy *string
@@ -88,6 +89,13 @@ func (s *Store) Tokens(ctx context.Context) ([]Token, error) {
 	tokens, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Token, error) {
 		var t Token
 		err := row.Scan(&t.ID, &t.Name, &t.Role, &t.CreatedBy, &t.CreatedAt, &t.ExpiresAt, &t.LastUsedAt, &t.RevokedAt)
+		// The API answers times in UTC.
+		t.CreatedAt = t.CreatedAt.UTC()
+		for _, at := range []*time.Time{t.ExpiresAt, t.LastUsedAt, t.RevokedAt} {
+			if at != nil {
+				*at = at.UTC()
+			}
+		}
 		return t, err
 	})
 	if err != nil {
@@ -176,10 +184,15 @@ func (h *Handler) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if tokens == nil {
-		tokens = []Token{}
+	page, next, field, problem, ok := api.Slice(tokens, r.URL.Query())
+	if !ok {
+		h.write(w, r, http.StatusBadRequest, api.Error{Error: problem, Field: field})
+		return
 	}
-	h.write(w, r, http.StatusOK, map[string][]Token{"tokens": tokens})
+	h.write(w, r, http.StatusOK, struct {
+		Tokens     []Token `json:"tokens"`
+		NextCursor string  `json:"next_cursor,omitempty"`
+	}{page, next})
 }
 
 // createTokenRequest is the body of a request for a new token.

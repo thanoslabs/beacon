@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/thanoslabs/beacon/internal/alert"
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/discord"
 	"github.com/thanoslabs/beacon/internal/identity"
@@ -149,7 +150,8 @@ func runServe(ctx context.Context, e env, args []string) error {
 	identities := identity.NewStore(pool)
 	linker := identity.NewLinker(identities, logger)
 	// The escalation engine asks these two who to notify and where.
-	pipeline.SetPeople(people{schedules: schedules, identities: identities})
+	directory := &people{schedules: schedules, identities: identities}
+	pipeline.SetPeople(directory)
 
 	registry := server.NewRegistry()
 	srvCfg.Authenticator = signIn
@@ -160,21 +162,28 @@ func runServe(ctx context.Context, e env, args []string) error {
 	alerts.Observe(pipeline.Observe)
 	prov := &provisioner{
 		logger: logger, pool: pool, path: cfgPath, getenv: e.getenv, slackAPIURL: slackAPIURL, discordAPIURL: discordAPIURL,
-		ingest:       ingest.New(logger, alerts, nil),
-		interactions: slack.NewInteractions(logger, alerts, nil),
-		pipeline:     pipeline,
-		auth:         signIn,
-		silences:     silence.NewHandler(logger, silences),
-		schedules:    schedules,
-		scheduleAPI:  schedule.NewHandler(logger, schedules),
-		identities:   identities,
-		identityAPI:  identity.NewHandler(logger, identities),
-		linker:       linker,
+		ingest:              ingest.New(logger, alerts, nil),
+		interactions:        slack.NewInteractions(logger, alerts, nil),
+		discordInteractions: discord.NewInteractions(logger, alerts),
+		discordCommands:     discord.NewCommands(logger),
+		pipeline:            pipeline,
+		people:              directory,
+		auth:                signIn,
+		silences:            silence.NewHandler(logger, silences),
+		alertsAPI:           api.NewAlerts(logger, alerts),
+		provisionedAPI:      api.NewProvisioned(logger, pool),
+		schedules:           schedules,
+		scheduleAPI:         schedule.NewHandler(logger, schedules),
+		identities:          identities,
+		identityAPI:         identity.NewHandler(logger, identities, linker.Integrations),
+		linker:              linker,
 	}
+	prov.silences.SetAlerts(alerts)
 	prov.registerMetrics(registry)
 	prov.ingest.RegisterMetrics(registry)
 	linker.RegisterMetrics(registry)
 	prov.interactions.SetIdentities(prov)
+	prov.discordInteractions.SetIdentities(prov)
 	// A sign-in may have made a user: count the skipped members again, and
 	// look for the user's chat accounts without waiting.
 	prov.auth.AfterSignIn(func(ctx context.Context) {
@@ -203,6 +212,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
 	background.Go(func() { schedules.Run(ctx, logger, scheduleInterval) })
 	background.Go(func() { linker.Run(ctx, identity.DefaultInterval) })
+	background.Go(func() { prov.discordCommands.Run(ctx, discord.DefaultCommandInterval) })
 	background.Go(func() { sessions.RunCleanup(ctx, logger, sessionCleanupInterval) })
 	background.Go(func() {
 		for {

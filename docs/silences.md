@@ -108,9 +108,19 @@ The body may be at most 64 KiB, and a field that is not in this table is an erro
 
 `created_by` is the email address of the user who created the silence. A silence created with an API token has `created_by_token`, the name of the token, in its place. Times are answered in UTC.
 
+### Preview
+
+`POST /api/v1/silences/preview` takes the `matchers` of a silence and answers which open alerts they match now, without creating anything:
+
+```json
+{"alerts": [{"id": "9b2d6c1e-…", "status": "firing", "labels": {"alertname": "DiskFull", "host": "db1"}}], "total": 3, "complete": true}
+```
+
+`alerts` holds the newest fifty of the matching alerts, each as [[api#An alert]] describes, and `total` counts them all. `complete` is `false` when there are more open alerts than a preview looks through, five thousand, and the count may be short. The matchers are checked as for a silence, with the same errors.
+
 ### List and read
 
-`GET /api/v1/silences` answers `{"silences": [...]}` with the active and pending silences, the one that ends first at the top. With `?expired=true` the expired ones follow, the most recently ended first. At most 1000 are returned. `GET /api/v1/silences/<id>` answers one silence, whatever its state.
+`GET /api/v1/silences` answers `{"silences": [...]}` with the active and pending silences, the one that ends first at the top. With `?expired=true` the expired ones follow, the most recently ended first. The list is paged with `limit` and `cursor` ([[api#Conventions]]), and holds at most 1000 silences in all. `GET /api/v1/silences/<id>` answers one silence, whatever its state.
 
 ### Expire
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -148,8 +149,58 @@ func render(m notify.Message) message {
 		e.Fields = append(e.Fields, field{Name: "Paged", Value: paged})
 	}
 	out.Embeds = append(out.Embeds, e)
+	if row, ok := actionRowFor(m.Alerts); ok {
+		out.Components = append(out.Components, row)
+	}
 	return out
 }
+
+// The identifiers of the buttons. Discord sends the custom ID of a button
+// back when it is pressed; Beacon's is the identifier, a colon, and the
+// group to act on.
+const (
+	actionAcknowledge = "beacon_acknowledge"
+	actionSnooze      = "beacon_snooze"
+	actionResolve     = "beacon_resolve"
+)
+
+// The styles of a button, by Discord's numbers.
+const (
+	stylePrimary   = 1
+	styleSecondary = 2
+)
+
+// buttons lists the buttons in the order they are shown, with the action each
+// one takes.
+var buttons = []struct {
+	id, label string
+	style     int
+	action    alert.Action
+}{
+	{actionAcknowledge, "Acknowledge", stylePrimary, alert.ActionAcknowledge},
+	{actionSnooze, "Snooze 1h", styleSecondary, alert.ActionSnooze},
+	{actionResolve, "Resolve", styleSecondary, alert.ActionResolve},
+}
+
+// actionRowFor returns the buttons for the actions that the state of at
+// least one alert allows, or false when there are none. A press applies to
+// every alert of the group that allows the action.
+func actionRowFor(alerts []alert.Alert) (actionRow, bool) {
+	row := actionRow{Type: componentActionRow}
+	allowed := notify.Actions(alerts)
+	for _, b := range buttons {
+		if slices.Contains(allowed, b.action) {
+			row.Components = append(row.Components, button{Type: componentButton, Style: b.style, Label: b.label, CustomID: b.id + ":" + alerts[0].GroupID})
+		}
+	}
+	return row, len(row.Components) > 0
+}
+
+// The types of component, by Discord's numbers.
+const (
+	componentActionRow = 1
+	componentButton    = 2
+)
 
 // superseded is what a message is turned into when Beacon has said the same
 // alert again further down: its title, without state or buttons, so that

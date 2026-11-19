@@ -355,3 +355,38 @@ func TestTokenIsJudgedAlone(t *testing.T) {
 		t.Errorf("a bad token with a good session = %d, want 401", code)
 	}
 }
+
+// TestTokensArePagedAndMethodsAreSaid: the list of tokens takes limit and
+// cursor like every list, and anyone may ask which ways to sign in exist.
+func TestTokensArePagedAndMethodsAreSaid(t *testing.T) {
+	b := newBeacon(t, nil)
+	_, admin := b.newToken("admin", access.RoleAdmin, 0)
+	for _, name := range []string{"one", "two", "three"} {
+		b.newToken(name, access.RoleMember, 0)
+	}
+	seen := 0
+	path := auth.TokensPath + "?limit=3"
+	for range 4 {
+		code, body, _ := b.call("GET", path, "", as(admin)...)
+		if code != http.StatusOK {
+			t.Fatalf("GET %s = %d %v", path, code, body)
+		}
+		seen += len(body["tokens"].([]any))
+		next, more := body["next_cursor"].(string)
+		if !more {
+			break
+		}
+		path = auth.TokensPath + "?limit=3&cursor=" + next
+	}
+	if seen != 4 {
+		t.Errorf("%d tokens in pages of three, want 4", seen)
+	}
+	if code, body, _ := b.call("GET", auth.TokensPath+"?limit=0", "", as(admin)...); code != http.StatusBadRequest || body["field"] != "limit" {
+		t.Errorf("limit=0 = %d %v", code, body)
+	}
+
+	// Without a credential, and with nothing configured.
+	if code, body, _ := b.call("GET", auth.MethodsPath, ""); code != http.StatusOK || body["oidc"] != false || body["bootstrap_admin"] != false || len(body) != 2 {
+		t.Errorf("GET %s = %d %v", auth.MethodsPath, code, body)
+	}
+}
