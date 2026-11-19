@@ -19,6 +19,7 @@ import (
 
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/config"
+	"github.com/thanoslabs/beacon/internal/notify"
 )
 
 // InteractionsPath is the route that Slack sends button presses to: the
@@ -50,8 +51,13 @@ type Interactions struct {
 	// identities tells which Beacon user a Slack account belongs to. It
 	// holds nil until SetIdentities is called, and then nobody is known.
 	identities atomic.Pointer[Identities]
-	now        func() time.Time
-	http       *http.Client
+	// clients are the Web API clients of the Slack integrations, by name,
+	// and signInURL where people sign in to Beacon. Both follow the
+	// configuration.
+	clients   atomic.Pointer[map[string]*Client]
+	signInURL atomic.Pointer[string]
+	now       func() time.Time
+	http      *http.Client
 }
 
 // NewInteractions returns a handler. secrets maps the name of each Slack
@@ -64,6 +70,8 @@ func NewInteractions(logger *slog.Logger, alerts Alerts, secrets map[string]conf
 		http: &http.Client{Timeout: 2 * time.Second},
 	}
 	h.SetSecrets(secrets)
+	h.SetClients(nil)
+	h.SetSignInURL("")
 	return h
 }
 
@@ -81,34 +89,94 @@ type Identities interface {
 	UserFor(ctx context.Context, integration, externalID string) (userID, name string, found bool, err error)
 }
 
-// SetIdentities makes the handler attribute what people do in Slack to the
-// Beacon users their accounts are linked to. Call it before the handler is
-// used.
+// SetIdentities makes the handler know which Slack accounts belong to
+// Beacon users. Their presses are attributed to the user. Accounts that
+// belong to nobody, which is every account until this is called, may
+// resolve an alert and nothing else. Call it before the handler is used.
 func (h *Interactions) SetIdentities(i Identities) { h.identities.Store(&i) }
 
-// actor returns who pressed a button: the Beacon user that the Slack
-// account is linked to, or else the Slack account alone. An account that is
-// linked to nobody may still act. Slack decides who can see a message and
-// press its buttons; Beacon records who it was.
-func (h *Interactions) actor(ctx context.Context, integration, slackUser, slackName string) alert.Actor {
+// SetClients gives the handler the Web API client of each Slack
+// integration, by name, with which it asks Slack what to call a person who
+// is not a Beacon user. It is safe while requests are being handled.
+func (h *Interactions) SetClients(clients map[string]*Client) { h.clients.Store(&clients) }
+
+// SetSignInURL tells the handler where people sign in to Beacon, which it
+// passes on to someone who has to. Empty means that nobody can.
+func (h *Interactions) SetSignInURL(url string) { h.signInURL.Store(&url) }
+
+// profileTimeout bounds the question to Slack about a person's name. Slack
+// waits three seconds for the answer to a button press, and the name is
+// not worth the press.
+const profileTimeout = 1500 * time.Millisecond
+
+// who is the person behind a button press.
+type who struct {
+	actor alert.Actor
+	// linked says that the Slack account belongs to a Beacon user.
+	linked bool
+	// unknown says that it could not be found out whether it does.
+	unknown bool
+}
+
+// identify says who pressed a button: the Beacon user that the Slack
+// account is linked to, or else the Slack account alone.
+func (h *Interactions) identify(ctx context.Context, integration, slackUser, slackName string) who {
 	chat := alert.ChatUser(Provider, slackUser, slackName)
 	identities := h.identities.Load()
 	if identities == nil || *identities == nil {
-		return chat
+		// Nobody is known to be anybody.
+		return who{actor: chat}
 	}
 	userID, name, found, err := (*identities).UserFor(ctx, integration, slackUser)
 	switch {
 	case err != nil:
-		// The press is answered within three seconds whatever happens to
-		// the lookup; the event keeps the Slack account.
 		h.logger.ErrorContext(ctx, "look up the user of a slack account", slog.String("slack_user", slackUser), slog.Any("error", err))
-		return chat
+		return who{actor: chat, unknown: true}
 	case !found:
-		h.logger.InfoContext(ctx, "slack action by an account that is not linked to a Beacon user; the timeline records the Slack account",
-			slog.String("integration", integration), slog.String("slack_user", slackUser))
-		return chat
+		return who{actor: chat}
 	}
-	return alert.LinkedChatUser(userID, Provider, slackUser, name)
+	return who{actor: alert.LinkedChatUser(userID, Provider, slackUser, name), linked: true}
+}
+
+// stranger returns the actor for a Slack account that is linked to no
+// Beacon user and resolves an alert. The timeline and the message name the
+// person as their workspace does, with the note that they are not
+// connected, rather than by an identifier nobody can read.
+//
+// Slack is asked for the name. When it does not answer in time, or the app
+// lacks the users:read scope, the handle that came with the press is used,
+// and the identifier when there is none: the resolve never waits for a
+// name.
+func (h *Interactions) stranger(ctx context.Context, integration, slackUser, slackName string) alert.Actor {
+	name := slackName
+	if client := (*h.clients.Load())[integration]; client != nil {
+		ctx, cancel := context.WithTimeout(ctx, profileTimeout)
+		display, err := client.DisplayName(ctx, slackUser)
+		cancel()
+		switch {
+		case err != nil:
+			h.logger.WarnContext(ctx, "ask slack for the name of an account that is not linked; the handle or the identifier is used",
+				slog.String("slack_user", slackUser), slog.Any("error", err))
+		case display != "":
+			name = display
+		}
+	}
+	if name == "" {
+		name = slackUser
+	}
+	return alert.ChatUser(Provider, slackUser, notify.NotConnected(name, "Slack"))
+}
+
+// notLinked tells someone whose Slack account belongs to no Beacon user why
+// their press changed nothing, and what to do about it.
+func (h *Interactions) notLinked(action alert.Action) string {
+	text := "Nothing changed: only Beacon users can " + string(action) + " an alert, and your Slack account is not connected to one. "
+	if url := *h.signInURL.Load(); url != "" {
+		text += "Sign in to Beacon at " + url + " with the same email address as your Slack account, and Beacon connects the two within a minute. "
+	} else {
+		text += "Sign in to Beacon with the same email address as your Slack account, and Beacon connects the two within a minute; ask whoever runs Beacon for its address. "
+	}
+	return text + "You can still resolve the alert from here."
 }
 
 // SetClock replaces the clock, so tests can move time.
@@ -182,13 +250,34 @@ func (h *Interactions) apply(ctx context.Context, w http.ResponseWriter, integra
 	}
 	log := h.logger.With(slog.String("action", string(action)), slog.String("group_id", groupID), slog.String("slack_user", in.User.ID))
 
+	// Acknowledging and snoozing say "I have this", which only means
+	// something from a person Beacon knows. Resolving states a fact about
+	// the alert, and anyone who can see the message may state it.
+	by := h.identify(ctx, integration, in.User.ID, name)
+	if !by.linked && action != alert.ActionResolve {
+		if by.unknown {
+			log.WarnContext(ctx, "slack action refused: it could not be checked whether the account is linked to a Beacon user")
+			h.respond(ctx, in.ResponseURL, "Nothing changed: Beacon could not check who you are just now. Please try again.")
+			return
+		}
+		log.InfoContext(ctx, "slack action refused: the account is not linked to a Beacon user", slog.String("integration", integration))
+		h.respond(ctx, in.ResponseURL, h.notLinked(action))
+		return
+	}
+
 	err := alert.ErrNotFound
 	if uuidRE.MatchString(groupID) && in.User.ID != "" {
 		var opts alert.Options
 		if action == alert.ActionSnooze {
 			opts.SnoozeUntil = h.now().Add(SnoozeDuration)
 		}
-		_, err = h.alerts.ApplyToGroup(ctx, groupID, action, h.actor(ctx, integration, in.User.ID, name), opts)
+		actor := by.actor
+		if !by.linked {
+			log.InfoContext(ctx, "slack action by an account that is not linked to a Beacon user; the timeline records the Slack account",
+				slog.String("integration", integration))
+			actor = h.stranger(ctx, integration, in.User.ID, name)
+		}
+		_, err = h.alerts.ApplyToGroup(ctx, groupID, action, actor, opts)
 	}
 
 	var refused *alert.TransitionError
