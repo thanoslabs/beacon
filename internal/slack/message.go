@@ -66,15 +66,13 @@ var buttons = []struct {
 // allows the action.
 func actionsBlock(alerts []alert.Alert) (block, bool) {
 	var elements []any
+	allowed := notify.Actions(alerts)
 	for _, b := range buttons {
-		for _, a := range alerts {
-			if _, err := alert.Next(a.Status, b.action); err == nil {
-				elements = append(elements, button{
-					Type: "button", Text: text{Type: "plain_text", Text: b.label},
-					ActionID: b.id, Value: a.GroupID, Style: b.style,
-				})
-				break
-			}
+		if slices.Contains(allowed, b.action) {
+			elements = append(elements, button{
+				Type: "button", Text: text{Type: "plain_text", Text: b.label},
+				ActionID: b.id, Value: alerts[0].GroupID, Style: b.style,
+			})
 		}
 	}
 	return block{Type: "actions", Elements: elements}, len(elements) > 0
@@ -99,13 +97,6 @@ const (
 	maxLabels      = 2000
 )
 
-// The annotations a message looks for.
-const (
-	annotationSummary     = "summary"
-	annotationDescription = "description"
-	annotationRunbook     = "runbook_url"
-)
-
 // appearance is how each state is shown.
 var appearance = map[alert.Status]struct{ emoji, word string }{
 	alert.StatusFiring:       {":red_circle:", "Firing"},
@@ -122,13 +113,6 @@ const (
 	maxListLabels = 100
 )
 
-// statusOrder ranks the states by how much they ask of the reader. A group
-// is shown in the first state that any of its alerts has.
-var statusOrder = []alert.Status{alert.StatusFiring, alert.StatusAcknowledged, alert.StatusSnoozed, alert.StatusResolved}
-
-// severityOrder ranks the levels, most severe first.
-var severityOrder = []alert.Severity{alert.SeverityCritical, alert.SeverityWarning, alert.SeverityInfo}
-
 // render builds the message for a group as it is now. A group of one alert
 // shows that alert in full. A larger group shows what its alerts share and
 // lists them.
@@ -136,27 +120,27 @@ func render(m notify.Message) message {
 	if len(m.Alerts) == 0 {
 		return message{Text: "Alert", Blocks: []block{{Type: "section", Text: mrkdwn("Alert")}}}
 	}
-	status := groupStatus(m.Alerts)
-	a := representative(m.Alerts, status)
+	status := notify.GroupStatus(m.Alerts)
+	a := notify.Representative(m.Alerts, status)
 	look := appearance[status]
-	severity := worstSeverity(m.Alerts)
+	severity := notify.WorstSeverity(m.Alerts)
 	single := len(m.Alerts) == 1
 
-	title := clip(escape(alertTitle(a)), maxSummary)
+	title := clip(escape(notify.AlertTitle(a)), maxSummary)
 	if !single {
-		title = clip(escape(groupTitle(m.Group.Labels)), maxSummary)
+		title = clip(escape(notify.GroupTitle(m.Group.Labels)), maxSummary)
 	}
 	var head strings.Builder
 	fmt.Fprintf(&head, "%s *%s* · %s\n*%s*", look.emoji, look.word, severity, title)
 	if single {
-		if d := a.Annotations[annotationDescription]; d != "" {
+		if d := a.Annotations[notify.AnnotationDescription]; d != "" {
 			head.WriteString("\n" + clip(escape(d), maxDescription))
 		}
-		if link := runbookLink(a.Annotations[annotationRunbook]); link != "" {
+		if link := runbookLink(a.Annotations[notify.AnnotationRunbook]); link != "" {
 			head.WriteString("\n" + link)
 		}
 	} else {
-		head.WriteString("\n" + countLine(m.Alerts))
+		head.WriteString("\n" + notify.CountLine(m.Alerts))
 	}
 	// The parts are each bounded, so together they fit in a section.
 	blocks := []block{{Type: "section", Text: mrkdwn(head.String())}}
@@ -218,78 +202,23 @@ var slackUserRE = regexp.MustCompile(`^[UW][A-Z0-9]{2,20}$`)
 // It is read from the steps on the timeline, so it shows what happened and
 // not what the policy says now.
 func pagedLine(m notify.Message) string {
-	type person struct {
-		name, mention string
-		missing       []string
-	}
-	var order []string
-	people := map[string]*person{}
-	get := func(entry map[string]any) *person {
-		email, _ := entry["user"].(string)
-		if email == "" {
-			return nil
-		}
-		p, ok := people[email]
-		if !ok {
-			p = &person{name: email}
-			people[email] = p
-			order = append(order, email)
-		}
-		if name, _ := entry["name"].(string); name != "" {
-			p.name = name
-		}
-		return p
-	}
-	entries := func(e alert.Event, key string) []map[string]any {
-		list, _ := e.Data[key].([]any)
-		out := make([]map[string]any, 0, len(list))
-		for _, item := range list {
-			if entry, ok := item.(map[string]any); ok {
-				out = append(out, entry)
-			}
-		}
-		return out
-	}
-	for _, e := range m.Events {
-		if e.Type != notify.EventEscalated {
-			continue
-		}
-		for _, entry := range entries(e, "notified") {
-			p := get(entry)
-			if p == nil {
-				continue
-			}
-			id, _ := entry["destination"].(string)
-			if entry["integration_id"] == m.Notification.IntegrationID && slackUserRE.MatchString(id) {
-				p.mention = "<@" + id + ">"
-			}
-		}
-		for _, entry := range entries(e, "skipped") {
-			platform, _ := entry["not_connected"].(string)
-			if p := get(entry); p != nil && platform != "" && !slices.Contains(p.missing, platform) {
-				p.missing = append(p.missing, platform)
-			}
-		}
-	}
-	if len(order) == 0 {
+	paged := notify.Paged(m)
+	if len(paged) == 0 {
 		return ""
 	}
 	var names []string
-	for i, email := range order {
+	for i, p := range paged {
 		if i == maxPaged {
-			names = append(names, fmt.Sprintf("and %d more", len(order)-maxPaged))
+			names = append(names, fmt.Sprintf("and %d more", len(paged)-maxPaged))
 			break
 		}
-		p := people[email]
-		switch {
-		case p.mention != "":
-			names = append(names, p.mention)
-		case len(p.missing) > 0:
-			// Plain text, never a mention: there is no account to mention.
-			names = append(names, escape(notify.NotConnected(clip(p.name, maxPagedName), strings.Join(p.missing, ", "))))
-		default:
-			names = append(names, escape(clip(p.name, maxPagedName)))
+		p.Name = clip(p.Name, maxPagedName)
+		if slackUserRE.MatchString(p.Destination) {
+			names = append(names, "<@"+p.Destination+">")
+			continue
 		}
+		// Plain text, never a mention: there is no account to mention.
+		names = append(names, escape(p.ShownAs()))
 	}
 	return ":pager: Paged: " + strings.Join(names, ", ")
 }
@@ -306,130 +235,23 @@ func superseded(current message) message {
 	}
 }
 
-// groupStatus is the state a group is shown in: firing while any alert
-// fires, then acknowledged, then snoozed, and resolved once all are.
-func groupStatus(alerts []alert.Alert) alert.Status {
-	for _, status := range statusOrder {
-		for _, a := range alerts {
-			if a.Status == status {
-				return status
-			}
-		}
-	}
-	return alert.StatusResolved
-}
-
-// worstSeverity is the highest level among the alerts that are not resolved,
-// or among all of them once all are.
-func worstSeverity(alerts []alert.Alert) alert.Severity {
-	for _, open := range []bool{true, false} {
-		for _, severity := range severityOrder {
-			for _, a := range alerts {
-				if a.Severity == severity && (!open || a.Status != alert.StatusResolved) {
-					return severity
-				}
-			}
-		}
-	}
-	return alerts[0].Severity
-}
-
-// representative picks the alert whose last change the status line reports:
-// among the alerts in the group's state, the one that has fired longest, was
-// acknowledged or resolved last, or whose snooze ends first.
-func representative(alerts []alert.Alert, status alert.Status) alert.Alert {
-	var best *alert.Alert
-	better := func(a, b *alert.Alert) bool {
-		switch status {
-		case alert.StatusAcknowledged:
-			return a.AcknowledgedAt != nil && (b.AcknowledgedAt == nil || a.AcknowledgedAt.After(*b.AcknowledgedAt))
-		case alert.StatusSnoozed:
-			return a.SnoozedUntil != nil && (b.SnoozedUntil == nil || a.SnoozedUntil.Before(*b.SnoozedUntil))
-		case alert.StatusResolved:
-			return a.ResolvedAt != nil && (b.ResolvedAt == nil || a.ResolvedAt.After(*b.ResolvedAt))
-		default:
-			return a.StartedAt.Before(b.StartedAt)
-		}
-	}
-	for i := range alerts {
-		if a := &alerts[i]; a.Status == status && (best == nil || better(a, best)) {
-			best = a
-		}
-	}
-	if best == nil {
-		return alerts[0]
-	}
-	return *best
-}
-
-// groupTitle names a group by the label values its alerts share: the alert
-// name first, then the others in name order.
-func groupTitle(labels map[string]string) string {
-	names := make([]string, 0, len(labels))
-	for name := range labels {
-		if name != "alertname" {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	var parts []string
-	if v := labels["alertname"]; v != "" {
-		parts = append(parts, v)
-	}
-	for _, name := range names {
-		parts = append(parts, labels[name])
-	}
-	if len(parts) == 0 {
-		return "Alerts"
-	}
-	return strings.Join(parts, " · ")
-}
-
-// countLine says how many alerts a group has and in which states.
-func countLine(alerts []alert.Alert) string {
-	counts := map[alert.Status]int{}
-	for _, a := range alerts {
-		counts[a.Status]++
-	}
-	var parts []string
-	for _, status := range statusOrder {
-		if n := counts[status]; n > 0 {
-			parts = append(parts, fmt.Sprintf("%d %s", n, status))
-		}
-	}
-	return fmt.Sprintf("%d alerts: %s", len(alerts), strings.Join(parts, ", "))
-}
-
 // alertList lists the alerts of a group, those that ask most of the reader
 // first: each with its state, its summary and the labels that tell it apart
 // from the others. It is bounded; what does not fit is counted.
 func alertList(alerts []alert.Alert, shared map[string]string) string {
-	ordered := make([]alert.Alert, 0, len(alerts))
-	for _, status := range statusOrder {
-		for _, a := range alerts {
-			if a.Status == status {
-				ordered = append(ordered, a)
-			}
-		}
-	}
+	ordered := notify.ByUrgency(alerts)
 	var lines []string
 	for i, a := range ordered {
 		if i == maxListed {
 			lines = append(lines, fmt.Sprintf("… and %d more", len(ordered)-maxListed))
 			break
 		}
-		own := make(map[string]string, len(a.Labels))
-		for name, value := range a.Labels {
-			if _, isShared := shared[name]; !isShared {
-				own[name] = value
-			}
-		}
 		line := appearance[a.Status].emoji
-		labels := labelLine(own, maxListLabels)
-		if summary := a.Annotations[annotationSummary]; summary != "" {
+		labels := labelLine(notify.OwnLabels(a, shared), maxListLabels)
+		if summary := a.Annotations[notify.AnnotationSummary]; summary != "" {
 			line += " " + clip(escape(summary), maxListTitle)
 		} else if labels == "" {
-			line += " " + clip(escape(alertTitle(a)), maxListTitle)
+			line += " " + clip(escape(notify.AlertTitle(a)), maxListTitle)
 		}
 		if labels != "" {
 			line += " " + labels
@@ -437,16 +259,6 @@ func alertList(alerts []alert.Alert, shared map[string]string) string {
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
-}
-
-// alertTitle is the one line that says what the alert is.
-func alertTitle(a alert.Alert) string {
-	for _, s := range []string{a.Annotations[annotationSummary], a.Labels["alertname"]} {
-		if s != "" {
-			return s
-		}
-	}
-	return "Alert " + a.Fingerprint
 }
 
 // runbookLink returns a link to the runbook when the annotation holds a web
@@ -515,51 +327,19 @@ func labelLine(labels map[string]string, maxLen int) string {
 
 // statusLine says what last happened to the alert, who did it and when.
 func statusLine(a alert.Alert, events []alert.Event) string {
-	last := lastChange(a, events)
+	last := notify.LastChange(a, events)
 	switch a.Status {
 	case alert.StatusAcknowledged:
-		return "Acknowledged by " + actorName(last) + " " + when(a.AcknowledgedAt)
+		return "Acknowledged by " + escape(notify.ActorName(last)) + " " + when(a.AcknowledgedAt)
 	case alert.StatusSnoozed:
-		return "Snoozed by " + actorName(last) + " until " + when(a.SnoozedUntil)
+		return "Snoozed by " + escape(notify.ActorName(last)) + " until " + when(a.SnoozedUntil)
 	case alert.StatusResolved:
-		return "Resolved by " + actorName(last) + " " + when(a.ResolvedAt)
+		return "Resolved by " + escape(notify.ActorName(last)) + " " + when(a.ResolvedAt)
 	default:
 		if last != nil && last.Type == alert.EventSnoozeEnded {
 			return "Firing again: the snooze ended " + when(&last.OccurredAt)
 		}
 		return "Firing since " + when(&a.StartedAt)
-	}
-}
-
-// lastChange returns the latest state change of the alert on the timeline.
-func lastChange(a alert.Alert, events []alert.Event) *alert.Event {
-	for i := len(events) - 1; i >= 0; i-- {
-		e := &events[i]
-		if e.AlertID != a.ID {
-			continue
-		}
-		switch e.Type {
-		case alert.EventFired, alert.EventAcknowledged, alert.EventSnoozed, alert.EventSnoozeEnded, alert.EventResolved:
-			return e
-		}
-	}
-	return nil
-}
-
-// actorName names who caused an event. A person is named in plain text, not
-// mentioned, so that updating a message does not notify them again.
-func actorName(e *alert.Event) string {
-	switch {
-	case e == nil:
-		return "someone"
-	case e.Actor.Type == alert.ActorSource:
-		return "the source"
-	case e.Actor.Type == alert.ActorSystem:
-		return "Beacon"
-	case e.Actor.Name != "":
-		return escape(e.Actor.Name)
-	default:
-		return "someone"
 	}
 }
 
