@@ -38,6 +38,7 @@ func commands() map[string]command {
 	return map[string]command{
 		"hash-password": {summary: "Hash a password for the bootstrap admin", run: runHashPassword},
 		"migrate":       {summary: "Apply database schema migrations", run: runMigrate},
+		"preview":       {summary: "Show which on-call shifts a configuration would move", run: runPreview},
 		"serve":         {summary: "Run the Beacon server", run: runServe},
 		"validate":      {summary: "Check the configuration without applying it", run: runValidate},
 		"version":       {summary: "Print the version and exit", run: runVersion},

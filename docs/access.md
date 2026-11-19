@@ -58,9 +58,12 @@ Beacon is closed by default. Every route needs a session unless it is on the sho
 | `GET /auth/callback` | Public | Where the provider sends the browser back. This is the redirect URI. |
 | `POST /auth/logout` | Member | Ends the session. Answers `204`. |
 | `GET /api/v1/me` | Member | Who is signed in: `id`, `email`, `display_name`, `role` and `session_expires_at` |
+| `GET /api/v1/me/identities` | Member | The chat accounts linked to whoever is signed in; see [Chat accounts](#chat-accounts) |
 | `POST /api/v1/config/reload` | Admin | Reloads the configuration; see [[configuration#Reload without a restart]] |
 | `GET /api/v1/tokens`, `POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | Admin | Lists, creates and revokes [API tokens](#api-tokens) |
 | `GET /api/v1/silences`, `POST /api/v1/silences`, `GET /api/v1/silences/<id>`, `DELETE /api/v1/silences/<id>` | Member | Lists, creates, reads and expires [[silences]] |
+| `GET /api/v1/schedules`, `GET /api/v1/schedules/<name>`, `GET /api/v1/schedules/<name>/shifts`, `GET /api/v1/teams/<name>/on-call` | Member | Schedules, who is on call now and over a period; see [[schedules#Who is on call]] |
+| `GET /api/v1/schedules/<name>/overrides`, `POST /api/v1/schedules/<name>/overrides`, `DELETE /api/v1/schedules/<name>/overrides/<id>` | Member | Lists, creates and removes the overrides of a schedule; see [[schedules#Overrides]] |
 | `POST /auth/bootstrap` | Public | Signs the [bootstrap admin](#bootstrap-admin) in. The password is checked and the attempts are bounded; `404` unless the account is enabled. |
 | `POST /api/v1/ingest/<source>` | Public | Receives alerts. The source's own token is checked; see [[webhook]]. |
 | `POST /api/v1/integrations/<name>/interactions` | Public | Receives button presses from Slack. Slack's signature is checked; see [[slack]]. |
@@ -151,6 +154,33 @@ What to know about it:
 - Beacon needs the `email` claim. If the provider says the address is not verified (`email_verified: false`), the sign-in is refused: configuration refers to users by email address, so an address that anyone could claim must not be trusted.
 - If a person's email address changes at the provider, they keep their Beacon account and its history, and the address is updated at their next sign-in. Configuration files that list the old address must be changed to the new one.
 - A sign-in is refused when its email address already belongs to another Beacon user, for example after moving to a different provider. The log names the address. Nothing is merged automatically.
+
+## Chat accounts
+
+Beacon keeps track of which account in Slack or Discord belongs to which user. It needs that in two directions: to know who a person acting from chat is, and to reach a person there.
+
+| Service | How an account is linked |
+|---|---|
+| Slack | Beacon finds it by the user's email address, without the person doing anything; see [[slack#People]] |
+| Discord | The person links it themselves. Not available yet: see the note below. |
+
+- An account belongs to one user. Beacon never moves an account from one person to another: if Slack reports, for one user's address, an account that another user has linked, it is logged as an error and nothing changes.
+- An identity is tied to the integration through which it is known. A user ID of Slack means something in one workspace only, so a person has one identity per Slack integration.
+- The bootstrap admin is an account, not a person with an address, and is never looked up.
+- A disabled user's accounts are attributed to nobody.
+
+`GET /api/v1/me/identities` answers the accounts of whoever asks:
+
+```json
+{"identities": [
+  {"integration": "slack", "provider": "slack", "external_id": "U0123ABCDEF", "origin": "email", "linked_at": "2026-12-01T10:12:00Z"}
+]}
+```
+
+`origin` is `email` for an account that Beacon found by the email address and `self` for one the person linked. An API token is not a person and has no identities.
+
+> [!note] Discord
+> Discord does not let an application look a person up by email address, so a person will link their Discord account themselves: Beacon gives the signed-in user a one-time code, and the person gives that code to Beacon from inside Discord, which proves the account is theirs. The codes (valid once, for ten minutes, stored as hashes) and the linking are implemented and tested. What is missing is the part that Discord talks to, which arrives with the Discord integration; until then no route issues a code.
 
 ## Roles and teams
 

@@ -119,7 +119,7 @@ Each target is a map with exactly one of these forms:
 | `{user: <email>}` | One user |
 | `{channel: <channel>, integration: <name>}` | A shared channel, for example a Slack channel |
 
-People targets (`schedule`, `team`, `user`) accept an optional `via` list of integration names. Without it, the person is notified through every integration that can reach them directly: a Slack or Discord direct message when their account is linked, and email.
+People targets (`schedule`, `team`, `user`) accept an optional `via` list of integration names. Without it, the person is notified through every integration that can reach them directly: a Slack or Discord direct message when their account is linked, and email. Of these, Slack direct messages exist today.
 
 ### Routing
 
@@ -311,7 +311,7 @@ Provisioned objects are read-only in the UI and the API. Runtime state is never 
 | Escalation progress | Runtime | Yes | Current step and timer per alert group |
 | Routing rule | Provisioned | Copy, for references | |
 | User | Runtime | Yes | Created on first sign-in |
-| Linked Slack and Discord identity | Runtime | Yes | |
+| Linked Slack and Discord identity | Runtime | Yes | Per integration. Slack: found by email address. Discord: linked by the user. |
 | Role (admin or member) | Runtime | Yes | Set from identity provider claims at each sign-in |
 | API token | Runtime | Yes | Hash only |
 | Alert, alert group | Runtime | Yes | |
@@ -376,7 +376,11 @@ Applying a configuration makes these rows match the files, in one transaction, s
 
 **`sign_in_flows`**: `state_hash`, `nonce`, `code_verifier`, `created_at`, `expires_at`. A sign-in that has been sent to the identity provider and has not come back. A row is used once and lives ten minutes. Keeping it in Postgres, not in a signed cookie, means there is no session key to manage and the callback can arrive at any replica.
 
-**`user_identities`**: `user_id`, `provider` (`slack` or `discord`), `external_id`, `created_at`. Unique on (`provider`, `external_id`) and on (`user_id`, `provider`).
+**`user_identities`**: `user_id`, `integration_id`, `provider` (`slack` or `discord`), `external_id`, `origin` (`email` or `self`), `created_at`. Primary key on (`user_id`, `integration_id`), unique on (`integration_id`, `external_id`). The first version of this design keyed an identity by provider alone. A Slack user ID means something only within one workspace, and Beacon reaches the person through the integration of that workspace, so an identity belongs to an integration; `provider` is kept because the actor of a timeline event names it. `origin` says whether Beacon found the account by the user's email address or the user linked it themselves.
+
+**`identity_lookups`**: `user_id`, `integration_id`, `email`, `outcome` (`pending`, `not_found` or `error`), `next_check_at`. One row for each user whom Beacon has asked a chat service about and who has no identity there. It says when to ask again, so that replicas do not repeat each other and a person the service does not know is asked for once an hour and not on every pass. A replica claims a user by moving `next_check_at` ahead in the statement that selects them.
+
+**`identity_link_codes`**: `code_hash`, `user_id`, `integration_id`, `created_at`, `expires_at`. One-time codes with which a user links an account themselves. Only the SHA-256 hash of a code is stored; a code is used once and lives ten minutes.
 
 **`team_members`**: `team_id`, `user_id`, `origin` (`config` or `group`), `created_at`. Primary key on all three of `team_id`, `user_id`, `origin`.
 
@@ -417,7 +421,12 @@ A unique index on (`source_id`, `fingerprint`) for rows whose status is not `res
 > [!note] Built up over several migrations
 > The first migration for these tables leaves out the columns that reference tables which do not exist yet: `routing_rule_id`, `team_id` and `escalation_policy_id`. The migrations that create those tables add them.
 
-**`escalations`**: one row per open alert group. `alert_group_id`, `escalation_policy_id`, `step_index`, `pass` (which repeat), `next_step_at`, `status` (`active`, `acknowledged`, `exhausted` or `resolved`). Workers claim due rows with `SELECT ... FOR UPDATE SKIP LOCKED`, so a timer fires once when several replicas run.
+**`escalations`**: one row per alert group that has been escalated, keyed by `alert_group_id`. `escalation_policy_id`, `step_index`, `pass` (which repeat), `next_step_at`, `status` (`active`, `acknowledged`, `exhausted` or `resolved`), `silence_id`, `created_at`, `updated_at`. Workers claim due rows with `SELECT ... FOR UPDATE SKIP LOCKED` and move `next_step_at` in the same transaction, so a timer fires once when several replicas run and survives a restart.
+
+- `step_index` is the step that ran last in the pass in progress, counted from 0. It is -1 for an escalation that starts again, until its first step has run.
+- `next_step_at` is the timer, and is null exactly when the status is not `active`. A row is `acknowledged` when no alert of the group is firing, which acknowledging, snoozing and resolving bring about; it becomes `active` again when one fires.
+- `silence_id` names the silence whose end the next step waits for when every firing alert of the group is silenced, as `alert_groups.silence_id` does for the group's notification. The first version of this design did not have it.
+- The policy itself is not copied into the row: the steps are read from the configuration when each step runs, so a reload applies to escalations in progress. [[escalation]] describes the rules.
 
 **`alert_events`** (append only)
 
@@ -446,7 +455,7 @@ The author is exactly one of `created_by`, which references `users`, and `create
 | `id` | `uuid` | |
 | `alert_group_id` | `uuid` | |
 | `integration_id` | `uuid` | |
-| `user_id` | `uuid` | Null for channel targets |
+| `user_id` | `uuid` | The person the message is for. Null for channel targets. |
 | `destination` | `text` | Channel, address or URL, resolved when queued |
 | `reason` | `text` | `escalation_step`, `group_update`, `resolved` |
 | `status` | `text` | `pending`, `sent` or `failed` |
@@ -475,9 +484,9 @@ A worker claims a due row by moving its `next_attempt_at` into the future in the
 
 A schedule has a row from the moment a configuration that has it is first applied. When the schedule leaves the files the row is deleted, so that a schedule that returns starts afresh; its `shifts` are kept. `user_id` is nullable, which the first version of this design did not allow: a rotation whose members have not signed in yet has nobody on call, and its position still has to hold the handoff time. `pending_effective_at` is null when the pending rotation takes over at the next handoff, and holds the stated time otherwise.
 
-**`shifts`**: `id`, `schedule_id`, `user_id`, `starts_at`, `ends_at`, `kind` (`rotation` or `override`), `override_id`. A row is inserted when a shift begins, with `ends_at` null, and closed at the handoff. Rows are never updated after they are closed: a trigger on the table refuses any update of a closed row, and any change to an open row but setting its end, so the rule does not depend on the code that writes shifts. A unique index allows one open rotation shift per schedule. `override_id` is added with overrides (issue 31). [[schedules]] describes how shifts are recorded.
+**`shifts`**: `id`, `schedule_id`, `user_id`, `starts_at`, `ends_at`, `kind` (`rotation` or `override`), `override_id`. A row is inserted when a shift begins, with `ends_at` null, and closed at the handoff. Rows are never updated after they are closed: a trigger on the table refuses any update of a closed row, and any change to an open row but setting its end, so the rule does not depend on the code that writes shifts. A unique index allows one open rotation shift per schedule. An override's shift is written beside the rotation's shift, which is not touched: the rotation goes on underneath an override. [[schedules]] describes how shifts are recorded.
 
-**`schedule_overrides`**: `id`, `schedule_id`, `user_id`, `starts_at`, `ends_at`, `created_by`, `reason`, `created_at`, `cancelled_at`.
+**`schedule_overrides`**: `id`, `schedule_id`, `user_id`, `starts_at`, `ends_at`, `created_by`, `created_by_token`, `reason`, `created_at`, `cancelled_at`. The author is exactly one of `created_by` and `created_by_token`, as for a silence; the first version of this design had only `created_by`, which cannot name an API token. The overrides of one schedule that are not cancelled never overlap. That is checked when one is created, in a transaction that holds the schedule's position, and not by an exclusion constraint, which would need the `btree_gist` extension. A shift of kind `override` references its override, and a unique index allows one such shift per override.
 
 ## Team membership
 
@@ -495,6 +504,7 @@ A user is a member if either row exists. Removing someone from `members` does no
 - A changed definition in the files is stored as `pending_definition`. It takes over at the next handoff, or at `effective_from`. Until then the definition in force keeps running, so the shift in progress is not touched. An `effective_from` that has passed means now.
 - When the pending definition takes over at a handoff, the rotation continues from the current person: the next person is whoever follows them in the new order. If the current person is no longer in the list, the next person is the first member of the new list who came after them in the old order. When the handoff time, day or zone changed, the shift that begins then ends at the first new handoff that leaves it a full shift.
 - When it takes over at a stated time in the middle of a shift, the person on call stays on call and their shift ends at the first handoff of the new definition after that time. Only a person whom the new definition no longer lists is relieved at the stated time, by whoever follows them. The first version of this design did not say what a stated time does to the shift in progress.
+- `beacon preview` runs the same arithmetic ahead of time (`State.Project`), from the stored position, for the definition in force and for the one in the files, and reports where they differ.
 - A new schedule starts with the first member, at the moment it is first applied. Its first handoff is the next occurrence of the handoff time that is at least one full shift length away, so the first shift is never shorter than a normal one.
 - The handoff is a local time in the schedule's zone. Each handoff instant is computed from the calendar date, so a daylight saving change moves the instant and not the local time. A handoff in an hour that the clocks skip happens after the gap, by the length of the gap; one in an hour that comes twice happens the first time.
 - A handoff is recorded at the instant it was due, however late a worker carries it out, so shifts that began while no process ran are recorded when one starts.
@@ -518,15 +528,15 @@ These are judgement calls made in this proposal. Each can be changed before the 
 | 10 | Provisioned objects are copied into one table per kind with a `jsonb` definition, and removed objects keep their row | One generic table for all kinds; or fully normalised tables per kind |
 | 11 | Routing rules are a flat ordered list where the first match wins | A nested routing tree as in Alertmanager |
 | 12 | Keys are random `uuid` values, with `bigint` identity for append-only logs; no extensions | Time-ordered UUIDs, which need a newer minimum Postgres version or generation in the application |
-| 13 | Escalation steps name their targets, and people are reached through every integration that can reach them unless `via` narrows it | Per-user notification rules, which are a later requirement |
+| 13 | Escalation steps name their targets, and people are reached through every integration that can reach them unless `via` narrows it. With Slack as the only channel so far, that is a direct message to the Slack account linked by email address. | Per-user notification rules, which are a later requirement |
 | 14 | Severity levels are fixed: `critical`, `warning`, `info` | Configurable levels |
 
 ## Open questions
 
 1. **Roles from the identity provider.** *Resolved (issues 19 and 20), for the project owner to confirm:* the identity provider's settings, the role mapping (`auth.roles.admin`, `auth.roles.member`) and the name of the claim (`auth.oidc.groups_claim`) live in the `auth` block in YAML. The alternative was process settings beside the client identifier; the files won because the mapping names groups just as `teams[].groups` does, and belongs in the same review. A person in no mapped group has no access; with no mapping at all, everyone is a member and nobody an admin.
 2. **A user's email address changes.** *Resolved for now (issue 19), for the project owner to confirm:* a user is identified by the provider's issuer and subject, so the account and its history survive a change of address, and the stored address is updated at the next sign-in. The files must then be changed to the new address; until they are, the old address in a team or rotation is an unknown user and is skipped. The alternative is to let the files name a stable identifier, which nobody could write by hand.
-3. **Unknown users in a rotation.** The requirements say an unknown user in a team is skipped and logged. This proposal applies the same rule to rotation members. The alternative is to treat it as an error that blocks applying the schedule, since a skipped member changes who is on call.
-4. **Must rotation members belong to the owning team?** The proposal does not require it, so someone from another team can cover. Requiring it would catch mistakes.
+3. **Unknown users in a rotation.** *Resolved for now (issue 29), for the project owner to confirm:* an unknown user in a rotation is passed over, logged as an error and counted in `beacon_schedule_members_skipped`, as in a team, and takes their place at the first handoff after they have signed in. When no member is a user, nobody is on call, which is logged as an error at every handoff. The alternative is to treat it as an error that blocks applying the schedule, since a skipped member changes who is on call; it would make a schedule unusable until its last member has signed in.
+4. **Must rotation members belong to the owning team?** *Resolved for now (issues 29 and 31), for the project owner to confirm:* no. Someone from another team can be in a rotation, and an override can put any user on call. Requiring it would catch mistakes.
 5. **Service as an object.** *Resolved for now (issue 27), for the project owner to confirm:* a service stays a plain name on the alert. Routing sets it from the rule's `service`, or from the alert's `service` label, and nothing else is attached to it. The alternative, a provisioned `services` kind with an owning team, would let routing find the team from the service and would bound the values a metric label can take; it can be added later without changing what is stored on an alert, since the name would become the reference.
 6. **Shared channels for a team.** A shared channel is named in each escalation step. Should a team have a default channel, so that policies need not repeat it?
 7. **Minimum Postgres version.** No feature here needs a recent version. Stating a minimum (for example the oldest release still supported upstream) would let later work rely on it.
