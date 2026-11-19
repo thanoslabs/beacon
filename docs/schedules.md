@@ -111,6 +111,7 @@ schedule platform-primary: changed. The new definition takes over at the next ha
 - It runs the same arithmetic as the server, so what it shows is what will be recorded if nothing but time changes.
 - For each schedule it says whether it is `new`, `unchanged`, `changed`, `pending` (applied already and waiting to take over) or `removed`, and lists the periods in which someone else would be on call. Times are shown in the schedule's zone.
 - Members who are not users are listed as passed over, as they would be.
+- The overrides that exist are laid over the shifts it shows, marked `(override)`, because they hold whatever the files say. Time that an override covers is never reported as moved.
 - `--format json` prints the same for a program to read. `--schedule <name>` limits the output to one schedule. `--weeks` sets how far ahead to look (default 8).
 - **In CI**: `beacon preview` exits `0` whatever it finds, so its output can be posted to a pull request. With `--fail-on-moves` it exits `1` when any upcoming shift would move or a running schedule would end, for teams that want such a change to need a second look.
 
@@ -127,8 +128,9 @@ An override puts one person on call for a schedule for a period, in place of who
 | Reason | Why. Optional. |
 
 - **The rotation goes on underneath.** An override does not move the rotation: handoffs happen when they would have, and when the override ends, the person on call is whoever the rotation has by then.
-- **Overlapping overrides are refused.** A schedule has at most one override at any moment. A request for a period that overlaps an existing override is answered `409` and names the override in the way; remove that one, or choose a period beside it. Periods that touch, one ending as the next begins, do not overlap. Beacon does not pick a winner between two overrides, because whichever rule it used would surprise one of the two people.
-- **Overrides are recorded as shifts.** When an override begins, a shift of kind `override` is written for its person, with the override's identifier, beside the rotation's shift, which stays as it is. It is closed when the override ends or is removed. Who was really on call at a past moment is the person of the override shift that covers it, and otherwise the person of the rotation shift.
+- **Overrides are layered.** Overrides of one schedule may overlap. Each new one lies on top of the ones that exist: **where two cover the same time, the one created last is in force**, and the earlier one still holds for the rest of its period. So a week-long cover can have an evening taken out of it by a second override, without touching the first. What counts is the order in which the overrides were created, not which begins first or is longer.
+- **Removing the one on top reveals the one beneath.** When an override is removed, whatever it covered falls back to the override created before it that covers that time, and to the rotation where there is none.
+- **Overrides are recorded as shifts.** When an override begins, a shift of kind `override` is written for its person, with the override's identifier, beside the rotation's shift, which stays as it is. It is closed when the override ends or is removed. An override that lies beneath another is recorded for its whole period all the same, as the rotation is beneath both. Who was really on call at a past moment is the person of the override created last among those whose shift covers it, and otherwise the person of the rotation shift; the [shifts route](#shifts-over-a-period) works that out.
 - An override cannot be edited. Remove it and create another.
 - When a schedule leaves the configuration, its overrides end with it.
 
@@ -192,7 +194,6 @@ A list answers `{"overrides": [...]}`, by start, at most 1000.
 | `401` | No valid session or token |
 | `403` | A request from another site in a browser |
 | `404` | No schedule has this name, or it has no override with this identifier |
-| `409` | The period overlaps another override of the schedule |
 | `413` | The body is larger than 16 KiB |
 
 ## Who is on call
@@ -268,7 +269,7 @@ curl -H "Authorization: Bearer $BEACON_TOKEN" https://beacon.example.com/api/v1/
 }
 ```
 
-- **One person at any moment.** Where an override covers the rotation, only the override is listed, and the rotation shift around it is cut. Time in which nobody is on call is left out.
+- **One person at any moment.** Where an override covers the rotation, only the override is listed, and the rotation shift around it is cut. Where overrides overlap, only the one created last is listed for that time, so an override that has another on top of it appears in pieces. Time in which nobody is on call is left out.
 - **Past time comes from the record**, future time from the same arithmetic that will carry it out, with the overrides that exist and a pending change of definition taken into account. `planned` is `false` for a shift that is over and on record, and `true` for one that has not ended: it is what happens if nothing but time changes.
 - A shift that reaches beyond the period is listed whole, with its real start and end.
 

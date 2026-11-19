@@ -790,3 +790,78 @@ func TestPreviewIsWhatHappens(t *testing.T) {
 		})
 	}
 }
+
+// TestPreviewWithOverridesIsWhatHappens previews a change of a schedule
+// that has overrides, some of them on top of each other. The preview shows
+// who will be on call with the overrides in place, the time they cover does
+// not count as moved, and what it shows is what the timeline says once the
+// time has passed.
+func TestPreviewWithOverridesIsWhatHappens(t *testing.T) {
+	f := newFixture(t)
+	f.users(ada, grace, linus, "ken@example.com")
+	f.apply(rota("primary", "UTC", ada, grace, linus))
+	f.advance(day(3, 9, 0))
+	f.clock.Set(day(3, 15, 0))
+	for _, o := range []struct {
+		who      string
+		from, to time.Time
+	}{
+		{"ken@example.com", day(4, 6, 0), day(6, 12, 0)},
+		{grace, day(5, 0, 0), day(5, 12, 0)},
+		{ada, day(5, 6, 0), day(5, 7, 0)},
+		{linus, day(9, 20, 0), day(10, 4, 0)},
+	} {
+		if _, err := f.store.CreateOverride(context.Background(), schedule.NewOverride{Schedule: "primary", User: o.who, StartsAt: o.from, EndsAt: o.to}, f.as(ada)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	change := rota("primary", "UTC", linus, ada)
+	until := day(12, 0, 0)
+	p := f.preview(until, change)["primary"]
+	var want []string
+	overrides := 0
+	for _, s := range p.Upcoming {
+		line := strings.TrimSuffix(s.Member, "@example.com") + " " + s.Start.UTC().Format("Jan 2 15:04") + ".." + s.End.UTC().Format("Jan 2 15:04")
+		if s.Override {
+			line += " override"
+			overrides++
+		}
+		want = append(want, line)
+	}
+	if overrides != 6 {
+		t.Errorf("the preview shows %d stretches of override, want 6:\n  %s", overrides, strings.Join(want, "\n  "))
+	}
+	// The change moves shifts of the rotation, but not the time that the
+	// overrides cover.
+	if len(p.Moves) == 0 {
+		t.Error("the preview reports no moves")
+	}
+	for _, m := range p.Moves {
+		for _, s := range p.Upcoming {
+			if s.Override && m.Start.Before(s.End) && s.Start.Before(m.End) {
+				t.Errorf("time that an override covers is reported as moved: %s..%s", m.Start, m.End)
+			}
+		}
+	}
+
+	f.apply(change)
+	last := p.Upcoming[len(p.Upcoming)-1].End
+	for now := day(3, 15, 0); !now.After(last); now = now.Add(5 * time.Hour) {
+		f.advance(now)
+	}
+	f.advance(last)
+	shifts, err := f.store.Timeline(context.Background(), "primary", p.Upcoming[0].Start, last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, s := range shifts {
+		line := strings.TrimSuffix(s.User, "@example.com") + " " + s.StartsAt.Format("Jan 2 15:04") + ".." + s.EndsAt.Format("Jan 2 15:04")
+		if s.Kind == schedule.KindOverride {
+			line += " override"
+		}
+		got = append(got, line)
+	}
+	equal(t, "the timeline afterwards against the preview", got, want)
+}

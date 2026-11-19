@@ -164,6 +164,7 @@ Beacon keeps track of which account in Slack or Discord belongs to which user. I
 | Slack | Beacon finds it by the user's email address, without the person doing anything; see [[slack#People]] |
 | Discord | The person links it themselves. Not available yet: see the note below. |
 
+- **Acknowledging and snoozing from chat need a linked account.** A chat account that belongs to no Beacon user can resolve an alert and nothing else ([[slack#Who can act]]). An install without an identity provider has no users to link, so nobody can acknowledge from chat there.
 - An account belongs to one user. Beacon never moves an account from one person to another: if Slack reports, for one user's address, an account that another user has linked, it is logged as an error and nothing changes.
 - An identity is tied to the integration through which it is known. A user ID of Slack means something in one workspace only, so a person has one identity per Slack integration.
 - The bootstrap admin is an account, not a person with an address, and is never looked up.

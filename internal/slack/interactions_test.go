@@ -19,9 +19,12 @@ import (
 
 const signingSecret = "signing-secret-marker-4be1"
 
+// Alice and Bob have Slack accounts that are linked to Beacon users. Carol
+// is in the workspace and is nobody in Beacon.
 var (
 	alice = slacktest.User{ID: "U0ALICE", Username: "alice"}
 	bob   = slacktest.User{ID: "U0BOB", Username: "bob"}
+	carol = slacktest.User{ID: "U0CAROL", Username: "carol"}
 )
 
 // actionsFixture is the pipeline fixture plus the interactions endpoint.
@@ -30,6 +33,8 @@ type actionsFixture struct {
 	url          string
 	logs         *bytes.Buffer
 	interactions *slack.Interactions
+	// aliceID and bobID are the Beacon users of Alice and Bob.
+	aliceID, bobID string
 }
 
 func newActionsFixture(t *testing.T) *actionsFixture {
@@ -39,6 +44,13 @@ func newActionsFixture(t *testing.T) *actionsFixture {
 	secrets := map[string]config.Secret{"slack": config.NewSecret(config.SecretRef{}, signingSecret)}
 	f.interactions = slack.NewInteractions(slog.New(slog.NewJSONHandler(f.logs, nil)), f.alerts, secrets)
 	f.interactions.Register(mux)
+	err := f.pool.QueryRow(context.Background(), `WITH a AS (INSERT INTO users (email) VALUES ('alice@example.com') RETURNING id),
+		b AS (INSERT INTO users (email) VALUES ('bob@example.com') RETURNING id) SELECT a.id::text, b.id::text FROM a, b`).Scan(&f.aliceID, &f.bobID)
+	if err != nil {
+		t.Fatalf("create users: %v", err)
+	}
+	f.interactions.SetIdentities(directory{alice.ID: {f.aliceID, "alice"}, bob.ID: {f.bobID, "bob"}})
+	f.interactions.SetClients(map[string]*slack.Client{"slack": slack.NewClient(f.fake.URL, config.NewSecret(config.SecretRef{}, botToken))})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	f.url = srv.URL + "/api/v1/integrations/slack/interactions"
@@ -77,7 +89,7 @@ func TestAcknowledgeFromSlack(t *testing.T) {
 		t.Fatalf("status = %s, want acknowledged", got.Status)
 	}
 
-	// The timeline names the Slack user, in the form identity linking uses.
+	// The timeline names the Beacon user and the Slack account she acted from.
 	events, err := f.alerts.Timeline(context.Background(), a.ID)
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
@@ -91,7 +103,7 @@ func TestAcknowledgeFromSlack(t *testing.T) {
 	if ack == nil {
 		t.Fatalf("no acknowledged event on the timeline: %+v", events)
 	}
-	want := alert.Actor{Type: alert.ActorUser, Provider: "slack", ExternalID: "U0ALICE", Name: "alice"}
+	want := alert.Actor{Type: alert.ActorUser, ID: f.aliceID, Provider: "slack", ExternalID: "U0ALICE", Name: "alice"}
 	if ack.Actor != want {
 		t.Errorf("actor = %+v, want %+v", ack.Actor, want)
 	}
@@ -336,7 +348,9 @@ func TestStoreFailureAnswersTheUser(t *testing.T) {
 	fake := slacktest.New(t, botToken)
 	mux := http.NewServeMux()
 	secrets := map[string]config.Secret{"slack": config.NewSecret(config.SecretRef{}, signingSecret)}
-	slack.NewInteractions(slog.New(slog.DiscardHandler), brokenAlerts{}, secrets).Register(mux)
+	h := slack.NewInteractions(slog.New(slog.DiscardHandler), brokenAlerts{}, secrets)
+	h.SetIdentities(directory{alice.ID: {"00000000-0000-4000-8000-000000000001", "alice"}})
+	h.Register(mux)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 

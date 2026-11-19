@@ -207,7 +207,7 @@ func TestEscalationRunsEveryStepAndRepeats(t *testing.T) {
 		}
 	}
 	data, _ := json.Marshal(second.Data)
-	if want := `{"notified":[{"destination":"#team","integration":"chat","target":"channel #team"}],"pass":1,"passes":2,"policy":"default","skipped":[],"step":2,"steps":3,"timeout":"10m"}`; string(data) != want {
+	if want := `{"notified":[{"destination":"#team","integration":"chat","integration_id":"` + f.integrationID + `","target":"channel #team"}],"pass":1,"passes":2,"policy":"default","skipped":[],"step":2,"steps":3,"timeout":"10m"}`; string(data) != want {
 		t.Errorf("escalated event:\n got %s\nwant %s", data, want)
 	}
 	if !second.OccurredAt.Equal(time.Date(2026, 3, 1, 12, 5, 30, 0, time.UTC)) {
@@ -295,10 +295,10 @@ func TestEscalationGoesOnWhileAnAlertIsFiring(t *testing.T) {
 	}
 }
 
-// TestEscalationStartsAgainWhenAnAlertFiresAgain: an escalation that
-// stopped because the alerts were taken starts from its first step when one
-// fires again, because a snooze ended or because a new alert joined.
-func TestEscalationStartsAgainWhenAnAlertFiresAgain(t *testing.T) {
+// TestEscalationStartsAgainWhenASnoozeEnds: an escalation that stopped
+// because the alerts were snoozed starts from its first step when the
+// snooze runs out. Being asked again is what a snooze is for.
+func TestEscalationStartsAgainWhenASnoozeEnds(t *testing.T) {
 	f := newEscalationFixture(t)
 	ctx := context.Background()
 	g := f.open("db1")
@@ -324,18 +324,87 @@ func TestEscalationStartsAgainWhenAnAlertFiresAgain(t *testing.T) {
 	f.after(5 * time.Minute)
 	f.check("and on", g, "#alerts #team #alerts #team", "active step 1 pass 0 due in 10m0s")
 
-	// Someone acknowledges; a new alert joins the group later.
+	if got, want := f.steps(g), "1.1>#alerts 1.2>#team 1.1>#alerts 1.2>#team"; got != want {
+		t.Errorf("timeline:\n got %s\nwant %s", got, want)
+	}
+}
+
+// TestAcknowledgedGroupIsNeverPagedAgain: one page per alert group. Alerts
+// that join a group after it was acknowledged page nobody, however many
+// join and however long they fire. The destinations that were told get the
+// group's update, which edits their message, and nothing else.
+func TestAcknowledgedGroupIsNeverPagedAgain(t *testing.T) {
+	f := newEscalationFixture(t)
+	ctx := context.Background()
+	g := f.open("db1")
+	f.after(5 * time.Minute)
+	f.sent()
 	if _, err := f.alerts.ApplyToGroup(ctx, g, alert.ActionAcknowledge, alert.ChatUser("slack", "U0ADA", "ada"), alert.Options{}); err != nil {
 		t.Fatal(err)
 	}
-	f.clock.Advance(3 * time.Minute)
-	if joined := f.join("db2"); joined.GroupID != g {
-		t.Fatal("the new alert opened another group")
+	f.sent()
+	f.check("acknowledged", g, "#alerts #team", "acknowledged step 1 pass 0")
+	updates := func() string {
+		t.Helper()
+		rows, err := f.pool.Query(ctx, `SELECT destination FROM notifications WHERE alert_group_id = $1 AND reason = 'group_update' AND status = 'pending' ORDER BY destination`, g)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(got, " ")
 	}
-	f.escalate()
-	f.check("a new alert fired in the acknowledged group", g, "#alerts #team #alerts #team #alerts", "active step 0 pass 0 due in 5m0s")
-	if got, want := f.steps(g), "1.1>#alerts 1.2>#team 1.1>#alerts 1.2>#team 1.1>#alerts"; got != want {
-		t.Errorf("timeline:\n got %s\nwant %s", got, want)
+
+	for i, host := range []string{"db2", "db3", "db4"} {
+		f.clock.Advance(7 * time.Minute)
+		joined := f.join(host)
+		if joined.GroupID != g || joined.Status != alert.StatusFiring {
+			t.Fatalf("%s joined group %s as %s, want the acknowledged group, firing", host, joined.GroupID, joined.Status)
+		}
+		// Not at once, and not later.
+		if n := f.escalate(); n != 0 {
+			t.Errorf("alert %d that joined the acknowledged group ran an escalation step", i+1)
+		}
+		f.check("after "+host+" joined", g, "#alerts #team", "acknowledged step 1 pass 0")
+		// The people who were told see the new alert in their message.
+		f.tick()
+		if got := updates(); got != "#alerts #team" {
+			t.Errorf("after %s joined, updates are waiting for %q, want both destinations that were told", host, got)
+		}
+		f.sent()
+	}
+	for range 6 {
+		if n := f.after(4 * time.Hour); n != 0 {
+			t.Error("an escalation step ran for the acknowledged group")
+		}
+	}
+	f.check("a day later, with three alerts firing", g, "#alerts #team", "acknowledged step 1 pass 0")
+	if got, want := f.steps(g), "1.1>#alerts 1.2>#team"; got != want {
+		t.Errorf("timeline: %s, want %s", got, want)
+	}
+	var pages int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM notifications WHERE alert_group_id = $1 AND reason = 'escalation_step'`, g).Scan(&pages); err != nil || pages != 2 {
+		t.Errorf("%d pages for the group, %v; want the 2 from before it was acknowledged", pages, err)
+	}
+
+	// The same holds for a group whose policy ran out.
+	other := f.fireWith("Other", f.policyID)
+	f.tick()
+	for range 7 {
+		f.after(15 * time.Minute)
+	}
+	if got := f.state(other.GroupID); !strings.HasPrefix(got, "exhausted") {
+		t.Fatalf("the other group's escalation is %s, want exhausted", got)
+	}
+	before := f.pages(other.GroupID)
+	if _, _, err := f.alerts.Fire(ctx, alert.Firing{SourceID: f.sourceID, Fingerprint: "other-2", Severity: alert.SeverityWarning,
+		Labels: map[string]string{"alertname": "Other"}, Group: alert.Grouping{Key: "Other", EscalationPolicyID: f.policyID}}); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.after(time.Hour); n != 0 || f.pages(other.GroupID) != before {
+		t.Error("an alert that joined a group whose policy had run out paged someone")
 	}
 }
 
@@ -532,7 +601,8 @@ func TestPeopleTargets(t *testing.T) {
 		return notify.Person{UserID: id, Email: address}
 	}
 	grace, linus, ken := user("grace@example.com"), user("linus@example.com"), user("ken@example.com")
-	chat := []notify.Via{{IntegrationID: f.integrationID, Name: "chat"}}
+	grace.Name, linus.Name = "Grace Hopper", "Linus T"
+	chat := []notify.Via{{IntegrationID: f.integrationID, Name: "chat", Provider: "slack"}}
 	p.SetPeople(&directory{
 		onCall:  map[string][]notify.Person{"schedule-primary": {grace}},
 		members: map[string][]notify.Person{"team-platform": {grace, linus, ken}},
@@ -582,7 +652,7 @@ func TestPeopleTargets(t *testing.T) {
 		for _, item := range data[key].([]any) {
 			m := item.(map[string]any)
 			parts := []string{m["target"].(string)}
-			for _, k := range []string{"user", "integration", "destination", "reason"} {
+			for _, k := range []string{"user", "name", "integration", "destination", "reason", "shown_as"} {
 				if v, ok := m[k].(string); ok && v != "" {
 					parts = append(parts, v)
 				}
@@ -592,18 +662,20 @@ func TestPeopleTargets(t *testing.T) {
 		return strings.Join(out, "\n")
 	}
 	if got, want := list("notified"), strings.Join([]string{
-		"schedule primary | grace@example.com | chat | U0GRACE",
-		"team platform | ken@example.com | chat | U0KEN",
+		"schedule primary | grace@example.com | Grace Hopper | chat | U0GRACE",
+		"team platform | ken@example.com | ken@example.com | chat | U0KEN",
 		"channel #alerts | chat | #alerts",
 	}, "\n"); got != want {
 		t.Errorf("notified:\n%s\nwant:\n%s", got, want)
 	}
 	if got, want := list("skipped"), strings.Join([]string{
-		"team platform | linus@example.com | chat | the person has no linked account for this integration",
+		// Linus was not notified, and is still named as someone who was
+		// meant to be.
+		"team platform | linus@example.com | Linus T | chat | the person has no linked account for this integration | Linus T (Slack not connected)",
 		"schedule empty | the schedule has nobody on call: a gap in coverage",
 		"team nobody | the team has no members who are users",
 		"user stranger@example.com | no user has this email address",
-		"user ken@example.com | ken@example.com | email | the integration does not deliver notifications",
+		"user ken@example.com | ken@example.com | ken@example.com | email | the integration does not deliver notifications",
 		"user ken@example.com | no integration in the configuration can reach a person directly",
 		"channel oncall@example.com | email | the integration does not deliver notifications",
 	}, "\n"); got != want {

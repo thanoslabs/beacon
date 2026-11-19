@@ -35,13 +35,15 @@ With this policy the person on call for `platform-primary` is paged first. If fi
 | The group's first notification is due ([[notifications#Groups]]) | The first step runs: its targets are notified |
 | A step's `timeout` has passed and an alert of the group is still firing | The next step runs. After the last step, the first runs again, `repeat` more times in all. |
 | No alert of the group is firing any more | Escalation stops, at that moment. Nobody else is told. |
-| An alert fires in a group whose escalation had stopped | Escalation starts again from the first step |
+| A new alert joins a group whose escalation had stopped | Nobody is paged. The messages that exist are updated. |
+| A snooze runs out in a group whose escalation had stopped | Escalation starts again from the first step |
 | Every step has run, `repeat` + 1 times, and an alert is still firing | Escalation ends. The timeline gets an `escalation_exhausted` event, and the log a warning. |
 
 - **Escalation is about the group**, like every notification. A group of fifty alerts is escalated once.
 - **"Still firing" means firing.** An alert that has been acknowledged or snoozed has been taken by someone, and a resolved one is over. Escalation goes on as long as at least one alert of the group is `firing`: acknowledging one alert of two does not stop it, acknowledging the group does.
 - **Acknowledging, snoozing and resolving stop it**, whoever does it and from wherever: a person in Slack, the source that resolves the alert. The escalation's timer is cleared in the same database transaction as the change.
-- **It starts again when nobody has the alert any more.** When a snooze runs out, or when a new alert joins a group whose alerts had all been taken, an alert is firing that nobody has acknowledged. The policy runs again from its first step, straight away.
+- **One page per alert group.** Once a group has been taken, which is when none of its alerts is firing any more, it never pages again because of new alerts. An alert that joins it later is firing, and every message about the group is edited to show it, but an edit notifies nobody and no step runs. The same holds for a group whose policy ran out. Whoever acknowledged the group has taken the problem, and more alerts of the same group are more of that problem; alerts that are a different problem belong in a different group, which `group_by` decides ([[configuration#Grouping]]). A policy that pages again after a stated time is planned and will be opt-in.
+- **A snooze that runs out starts the policy again**, from its first step, straight away. That is the one way an alert group pages a second time: whoever snoozed it asked to be reminded.
 - **A step that reaches a destination a second time says the alert again.** In Slack that is a new message, because editing the one that is there notifies nobody; the old message is turned into a pointer to the new one. See [[slack#The message]].
 
 ## Targets
@@ -76,6 +78,8 @@ A target that cannot be notified is skipped. The step goes on with the others, e
 | `the integration does not deliver notifications` | The target names an integration of a type that Beacon cannot send through yet, such as email |
 | `no integration in the configuration can reach a person directly` | There is no Slack integration |
 
+**A person who has no linked account stays visible.** They are skipped for delivery, because there is nowhere to deliver to, but they were meant to be paged, and Beacon says so wherever it names who was paged: by their name followed by the service they are not connected to, as in `Grace Hopper (Slack not connected)`. The step's event holds that text as `shown_as`, with `not_connected`, and the group's message in Slack lists the person that way next to the people it mentions ([[slack#The message]]).
+
 A step in which everyone was skipped still counts: its timeout runs, and the next step follows. `beacon serve` logs a warning at start and at every reload for a policy none of whose targets can be reached at all.
 
 ## Silences
@@ -104,11 +108,12 @@ The position of a group in its policy is a row in the database: the policy, the 
 {
   "policy": "platform-default", "step": 2, "steps": 3, "pass": 1, "passes": 3, "timeout": "10m",
   "notified": [
-    {"target": "team platform", "user": "grace@example.com", "integration": "slack", "destination": "U0123ABCDEF"},
-    {"target": "channel #platform-alerts", "integration": "slack", "destination": "#platform-alerts"}
+    {"target": "team platform", "user": "grace@example.com", "name": "Grace Hopper", "integration": "slack", "integration_id": "…", "destination": "U0123ABCDEF"},
+    {"target": "channel #platform-alerts", "integration": "slack", "integration_id": "…", "destination": "#platform-alerts"}
   ],
   "skipped": [
-    {"target": "team platform", "user": "linus@example.com", "integration": "slack", "reason": "the person has no linked account for this integration"}
+    {"target": "team platform", "user": "linus@example.com", "name": "Linus Torvalds", "integration": "slack", "integration_id": "…",
+     "reason": "the person has no linked account for this integration", "not_connected": "Slack", "shown_as": "Linus Torvalds (Slack not connected)"}
   ]
 }
 ```

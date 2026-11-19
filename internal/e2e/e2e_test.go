@@ -140,6 +140,28 @@ func start(t *testing.T) *beacon {
 	return b
 }
 
+// startSignedIn runs the binary with sign-in through Dex configured, signs
+// Ada in, and waits until Beacon has linked the Slack account that has her
+// email address. It returns that Slack account and the name Ada has in
+// Beacon. Acknowledging from Slack needs such a person: an account that is
+// linked to no Beacon user may only resolve.
+func startSignedIn(t *testing.T) (b *beacon, ada slacktest.User, name string) {
+	t.Helper()
+	dbURL := postgrestest.NewURL(t)
+	b = launch(t, dbURL, writeConfig(t, signInConfiguration(t)))
+	b.waitUntilServing()
+	b.slack.AddUser(oidctest.Ada, "U0ADA")
+	if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), oidctest.Ada, oidctest.Password); code != http.StatusOK {
+		t.Fatalf("sign-in = %d %s", code, body)
+	}
+	b.waitFor("Ada's Slack account to be linked", func() bool {
+		err := b.db.QueryRow(context.Background(), `SELECT COALESCE(NULLIF(u.display_name, ''), u.email) FROM user_identities i JOIN users u ON u.id = i.user_id
+			WHERE i.external_id = 'U0ADA'`).Scan(&name)
+		return err == nil
+	})
+	return b, slacktest.User{ID: "U0ADA", Username: "ada.in.slack"}, name
+}
+
 // launch starts the binary against the database at dbURL with the
 // configuration in dir, and returns without waiting for it to serve.
 func launch(t *testing.T, dbURL, dir string) *beacon {
@@ -361,8 +383,9 @@ func contains(substrings ...string) func(slacktest.Message) bool {
 // by webhook, a message goes to Slack, someone acknowledges it from Slack,
 // and the source resolves it.
 func TestFirstPath(t *testing.T) {
-	b := start(t)
-	alice := slacktest.User{ID: "U0ALICE", Username: "alice"}
+	// Acknowledging from Slack needs a Beacon user, so the path begins with
+	// one: Ada has signed in, and her Slack account is linked.
+	b, alice, name := startSignedIn(t)
 
 	// 1. The source reports the alert.
 	code, res := b.webhook(diskFull)
@@ -395,20 +418,33 @@ func TestFirstPath(t *testing.T) {
 	if got := b.status(alertID); got != "acknowledged" {
 		t.Fatalf("alert is %s after the acknowledgement, want acknowledged", got)
 	}
-	msg = b.message("the acknowledgement in Slack", contains("*Acknowledged*", "Acknowledged by alice"))
+	msg = b.message("the acknowledgement in Slack", contains("*Acknowledged*", "Acknowledged by "+name))
 	if strings.Contains(msg.JSON(), "beacon_acknowledge") || !strings.Contains(msg.JSON(), "beacon_resolve") {
 		t.Errorf("the acknowledged message should offer resolve but not acknowledge:\n%s", msg.JSON())
 	}
 
-	// Someone else, still looking at the old message, presses acknowledge
-	// too. Nothing changes, and Slack is given a note for that person.
-	bob := slacktest.User{ID: "U0BOB", Username: "bob"}
+	// Still looking at the old message, she presses acknowledge again.
+	// Nothing changes, and Slack is given a note for her.
 	stale := slacktest.Message{Channel: msg.Channel, TS: msg.TS, Blocks: firing.Blocks}
-	if code := b.click(stale, "beacon_acknowledge", bob); code != http.StatusOK {
+	if code := b.click(stale, "beacon_acknowledge", alice); code != http.StatusOK {
 		t.Fatalf("second acknowledge from Slack = %d, want 200", code)
 	}
 	if notes := b.slack.Responses(); len(notes) != 1 || notes[0]["text"] != "Nothing changed: this alert is already acknowledged." {
 		t.Errorf("answer to the second acknowledge = %v", notes)
+	}
+	// Bob is in the channel and is no Beacon user. He may not snooze: he is
+	// told why, and how to get connected, and nothing changes.
+	bob := slacktest.User{ID: "U0BOB", Username: "bob"}
+	if code := b.click(msg, "beacon_snooze", bob); code != http.StatusOK {
+		t.Fatalf("snooze by an account that is not linked = %d, want 200", code)
+	}
+	notes := b.slack.Responses()
+	if text, _ := notes[len(notes)-1]["text"].(string); len(notes) != 2 || !strings.Contains(text, "only Beacon users can snooze an alert") ||
+		!strings.Contains(text, "Sign in to Beacon at "+oidctest.PublicURL+" with the same email address as your Slack account") {
+		t.Errorf("answer to the snooze by an account that is not linked = %v", notes)
+	}
+	if got := b.status(alertID); got != "acknowledged" {
+		t.Errorf("alert is %s after the refused snooze, want acknowledged", got)
 	}
 
 	// 4. The source reports that the problem is over, once the delivery of
@@ -431,7 +467,7 @@ func TestFirstPath(t *testing.T) {
 		"fired by source",
 		"escalated by system",
 		"notification_sent by system",
-		"acknowledged by user slack:U0ALICE",
+		"acknowledged by user slack:U0ADA",
 		"notification_sent by system",
 		"resolved by source",
 		"notification_sent by system",
@@ -448,13 +484,59 @@ func TestFirstPath(t *testing.T) {
 		t.Errorf("exit code after SIGTERM = %d, want 0", code)
 	}
 	logs := b.output()
-	for _, secret := range []string{sourceToken, botToken, signingSecret} {
+	for _, secret := range []string{sourceToken, botToken, signingSecret, oidctest.ClientSecret} {
 		if strings.Contains(logs, secret) {
 			t.Errorf("the logs contain the credential %q", secret)
 		}
 	}
 	if !strings.Contains(logs, "beacon stopped") {
 		t.Errorf("the logs do not show a clean stop")
+	}
+}
+
+// TestSlackWithoutSignIn is what Slack can do in an install that has no
+// identity provider, such as one started from the Slack example. The alert
+// arrives in Slack. Nobody can acknowledge or snooze it from there, because
+// nobody is a Beacon user: the press is answered with a note and changes
+// nothing, and the log said so at the start. Anybody can resolve it.
+func TestSlackWithoutSignIn(t *testing.T) {
+	b := start(t)
+	if !strings.Contains(b.output(), `"level":"WARN","msg":"nobody can acknowledge or snooze from Slack`) {
+		t.Errorf("the logs do not warn that nobody can acknowledge from Slack")
+	}
+	code, res := b.webhook(diskFull)
+	if code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	alertID := res["alert_id"]
+	msg := b.message("the alert in Slack", contains("*Firing*", "beacon_acknowledge"))
+	b.timeline(alertID, 3)
+
+	alice := slacktest.User{ID: "U0ALICE", Username: "alice"}
+	for i, button := range []string{"beacon_acknowledge", "beacon_snooze"} {
+		if code := b.click(msg, button, alice); code != http.StatusOK {
+			t.Fatalf("%s = %d, want 200", button, code)
+		}
+		notes := b.slack.Responses()
+		if text, _ := notes[len(notes)-1]["text"].(string); len(notes) != i+1 || !strings.Contains(text, "only Beacon users can") ||
+			!strings.Contains(text, "ask whoever runs Beacon for its address") || !strings.Contains(text, "You can still resolve the alert from here.") {
+			t.Errorf("answer to %s = %v", button, notes)
+		}
+		if got := b.status(alertID); got != "firing" {
+			t.Fatalf("the alert is %s after %s by an account that is not linked, want firing", got, button)
+		}
+	}
+	if code := b.click(msg, "beacon_resolve", alice); code != http.StatusOK {
+		t.Fatalf("resolve = %d, want 200", code)
+	}
+	if got := b.status(alertID); got != "resolved" {
+		t.Fatalf("the alert is %s after the resolve, want resolved", got)
+	}
+	// The fake workspace has no profile for her, so her handle is used.
+	b.message("the resolution in Slack", contains("*Resolved*", "Resolved by alice (Slack not connected)"))
+	want := []string{"fired by source", "escalated by system", "notification_sent by system", "resolved by user slack:U0ALICE", "notification_sent by system"}
+	if got := b.timeline(alertID, len(want)); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("timeline:\n  %s\nwant:\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
 	}
 }
 
@@ -493,7 +575,8 @@ func TestSourceResolvesAnAlertNobodyTook(t *testing.T) {
 		t.Fatalf("late acknowledge = %d, want 200", code)
 	}
 	responses := b.slack.Responses()
-	if len(responses) != 1 || responses[0]["text"] != "Nothing changed: this alert is already resolved." {
+	// Bob is no Beacon user, so he is told that before anything else.
+	if text, _ := responses[0]["text"].(string); len(responses) != 1 || !strings.Contains(text, "Nothing changed: only Beacon users can acknowledge an alert") {
 		t.Errorf("answer to the late acknowledge = %v", responses)
 	}
 	want := []string{"fired by source", "escalated by system", "notification_sent by system", "resolved by source", "notification_sent by system"}
@@ -771,7 +854,7 @@ func (b *beacon) find(what string, cond func(slacktest.Message) bool) slacktest.
 // alerts, is acknowledged from Slack as a whole, and resolves, in one Slack
 // message throughout.
 func TestGrouping(t *testing.T) {
-	b := start(t)
+	b, alice, name := startSignedIn(t)
 	fire := func(alertname, host string) {
 		t.Helper()
 		body := fmt.Sprintf(`{"labels": {"alertname": %q, "host": %q, "severity": "warning"}, "annotations": {"summary": %q}}`, alertname, host, alertname+" on "+host)
@@ -809,7 +892,6 @@ func TestGrouping(t *testing.T) {
 
 	// 3. Acknowledging the group from Slack acknowledges its alerts, and
 	// only its alerts.
-	alice := slacktest.User{ID: "U0ALICE", Username: "alice"}
 	if code := b.click(msg, "beacon_acknowledge", alice); code != http.StatusOK {
 		t.Fatalf("acknowledge = %d", code)
 	}
@@ -819,10 +901,11 @@ func TestGrouping(t *testing.T) {
 	if got := b.groupStates("HighLoad"); got != "web1=firing" {
 		t.Errorf("HighLoad alerts = %s, want it untouched", got)
 	}
-	b.find("the acknowledgement in Slack", diskFull("*Acknowledged*", "2 alerts: 2 acknowledged", "Acknowledged by alice"))
+	b.find("the acknowledgement in Slack", diskFull("*Acknowledged*", "2 alerts: 2 acknowledged", "Acknowledged by "+name))
 
-	// 4. A third alert joins the acknowledged group: it is new, so the
-	// group fires again.
+	// 4. A third alert joins the acknowledged group. It is new and firing,
+	// and the message says so; but a group is paged once, so the message is
+	// edited and nobody is asked again.
 	fire("DiskFull", "db3")
 	msg = b.find("the new alert in the group", diskFull("*Firing*", "3 alerts: 1 firing, 2 acknowledged"))
 	if !strings.Contains(msg.JSON(), "beacon_acknowledge") {
@@ -840,15 +923,16 @@ func TestGrouping(t *testing.T) {
 		t.Errorf("the resolved message still has buttons:\n%s", msg.JSON())
 	}
 
-	// 6. Two groups, and three messages however many alerts and changes:
-	// one for each group, and one more when the alert that joined the
-	// acknowledged group made its escalation start again. Asking again is
-	// said in a new message, because an edit notifies nobody; the message
-	// it replaced points to it.
-	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
-		t.Errorf("%d messages were posted, want 3", n)
+	// 6. Two groups, two messages, however many alerts and changes: the
+	// alert that joined the acknowledged group paged nobody.
+	if n := len(b.slack.Calls("chat.postMessage")); n != 2 {
+		t.Errorf("%d messages were posted, want 2", n)
 	}
-	b.find("the pointer that the first message became", contains("Beacon sent this alert again"))
+	var pages, restarted int
+	if err := b.db.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM notifications WHERE reason = 'escalation_step'),
+		(SELECT count(*) FROM alert_events WHERE type = 'escalated')`).Scan(&pages, &restarted); err != nil || pages != 2 || restarted != 2 {
+		t.Errorf("%d pages and %d escalation steps, %v; want one of each per group", pages, restarted, err)
+	}
 	var open, resolved int
 	if err := b.db.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE status = 'open'), count(*) FILTER (WHERE status = 'resolved') FROM alert_groups`).Scan(&open, &resolved); err != nil || open != 1 || resolved != 1 {
 		t.Errorf("%d open and %d resolved groups, %v; want 1 and 1", open, resolved, err)
@@ -857,8 +941,8 @@ func TestGrouping(t *testing.T) {
 	// 7. The same problem again is a new group with a new message.
 	fire("DiskFull", "db1")
 	b.find("the new group in Slack", diskFull("*Firing*", "*DiskFull on db1*"))
-	if n := len(b.slack.Calls("chat.postMessage")); n != 4 {
-		t.Errorf("%d messages were posted, want 4", n)
+	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
+		t.Errorf("%d messages were posted, want 3", n)
 	}
 }
 
@@ -1694,8 +1778,20 @@ func TestScheduleRotation(t *testing.T) {
 	if upcoming, _ := timeline["shifts"].([]any); code != http.StatusOK || len(upcoming) < 10 || upcoming[0].(map[string]any)["user"] != "grace@example.com" || upcoming[1].(map[string]any)["user"] != "ada@example.com" {
 		t.Errorf("GET shifts = %d %v", code, timeline)
 	}
-	if code, body := b.api(admin, "POST", "/api/v1/schedules/primary/overrides", "", `{"user": "ada@example.com", "duration": "30m"}`); code != http.StatusConflict {
-		t.Errorf("an overlapping override = %d %v, want 409", code, body)
+	// A second override over the same time lies on top of the first: Ada
+	// takes the next half hour back. Removing hers reveals Grace's.
+	code, top := b.api(admin, "POST", "/api/v1/schedules/primary/overrides", "", `{"user": "ada@example.com", "duration": "30m"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("an overlapping override = %d %v, want 201", code, top)
+	}
+	if on := onCallNow("/api/v1/schedules/primary"); on["user"] != "ada@example.com" || on["override"] == nil {
+		t.Errorf("on call under two overrides: %v, want the one created last", on)
+	}
+	if code, body := b.api(member, "DELETE", "/api/v1/schedules/primary/overrides/"+top["id"].(string), "", ""); code != http.StatusNoContent {
+		t.Errorf("remove the override on top = %d %v, want 204", code, body)
+	}
+	if on := onCallNow("/api/v1/schedules/primary"); on["user"] != "grace@example.com" {
+		t.Errorf("on call after the override on top was removed: %v, want Grace again", on)
 	}
 	if code, body := b.api(admin, "DELETE", "/api/v1/schedules/primary/overrides/"+override["id"].(string), "", ""); code != http.StatusNoContent {
 		t.Errorf("remove override = %d %v, want 204", code, body)
@@ -1831,12 +1927,25 @@ func TestSlackIdentity(t *testing.T) {
 	}
 	b.message("the acknowledgement by the Beacon user", contains("Acknowledged by "+name))
 
-	// Someone in the channel who is no Beacon user can still act, and is
-	// recorded as the Slack account.
-	if code := b.click(b.slack.Messages()[0], "beacon_resolve", slacktest.User{ID: "U0GUEST", Username: "guest"}); code != http.StatusOK {
+	// Someone in the channel who is no Beacon user may resolve and nothing
+	// else. Snoozing is refused with a note; resolving is recorded as the
+	// Slack account, under the name the workspace has for it.
+	guest := slacktest.User{ID: "U0GUEST", Username: "guest"}
+	b.slack.SetProfile(guest.ID, slacktest.Profile{DisplayName: "Gus Guest", Handle: "guest"})
+	if code := b.click(b.slack.Messages()[0], "beacon_snooze", guest); code != http.StatusOK {
 		t.Fatalf("click = %d", code)
 	}
-	b.message("the resolution", contains("Resolved by guest"))
+	if notes := b.slack.Responses(); len(notes) != 1 || !strings.Contains(notes[0]["text"].(string), "only Beacon users can snooze an alert") {
+		t.Errorf("answer to the snooze by the guest = %v", notes)
+	}
+	if code := b.click(b.slack.Messages()[0], "beacon_resolve", guest); code != http.StatusOK {
+		t.Fatalf("click = %d", code)
+	}
+	b.message("the resolution", contains("Resolved by Gus Guest (Slack not connected)"))
+	var guestName string
+	if err := b.db.QueryRow(context.Background(), `SELECT data->>'actor_name' FROM alert_events WHERE type = 'resolved' AND actor_external_id = 'U0GUEST'`).Scan(&guestName); err != nil || guestName != "Gus Guest (Slack not connected)" {
+		t.Errorf("the timeline names the guest %q, %v", guestName, err)
+	}
 	var unlinked int
 	err = b.db.QueryRow(context.Background(), `SELECT count(*) FROM alert_events WHERE type = 'resolved' AND actor_id IS NULL AND actor_external_id = 'U0GUEST'`).Scan(&unlinked)
 	if err != nil || unlinked != 1 {
@@ -1952,7 +2061,8 @@ func TestFirstPathWithEscalation(t *testing.T) {
 	// 2. Nobody responds. Three seconds later the second step tells the
 	// team, which is Ada and Grace, and the channel.
 	fromGrace := b.find("the second step to the other team member", inChannel(slacktest.DM("U0GRACE"), "*Firing*", "Disk is full on db1"))
-	b.find("the second step to the channel", inChannel("C0ALERTS", "*Firing*", "Disk is full on db1"))
+	// The message in the channel says who was paged, as mentions.
+	b.find("the second step to the channel", inChannel("C0ALERTS", "*Firing*", "Disk is full on db1", "Paged: ", `\u003c@U0ADA\u003e`, `\u003c@U0GRACE\u003e`))
 	// Ada is asked again in a new message; the first became a pointer to it.
 	b.waitFor("Ada to be asked again", func() bool {
 		var firing, pointers int
@@ -2018,6 +2128,62 @@ func TestFirstPathWithEscalation(t *testing.T) {
 		if strings.Contains(logs, secret) {
 			t.Errorf("the logs contain the credential %q", secret)
 		}
+	}
+}
+
+// TestUnlinkedPeopleStayVisible pages a team of which one member has no
+// Slack account. She cannot be notified, and is still named wherever Beacon
+// says who was paged: in the channel's message as plain text with "(Slack
+// not connected)", next to a real mention of her colleague, and on the
+// timeline.
+func TestUnlinkedPeopleStayVisible(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, escalationConfiguration(t)))
+	b.waitUntilServing()
+	// Ada is in the workspace. Grace is not.
+	b.slack.AddUser(oidctest.Ada, "U0ADA")
+	for _, who := range []string{oidctest.Ada, oidctest.Grace} {
+		if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), who, oidctest.Password); code != http.StatusOK {
+			t.Fatalf("sign-in of %s = %d %s", who, code, body)
+		}
+		if who == oidctest.Ada {
+			b.waitFor("Ada to be on call", func() bool { who, _ := b.onCall("primary"); return who == oidctest.Ada })
+		}
+	}
+	b.waitFor("Ada's Slack account to be linked", func() bool {
+		var n int
+		err := b.db.QueryRow(context.Background(), `SELECT count(*) FROM user_identities`).Scan(&n)
+		return err == nil && n == 1
+	})
+	var grace string
+	if err := b.db.QueryRow(context.Background(), `SELECT COALESCE(NULLIF(display_name, ''), email) FROM users WHERE email = $1`, oidctest.Grace).Scan(&grace); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, res := b.webhook(diskFull); code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	// The second step tells the team and the channel.
+	msg := b.find("the channel's message", inChannel("C0ALERTS", "Disk is full on db1", "Paged: "))
+	// The blocks are compared as JSON, in which the angle brackets of a
+	// mention are escaped.
+	if want := `Paged: \u003c@U0ADA\u003e, ` + grace + " (Slack not connected)"; !strings.Contains(msg.JSON(), want) {
+		t.Errorf("the channel's message does not contain %q:\n%s", want, msg.JSON())
+	}
+	// Grace is not mentioned and got no message.
+	if strings.Contains(msg.JSON(), "U0GRACE") {
+		t.Errorf("the message mentions an account that is not linked:\n%s", msg.JSON())
+	}
+	for _, m := range b.slack.Messages() {
+		if m.Channel != "C0ALERTS" && m.Channel != slacktest.DM("U0ADA") {
+			t.Errorf("a message went to %s", m.Channel)
+		}
+	}
+	var shown, reason string
+	err := b.db.QueryRow(context.Background(), `SELECT s->>'shown_as', s->>'reason' FROM alert_events e, jsonb_array_elements(e.data->'skipped') s
+		WHERE e.type = 'escalated' AND s->>'user' = $1`, oidctest.Grace).Scan(&shown, &reason)
+	if err != nil || shown != grace+" (Slack not connected)" || reason != "the person has no linked account for this integration" {
+		t.Errorf("on the timeline Grace is shown as %q, skipped because %q, %v", shown, reason, err)
 	}
 }
 

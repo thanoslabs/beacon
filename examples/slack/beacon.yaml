@@ -7,6 +7,12 @@
 #
 # The Slack credentials are read from the environment: BEACON_SLACK_BOT_TOKEN
 # and BEACON_SLACK_SIGNING_SECRET.
+#
+# With this configuration alerts arrive in Slack and can be resolved there.
+# Acknowledging and snoozing from Slack need a Beacon user whose Slack
+# account is linked, and this file has no sign-in, so those two buttons
+# answer with a note. examples/on-call has sign-in through an identity
+# provider; docs/slack.md ("Who can act") says what a person needs.
 
 sources:
   - name: default

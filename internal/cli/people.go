@@ -30,28 +30,32 @@ func (p people) OnCall(ctx context.Context, tx pgx.Tx, scheduleID string) ([]not
 	if err != nil {
 		return nil, err
 	}
-	return []notify.Person{{UserID: on.UserID, Email: on.Email}}, nil
+	person := notify.Person{UserID: on.UserID, Email: on.Email}
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(NULLIF(display_name, ''), email) FROM users WHERE id = $1`, on.UserID).Scan(&person.Name); err != nil {
+		return nil, fmt.Errorf("read the user on call: %w", err)
+	}
+	return []notify.Person{person}, nil
 }
 
 // TeamMembers returns the members of a team, whichever way they became
 // members, by email address.
 func (p people) TeamMembers(ctx context.Context, tx pgx.Tx, teamID string) ([]notify.Person, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT DISTINCT u.id::text, u.email FROM team_members m JOIN users u ON u.id = m.user_id
+		SELECT DISTINCT u.id::text, u.email, COALESCE(NULLIF(u.display_name, ''), u.email) FROM team_members m JOIN users u ON u.id = m.user_id
 		WHERE m.team_id = $1 AND u.disabled_at IS NULL ORDER BY u.email`, teamID)
 	if err != nil {
 		return nil, fmt.Errorf("read team members: %w", err)
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (notify.Person, error) {
 		var person notify.Person
-		return person, r.Scan(&person.UserID, &person.Email)
+		return person, r.Scan(&person.UserID, &person.Email, &person.Name)
 	})
 }
 
 // User returns the user with an email address.
 func (p people) User(ctx context.Context, tx pgx.Tx, email string) (notify.Person, bool, error) {
 	person := notify.Person{Email: email}
-	err := tx.QueryRow(ctx, `SELECT id::text FROM users WHERE email = $1 AND disabled_at IS NULL`, email).Scan(&person.UserID)
+	err := tx.QueryRow(ctx, `SELECT id::text, COALESCE(NULLIF(display_name, ''), email) FROM users WHERE email = $1 AND disabled_at IS NULL`, email).Scan(&person.UserID, &person.Name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return notify.Person{}, false, nil
 	}

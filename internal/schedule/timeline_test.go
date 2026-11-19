@@ -116,6 +116,12 @@ func TestTimelineIsWhatHappens(t *testing.T) {
 	changed.Rotation.Handoff.Time = "07:30"
 	f.apply(at(changed, day(9, 4, 0)))
 	f.override(grace, day(12, 22, 0), day(14, 1, 0))
+	// Overrides on top of overrides: one inside Grace's, one across its end
+	// and across a handoff, and one across the override that exists for the
+	// 6th.
+	f.override(linus, day(13, 3, 0), day(13, 9, 0))
+	f.override("ken@example.com", day(13, 20, 0), day(14, 21, 30))
+	f.override(grace, day(6, 18, 0), day(7, 20, 0))
 
 	from, to := day(5, 12, 0), day(20, 0, 0)
 	plan := f.timeline(from, to)

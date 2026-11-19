@@ -10,7 +10,7 @@ Each requirement is marked **MVP** (needed for the first usable release) or **La
 
 ## Principles
 
-- **Five minutes to the first page.** A new user gets from `docker compose up` to a test page in Slack or Discord in about five minutes.
+- **Five minutes to the first page.** A new user gets from `docker compose up` to a test page in Slack or Discord in about five minutes. The page arrives and can be resolved from chat with nothing else set up. Acknowledging it from chat needs sign-in through an identity provider, which is not part of those five minutes.
 - **Configuration as code first.** Sources, integrations, teams, routing and escalation policies are defined in YAML files that live in version control. The database holds users and runtime state.
 - **One binary plus Postgres.** Beacon ships as a single Go binary and needs only a Postgres database, so it can scale out without a storage migration.
 - **Works with what people already run.** Beacon sits behind an existing Alertmanager or Grafana setup; adopting it does not require changing Prometheus.
@@ -48,6 +48,7 @@ Each requirement is marked **MVP** (needed for the first usable release) or **La
 |---|---|
 | Rotations (daily, weekly, custom length) | MVP |
 | Overrides | MVP |
+| Layered overrides: overrides of a schedule may overlap, and the one created last is in force where they do | MVP |
 | "Who is on call now" view | MVP |
 | Past shifts are recorded and never recomputed when a schedule definition changes | MVP |
 | A changed definition takes effect at the next handoff, or at a stated date, and continues from whoever is on call | MVP |
@@ -70,6 +71,8 @@ Each requirement is marked **MVP** (needed for the first usable release) or **La
 |---|---|
 | Multi-step policies with timeouts | MVP |
 | Repeat until acknowledged | MVP |
+| One page per alert group: a group that has been acknowledged never pages again because of new alerts | MVP |
+| Opt-in re-page policy: page again when a group is still unresolved after a stated time, also after it was acknowledged ([#100](https://github.com/thanoslabs/beacon/issues/100)) | Later |
 | Round-robin steps | Later |
 | Conditional steps by severity or time of day | Later |
 
@@ -86,6 +89,7 @@ Each requirement is marked **MVP** (needed for the first usable release) or **La
 | Voice calls | Later |
 | Teams and Telegram | Later |
 | Mobile app with push notifications | Later |
+| Recurring summary of alert activity, so alerts that stay firing are not forgotten ([#101](https://github.com/thanoslabs/beacon/issues/101)) | Later |
 | Rich per-user notification rules | Later |
 
 ## Alert lifecycle
@@ -95,6 +99,7 @@ Each requirement is marked **MVP** (needed for the first usable release) or **La
 | Fire, acknowledge, resolve and snooze | MVP |
 | Auto-resolve when the source resolves | MVP |
 | Acknowledge and resolve from Slack and Discord | MVP |
+| Acknowledging and snoozing from chat need a chat account that is linked to a Beacon user; anyone who can see the message may resolve | MVP |
 | Per-alert timeline of events and notifications | MVP |
 | Notes and comments | Later |
 | Incidents with roles and postmortems | Later |
@@ -194,4 +199,7 @@ Beacon exposes a Prometheus `/metrics` endpoint. It covers both how Beacon is ru
 | Authentication | OAuth 2.0 and OpenID Connect first, with roles and team membership mapped from the provider's roles and groups | Access follows the organisation's existing identity provider |
 | Configuration format | YAML | It is what the Prometheus audience already uses |
 | Frontend | A separate single-page app that uses the REST API | The API is exercised by a real client from the start |
+| Paging again | One page per alert group. New alerts that join an acknowledged group, or one whose policy ran out, update its messages and page nobody. A snooze that runs out pages again. Paging again after a stated time is a later, opt-in policy (#100) | Whoever acknowledged a group has taken the problem; being paged for every further alert of it is how people learn to ignore pages |
+| Overlapping overrides | Layered: any override takes precedence over the rotation, the override created last takes precedence over earlier ones for the time they share, and removing it reveals the one beneath | Someone can take an evening out of a colleague's week of cover without anyone having to remove and recreate anything |
+| Who may act from chat | A chat account linked to a Beacon user may acknowledge, snooze and resolve. Any other account that can see the message may resolve only, and is told why when it tries the rest | An acknowledgement says "I have this" and stops escalation, so it must come from someone Beacon knows; a resolution states a fact, and the person who fixed the problem may never have signed in |
 | A schedule with nobody on call | A gap in coverage is allowed and is logged as a warning, not an error | Some teams do not want cover at all times, and a rotation whose members have not signed in yet is not a fault |

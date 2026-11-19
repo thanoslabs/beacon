@@ -74,10 +74,19 @@ func TestOverridesAPI(t *testing.T) {
 		t.Fatalf("list = %d %v", code, list)
 	}
 
-	// An overlap is a conflict, and says with what.
-	code, body := a.call("POST", path, `{"user": "ada@example.com", "duration": "1h"}`)
-	if msg, _ := body["error"].(string); code != http.StatusConflict || !strings.Contains(msg, "overlaps the override of ken@example.com from 2026-01-03T10:00:00Z to 2026-01-03T12:00:00Z") || body["field"] != "starts_at" {
-		t.Errorf("overlap = %d %v", code, body)
+	// An override that overlaps another is accepted and lies on top of it.
+	code, third := a.call("POST", path, `{"user": "ada@example.com", "duration": "1h"}`)
+	if code != http.StatusCreated || third["state"] != "active" {
+		t.Errorf("an overlapping override = %d %v, want 201", code, third)
+	}
+	if code, one := a.call("GET", "/api/v1/schedules/primary", ""); code != http.StatusOK || one["on_call"].(map[string]any)["user"] != ada {
+		t.Errorf("on call under two overrides = %d %v, want the one created last", code, one["on_call"])
+	}
+	if code, body := a.call("DELETE", path+"/"+third["id"].(string), ""); code != http.StatusNoContent {
+		t.Errorf("delete of the override on top = %d %v", code, body)
+	}
+	if _, one := a.call("GET", "/api/v1/schedules/primary", ""); one["on_call"].(map[string]any)["user"] != "ken@example.com" {
+		t.Errorf("on call after the override on top was removed = %v, want the one beneath", one["on_call"])
 	}
 
 	if code, body := a.call("DELETE", path+"/"+id, ""); code != http.StatusNoContent || body != nil {
@@ -87,7 +96,7 @@ func TestOverridesAPI(t *testing.T) {
 		t.Errorf("list after delete = %d %v", code, list)
 	}
 	code, list = a.call("GET", path+"?past=true", "")
-	if items, _ := list["overrides"].([]any); code != http.StatusOK || len(items) != 2 || items[1].(map[string]any)["state"] != "cancelled" {
+	if items, _ := list["overrides"].([]any); code != http.StatusOK || len(items) != 3 || items[2].(map[string]any)["state"] != "cancelled" {
 		t.Errorf("list with past = %d %v", code, list)
 	}
 	// A schedule with nothing answers with an empty list, not null.

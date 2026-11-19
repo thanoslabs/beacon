@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -176,6 +177,9 @@ func render(m notify.Message) message {
 	}
 
 	blocks = append(blocks, block{Type: "context", Elements: []any{mrkdwn(statusLine(a, m.Events))}})
+	if paged := pagedLine(m); paged != "" {
+		blocks = append(blocks, block{Type: "context", Elements: []any{mrkdwn(paged)}})
+	}
 	if actions, ok := actionsBlock(m.Alerts); ok {
 		blocks = append(blocks, actions)
 	}
@@ -185,6 +189,109 @@ func render(m notify.Message) message {
 		fallback += fmt.Sprintf(" (%d alerts)", len(m.Alerts))
 	}
 	return message{Text: fallback, Blocks: blocks}
+}
+
+// maxPaged bounds how many people the line of who was paged names, and
+// maxPagedName how much of each name it shows, so that the line fits in a
+// context element whatever the names are.
+const (
+	maxPaged     = 20
+	maxPagedName = 80
+)
+
+// slackUserRE matches a Slack user ID, the only thing that goes into a
+// mention.
+var slackUserRE = regexp.MustCompile(`^[UW][A-Z0-9]{2,20}$`)
+
+// pagedLine says who the escalation of the group has paged so far, or
+// returns "" when it has paged no person.
+//
+//   - A person who was paged through the integration this message is sent
+//     with is mentioned, so the name is the one they have in this workspace
+//     and leads to them.
+//   - A person who was to be paged and has no linked account is named in
+//     plain text, with "(Slack not connected)". They were not notified,
+//     and the people who read the message should know that.
+//   - Anyone else, such as a person paged through another integration, is
+//     named in plain text.
+//
+// It is read from the steps on the timeline, so it shows what happened and
+// not what the policy says now.
+func pagedLine(m notify.Message) string {
+	type person struct {
+		name, mention string
+		missing       []string
+	}
+	var order []string
+	people := map[string]*person{}
+	get := func(entry map[string]any) *person {
+		email, _ := entry["user"].(string)
+		if email == "" {
+			return nil
+		}
+		p, ok := people[email]
+		if !ok {
+			p = &person{name: email}
+			people[email] = p
+			order = append(order, email)
+		}
+		if name, _ := entry["name"].(string); name != "" {
+			p.name = name
+		}
+		return p
+	}
+	entries := func(e alert.Event, key string) []map[string]any {
+		list, _ := e.Data[key].([]any)
+		out := make([]map[string]any, 0, len(list))
+		for _, item := range list {
+			if entry, ok := item.(map[string]any); ok {
+				out = append(out, entry)
+			}
+		}
+		return out
+	}
+	for _, e := range m.Events {
+		if e.Type != notify.EventEscalated {
+			continue
+		}
+		for _, entry := range entries(e, "notified") {
+			p := get(entry)
+			if p == nil {
+				continue
+			}
+			id, _ := entry["destination"].(string)
+			if entry["integration_id"] == m.Notification.IntegrationID && slackUserRE.MatchString(id) {
+				p.mention = "<@" + id + ">"
+			}
+		}
+		for _, entry := range entries(e, "skipped") {
+			platform, _ := entry["not_connected"].(string)
+			if p := get(entry); p != nil && platform != "" && !slices.Contains(p.missing, platform) {
+				p.missing = append(p.missing, platform)
+			}
+		}
+	}
+	if len(order) == 0 {
+		return ""
+	}
+	var names []string
+	for i, email := range order {
+		if i == maxPaged {
+			names = append(names, fmt.Sprintf("and %d more", len(order)-maxPaged))
+			break
+		}
+		p := people[email]
+		switch {
+		case p.mention != "":
+			names = append(names, p.mention)
+		case len(p.missing) > 0:
+			// Plain text, never a mention: there is no account to mention.
+			names = append(names, escape(notify.NotConnected(clip(p.name, maxPagedName), strings.Join(p.missing, ", "))))
+		default:
+			names = append(names, escape(clip(p.name, maxPagedName)))
+		}
+	}
+	return ":pager: Paged: " + strings.Join(names, ", ")
 }
 
 // superseded is what a message is turned into when Beacon has said the same

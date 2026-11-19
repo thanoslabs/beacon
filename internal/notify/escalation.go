@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,8 +25,12 @@ import (
 //     still firing, the next step runs (EscalateDue). After the last step
 //     the policy starts again, as often as it says, and then gives up.
 //   - Escalation stops when no alert of the group is firing any more:
-//     acknowledged, snoozed or resolved (Observe). It starts again from the
-//     first step when one fires again.
+//     acknowledged, snoozed or resolved (Observe).
+//   - A group is paged once. After its escalation has stopped, an alert that
+//     joins the group pages nobody: the messages that exist are updated,
+//     and that is all. The one exception is a snooze that runs out, which
+//     starts the policy again, because being asked again is what a snooze
+//     is for.
 //
 // Where a group is in its policy is a row in the escalations table, and its
 // timer is a column of that row. Nothing is kept in the process.
@@ -98,6 +103,32 @@ type Via struct {
 	// IntegrationID is the row of the integration, and Name its name.
 	IntegrationID string
 	Name          string
+	// Provider is the service behind the integration, such as "slack". It
+	// is what a person is said not to be connected to.
+	Provider string
+}
+
+// PlatformName returns what to call a service in a sentence for people:
+// "Slack" for "slack". An integration whose service is not known is called
+// by its own name.
+func PlatformName(provider, integration string) string {
+	switch provider {
+	case "slack":
+		return "Slack"
+	case "discord":
+		return "Discord"
+	case "":
+		return integration
+	}
+	return strings.ToUpper(provider[:1]) + provider[1:]
+}
+
+// NotConnected is how a person is shown who was to be paged through a
+// service in which they have no linked account: by name, with the reason.
+// They were not notified there, and whoever reads the timeline or a
+// message about the group sees that they were meant to be.
+func NotConnected(name, platform string) string {
+	return name + " (" + platform + " not connected)"
 }
 
 // ChannelTarget returns the target for a shared destination.
@@ -109,6 +140,25 @@ func ChannelTarget(integrationID, integration, destination string) StepTarget {
 type Person struct {
 	UserID string
 	Email  string
+	// Name is what to call the person: their display name, or their email
+	// address when they have none.
+	Name string
+}
+
+// nameOf returns what to call a person in an event, or nothing for a
+// shared destination, which is nobody.
+func nameOf(p Person) string {
+	if p.Email == "" && p.Name == "" {
+		return ""
+	}
+	return p.name()
+}
+
+func (p Person) name() string {
+	if p.Name != "" {
+		return p.Name
+	}
+	return p.Email
 }
 
 // People is what the engine needs to know about people: who a target
@@ -381,17 +431,29 @@ func times(n int) string {
 // notified is one notification that a step queued, and skipped one that it
 // could not, as the timeline shows them.
 type notified struct {
-	Target      string `json:"target"`
-	User        string `json:"user,omitempty"`
-	Integration string `json:"integration"`
-	Destination string `json:"destination"`
+	Target string `json:"target"`
+	// User is the email address of the person, and Name what to call them.
+	// Both are absent for a shared destination.
+	User          string `json:"user,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Integration   string `json:"integration"`
+	IntegrationID string `json:"integration_id"`
+	Destination   string `json:"destination"`
 }
 
 type skipped struct {
-	Target      string `json:"target"`
-	User        string `json:"user,omitempty"`
-	Integration string `json:"integration,omitempty"`
-	Reason      string `json:"reason"`
+	Target        string `json:"target"`
+	User          string `json:"user,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Integration   string `json:"integration,omitempty"`
+	IntegrationID string `json:"integration_id,omitempty"`
+	Reason        string `json:"reason"`
+	// NotConnected is the service in which the person has no linked
+	// account, when that is why they were skipped, and ShownAs how they are
+	// named wherever Beacon says who was paged: "Grace Hopper (Slack not
+	// connected)".
+	NotConnected string `json:"not_connected,omitempty"`
+	ShownAs      string `json:"shown_as,omitempty"`
 }
 
 // runStep notifies the targets of one step and records the step on the
@@ -419,7 +481,7 @@ func (p *Pipeline) runStep(ctx context.Context, tx pgx.Tx, g alert.Group, policy
 	// deliver queues one notification, once per destination and step.
 	deliver := func(label string, via Via, destination string, person Person) error {
 		if _, delivers := channels[via.IntegrationID]; !delivers {
-			skip(skipped{Target: label, User: person.Email, Integration: via.Name, Reason: "the integration does not deliver notifications"})
+			skip(skipped{Target: label, User: person.Email, Name: nameOf(person), Integration: via.Name, IntegrationID: via.IntegrationID, Reason: "the integration does not deliver notifications"})
 			return nil
 		}
 		t := Target{IntegrationID: via.IntegrationID, Destination: destination}
@@ -427,7 +489,7 @@ func (p *Pipeline) runStep(ctx context.Context, tx pgx.Tx, g alert.Group, policy
 			return nil
 		}
 		queued[t] = true
-		sent = append(sent, notified{Target: label, User: person.Email, Integration: via.Name, Destination: destination})
+		sent = append(sent, notified{Target: label, User: person.Email, Name: nameOf(person), Integration: via.Name, IntegrationID: via.IntegrationID, Destination: destination})
 		return p.Enqueue(ctx, tx, Notification{GroupID: g.ID, IntegrationID: via.IntegrationID, Destination: destination, Reason: ReasonEscalationStep, UserID: person.UserID})
 	}
 
@@ -456,7 +518,7 @@ func (p *Pipeline) runStep(ctx context.Context, tx pgx.Tx, g alert.Group, policy
 		for _, person := range persons {
 			for _, via := range target.Via {
 				if _, delivers := channels[via.IntegrationID]; !delivers {
-					skip(skipped{Target: label, User: person.Email, Integration: via.Name, Reason: "the integration does not deliver notifications"})
+					skip(skipped{Target: label, User: person.Email, Name: nameOf(person), Integration: via.Name, IntegrationID: via.IntegrationID, Reason: "the integration does not deliver notifications"})
 					continue
 				}
 				address, found, err := people.Address(ctx, tx, via.IntegrationID, person.UserID)
@@ -464,7 +526,11 @@ func (p *Pipeline) runStep(ctx context.Context, tx pgx.Tx, g alert.Group, policy
 					return fmt.Errorf("find where %s reaches %s: %w", via.Name, person.Email, err)
 				}
 				if !found {
-					skip(skipped{Target: label, User: person.Email, Integration: via.Name, Reason: "the person has no linked account for this integration"})
+					// Skipped for delivery, and still named: they were
+					// meant to be paged.
+					platform := PlatformName(via.Provider, via.Name)
+					skip(skipped{Target: label, User: person.Email, Name: person.name(), Integration: via.Name, IntegrationID: via.IntegrationID,
+						Reason: "the person has no linked account for this integration", NotConnected: platform, ShownAs: NotConnected(person.name(), platform)})
 					continue
 				}
 				if err := deliver(label, via, address, person); err != nil {
@@ -521,10 +587,21 @@ func resolve(ctx context.Context, tx pgx.Tx, people People, target StepTarget) (
 //   - When no alert of the group is firing any more, because the last one
 //     was acknowledged, snoozed or resolved, by a person or by the source,
 //     the escalation stops and its timer is cleared.
-//   - When an alert fires in a group whose escalation had stopped that way,
-//     because a snooze ended or a new alert joined, the escalation starts
-//     again from its first step, at the next look of the worker. Nobody has
-//     taken the alert that fires.
+//   - When a snooze runs out in a group whose escalation had stopped that
+//     way, the escalation starts again from its first step, at the next
+//     look of the worker. The person who snoozed asked to be reminded.
+//   - When a new alert joins such a group, nothing happens here. One page
+//     per alert group: the group was taken, and the alert that joins is
+//     shown in the messages that exist, which the group's timer updates
+//     without notifying anyone.
+//
+// SEAM FOR THE RE-PAGE POLICY (issue 100). A policy will be able to state an
+// interval after which a group that is still not resolved is paged again,
+// also after it was acknowledged or its policy ran out. That belongs here
+// and in endEscalation: instead of clearing next_step_at when an escalation
+// stops, set it to the re-page time and let escalate run the first step
+// again when it falls due. Without that setting, the rule below stands: an
+// alert that fires into a group that was taken does not restart anything.
 func (p *Pipeline) observeEscalation(ctx context.Context, tx pgx.Tx, ev alert.Event) error {
 	now := p.now()
 	switch ev.Type {
@@ -538,7 +615,7 @@ func (p *Pipeline) observeEscalation(ctx context.Context, tx pgx.Tx, ev alert.Ev
 		if err != nil {
 			return fmt.Errorf("stop escalation: %w", err)
 		}
-	case alert.EventFired, alert.EventSnoozeEnded:
+	case alert.EventSnoozeEnded:
 		_, err := tx.Exec(ctx, `
 			UPDATE escalations SET status = 'active', step_index = -1, pass = 0, next_step_at = $2, updated_at = $2
 			WHERE alert_group_id = $1 AND status = 'acknowledged'`, ev.GroupID, now)
