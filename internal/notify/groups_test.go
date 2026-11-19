@@ -35,6 +35,10 @@ func (c *clock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
+// undelivered is a channel for the tests that read the queue and deliver
+// nothing: an integration needs a channel for a step to queue through it.
+var undelivered = channelFunc(func(context.Context, notify.Message) (string, error) { return "", nil })
+
 // groupFixture is a pipeline that tells one target about every group, with
 // time in the test's hands. Nothing is delivered: the tests read the queue.
 type groupFixture struct {
@@ -46,7 +50,7 @@ type groupFixture struct {
 func newGroupFixture(t *testing.T) *groupFixture {
 	t.Helper()
 	f := &groupFixture{fixture: newFixture(t), clock: &clock{now: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}}
-	f.p = f.pipeline(fastConfig(), nil)
+	f.p = f.pipeline(fastConfig(), undelivered)
 	f.p.SetClock(f.clock.Now)
 	f.alerts.SetClock(f.clock.Now)
 	f.p.SetPolicies(f.policy("#alerts"))
@@ -54,14 +58,20 @@ func newGroupFixture(t *testing.T) *groupFixture {
 	return f
 }
 
-// policy is the fixture's escalation policy with these channels in its first
-// step.
+// policy is the fixture's escalation policy: one step that tells these
+// channels, and a timeout long enough that the tests which are not about
+// escalation never see it pass.
 func (f *fixture) policy(channels ...string) map[string]notify.Policy {
-	p := notify.Policy{Name: "default"}
+	return map[string]notify.Policy{f.policyID: {Name: "default", Steps: []notify.Step{f.step(1000*time.Hour, channels...)}}}
+}
+
+// step is an escalation step that tells these channels.
+func (f *fixture) step(timeout time.Duration, channels ...string) notify.Step {
+	s := notify.Step{Timeout: timeout}
 	for _, c := range channels {
-		p.FirstStep = append(p.FirstStep, notify.Target{IntegrationID: f.integrationID, Destination: c})
+		s.Targets = append(s.Targets, notify.ChannelTarget(f.integrationID, "chat", c))
 	}
-	return map[string]notify.Policy{f.policyID: p}
+	return s
 }
 
 // join fires an alert into the DiskFull group: 30s wait, 5m interval.
@@ -376,6 +386,7 @@ func TestGroupTimersSurviveARestartAndFireOnce(t *testing.T) {
 		store.SetClock(f.clock.Now)
 		p := notify.New(f.pool, store, slog.New(slog.DiscardHandler), fastConfig())
 		p.SetClock(f.clock.Now)
+		p.Register(f.integrationID, undelivered)
 		p.SetPolicies(f.policy("#alerts"))
 		wg.Go(func() {
 			if _, err := p.NotifyDueGroups(context.Background()); err != nil {
@@ -458,8 +469,8 @@ func TestTheFirstNotificationFollowsTheGroupsPolicy(t *testing.T) {
 	f := newGroupFixture(t)
 	dba := provisiontest.Row(t, f.pool, provision.EscalationPolicies, "dba")
 	f.p.SetPolicies(map[string]notify.Policy{
-		f.policyID: {Name: "default", FirstStep: []notify.Target{{IntegrationID: f.integrationID, Destination: "#alerts"}}},
-		dba:        {Name: "dba", FirstStep: []notify.Target{{IntegrationID: f.integrationID, Destination: "#dba"}, {IntegrationID: f.integrationID, Destination: "#dba-leads"}}},
+		f.policyID: {Name: "default", Steps: []notify.Step{f.step(time.Hour, "#alerts")}},
+		dba:        {Name: "dba", Steps: []notify.Step{f.step(time.Hour, "#dba", "#dba-leads")}},
 	})
 	general := f.fireWith("General", f.policyID)
 	database := f.fireWith("Database", dba)
@@ -490,14 +501,14 @@ func TestTheFirstNotificationFollowsTheGroupsPolicy(t *testing.T) {
 // its timeline says why.
 func TestGroupThatNotifiesNobodySaysWhy(t *testing.T) {
 	f := newGroupFixture(t)
-	people := provisiontest.Row(t, f.pool, provision.EscalationPolicies, "people-only")
+	empty := provisiontest.Row(t, f.pool, provision.EscalationPolicies, "empty")
 	removed := provisiontest.Row(t, f.pool, provision.EscalationPolicies, "removed")
-	f.p.SetPolicies(map[string]notify.Policy{people: {Name: "people-only"}})
+	f.p.SetPolicies(map[string]notify.Policy{empty: {Name: "empty"}})
 
 	for name, tt := range map[string]struct{ policy, want string }{
-		"NoPolicy":   {"", "the group has no escalation policy"},
-		"PeopleOnly": {people, `the first step of escalation policy "people-only" names no channel that Beacon can deliver to`},
-		"Removed":    {removed, "the escalation policy of the group is no longer in the configuration"},
+		"NoPolicy": {"", "the group has no escalation policy"},
+		"NoSteps":  {empty, `escalation policy "empty" has no steps`},
+		"Removed":  {removed, "the escalation policy of the group is no longer in the configuration"},
 	} {
 		a := f.fireWith(name, tt.policy)
 		if n := f.tick(); n != 1 {

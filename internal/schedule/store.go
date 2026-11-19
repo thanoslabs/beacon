@@ -111,6 +111,8 @@ type Shift struct {
 	// EndsAt is nil while the shift is in progress.
 	EndsAt *time.Time
 	Kind   string
+	// OverrideID is the override that a shift of kind override records.
+	OverrideID string
 }
 
 // Apply makes the positions follow the schedules of a configuration, which
@@ -146,6 +148,10 @@ func (s *Store) Apply(ctx context.Context, schedules []Provisioned) (Applied, er
 		for _, g := range gone {
 			if _, err := tx.Exec(ctx, `UPDATE shifts SET ends_at = GREATEST($2, starts_at) WHERE schedule_id = $1 AND ends_at IS NULL`, g.id, now); err != nil {
 				return fmt.Errorf("close the shift of schedule %q: %w", g.name, err)
+			}
+			// Its overrides end with it: one that has not begun never will.
+			if _, err := tx.Exec(ctx, `UPDATE schedule_overrides SET cancelled_at = $2 WHERE schedule_id = $1 AND cancelled_at IS NULL AND ends_at > $2`, g.id, now); err != nil {
+				return fmt.Errorf("end the overrides of schedule %q: %w", g.name, err)
 			}
 			if _, err := tx.Exec(ctx, `DELETE FROM schedule_positions WHERE schedule_id = $1`, g.id); err != nil {
 				return fmt.Errorf("drop the position of schedule %q: %w", g.name, err)
@@ -279,8 +285,11 @@ type Handoff struct {
 	// TookOver says that a changed definition came into force.
 	TookOver bool
 	// ShiftBegan is false only when a definition took over in the middle of
-	// a shift and the person on call stayed.
+	// a shift and the person on call stayed, and when an override ended.
 	ShiftBegan bool
+	// Override says that this is the beginning or the end of an override,
+	// not a handoff of the rotation.
+	Override bool
 }
 
 // Advance brings every schedule up to date: each handoff that has fallen due
@@ -310,7 +319,12 @@ func (s *Store) Advance(ctx context.Context) ([]Handoff, error) {
 		return done, err
 	}
 	filled, err := s.fill(ctx)
-	return append(done, filled...), err
+	done = append(done, filled...)
+	if err != nil {
+		return done, err
+	}
+	overrides, err := s.recordOverrides(ctx)
+	return append(done, overrides...), err
 }
 
 // The position is read from its own table alone wherever it is locked. A
@@ -468,6 +482,14 @@ func (s *Store) Run(ctx context.Context, logger *slog.Logger, interval time.Dura
 		}
 		done, err := s.Advance(ctx)
 		for _, h := range done {
+			if h.Override {
+				msg := "schedule override began"
+				if !h.ShiftBegan {
+					msg = "schedule override ended"
+				}
+				logger.InfoContext(ctx, msg, slog.String("schedule", h.Schedule), slog.String("user", h.From+h.To), slog.Time("at", h.At))
+				continue
+			}
 			if h.TookOver {
 				logger.InfoContext(ctx, "changed schedule definition took over", slog.String("schedule", h.Schedule), slog.Time("at", h.At))
 			}
@@ -506,7 +528,7 @@ func (s *Store) Position(ctx context.Context, scheduleID string) (Position, erro
 // time after its start.
 func (s *Store) Recorded(ctx context.Context, scheduleID string, from, to time.Time) ([]Shift, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT f.id::text, f.schedule_id::text, f.user_id::text, u.email, f.starts_at, f.ends_at, f.kind
+		SELECT f.id::text, f.schedule_id::text, f.user_id::text, u.email, f.starts_at, f.ends_at, f.kind, COALESCE(f.override_id::text, '')
 		FROM shifts f JOIN users u ON u.id = f.user_id
 		WHERE f.schedule_id = $1 AND f.starts_at < $3 AND (f.ends_at IS NULL OR f.ends_at > $2)
 		ORDER BY f.starts_at, f.id`, scheduleID, from, to)
@@ -515,7 +537,7 @@ func (s *Store) Recorded(ctx context.Context, scheduleID string, from, to time.T
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Shift, error) {
 		var f Shift
-		return f, r.Scan(&f.ID, &f.ScheduleID, &f.UserID, &f.Email, &f.StartsAt, &f.EndsAt, &f.Kind)
+		return f, r.Scan(&f.ID, &f.ScheduleID, &f.UserID, &f.Email, &f.StartsAt, &f.EndsAt, &f.Kind, &f.OverrideID)
 	})
 }
 
@@ -553,3 +575,81 @@ func nullable(s string) *string {
 	}
 	return &s
 }
+
+// OnCall is who is on call for a schedule at a moment.
+type OnCall struct {
+	ScheduleID string
+	// Schedule is the name of the schedule.
+	Schedule string
+	// UserID and Email are the person on call. Both are empty when nobody
+	// is: no member of the rotation is a user, and no override is in force.
+	UserID string
+	Email  string
+	// Since and Until are the period for which that holds, as far as is
+	// known now: the shift, or the override.
+	Since time.Time
+	Until time.Time
+	// Override is the override in force, or nil when the rotation decides.
+	Override *Override
+	// Rotation is who the rotation has on call, whom an override covers.
+	Rotation string
+}
+
+// OnCall says who is on call for a schedule now: the person of the override
+// in force, or else the person the rotation has. It reads through q, which
+// may be a transaction.
+//
+// The answer does not wait for the worker: a handoff that is due and has
+// not been carried out yet is taken into account, by running the same
+// arithmetic ahead, and so is an override whose shift has not been recorded
+// yet.
+func (s *Store) OnCall(ctx context.Context, q Querier, scheduleID string) (OnCall, error) {
+	now := s.now()
+	pos, err := scanPosition(q.QueryRow(ctx, `SELECT `+positionColumns+` FROM schedule_positions p WHERE schedule_id = $1 AND `+live, scheduleID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OnCall{}, ErrNotFound
+	}
+	if err != nil {
+		return OnCall{}, fmt.Errorf("read position: %w", err)
+	}
+	name, err := describe(ctx, q, &pos)
+	if err != nil {
+		return OnCall{}, err
+	}
+	members := pos.Definition.Members
+	if pos.Pending != nil {
+		members = slices.Concat(members, pos.Pending.Members)
+	}
+	users, err := usersByEmail(ctx, q, members)
+	if err != nil {
+		return OnCall{}, err
+	}
+	state := pos.state()
+	userID := pos.UserID
+	for range maxProjected {
+		if state.Due().After(now) {
+			break
+		}
+		next, ended, err := state.Next(func(email string) bool { return users[email] != "" })
+		if err != nil {
+			return OnCall{}, err
+		}
+		if ended {
+			userID = users[next.Member]
+		}
+		state = next
+	}
+	out := OnCall{ScheduleID: scheduleID, Schedule: name, UserID: userID, Email: state.Member, Since: state.ShiftStart, Until: state.Due(), Rotation: state.Member}
+
+	o, active, err := activeOverride(ctx, q, scheduleID, now)
+	if err != nil {
+		return OnCall{}, fmt.Errorf("read override: %w", err)
+	}
+	if active {
+		out.UserID, out.Email, out.Since, out.Until, out.Override = o.userID, o.User, o.StartsAt, o.EndsAt, &o
+	}
+	return out, nil
+}
+
+// Querier is what a pool and a transaction have in common.
+type Querier = querier

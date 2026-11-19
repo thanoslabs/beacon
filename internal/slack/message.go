@@ -187,6 +187,18 @@ func render(m notify.Message) message {
 	return message{Text: fallback, Blocks: blocks}
 }
 
+// superseded is what a message is turned into when Beacon has said the same
+// alert again further down: its title, without state or buttons, so that
+// nobody acts on a message that is no longer kept up to date.
+func superseded(current message) message {
+	// The fallback text of a message is built from escaped, clipped parts.
+	title := current.Text
+	return message{
+		Text:   "Sent again below: " + title,
+		Blocks: []block{{Type: "context", Elements: []any{mrkdwn(":arrow_down: Beacon sent this alert again; the newer message below has its current state.\n" + title)}}},
+	}
+}
+
 // groupStatus is the state a group is shown in: firing while any alert
 // fires, then acknowledged, then snoozed, and resolved once all are.
 func groupStatus(alerts []alert.Alert) alert.Status {

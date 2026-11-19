@@ -12,7 +12,7 @@ A notification is one message about one alert group to one destination, through 
 
 | Reason | Queued when |
 |---|---|
-| `escalation_step` | Someone is asked to respond; for now, the first notification of a group |
+| `escalation_step` | A step of the group's escalation policy asks someone to respond |
 | `group_update` | The group changed: an alert joined it or resolved, or someone acknowledged, snoozed or resolved alerts, or a snooze ended |
 | `resolved` | Every alert of the group is resolved |
 
@@ -20,12 +20,11 @@ The message is built when it is delivered, from the state of the group at that m
 
 ## Who is notified
 
-Routing gives every alert group an escalation policy ([[configuration#How an alert is routed]]). The first notification of the group goes to the `{channel, integration}` targets in the **first step** of that policy. Updates go to every destination that was told about the group before, also after a reload has changed the policy.
+Routing gives every alert group an escalation policy ([[configuration#How an alert is routed]]). The first notification of the group is the **first step** of that policy, and the later steps follow while nobody responds; [[escalation]] describes that. Each step queues one notification per destination: a shared channel, or a person, who is reached by a direct message.
 
-> [!warning] Escalation is not implemented yet
-> Beacon does not yet resolve the schedule, team and user targets of a step to people, wait for a step's timeout, run later steps or repeat a policy. Those targets and steps are skipped, and `beacon serve` logs a warning for each policy that has any.
+Updates go to every destination that was told about the group before, by whichever step, also after a reload has changed the policy.
 
-When the first notification of a group has nowhere to go, nothing is queued and the group's timeline gets a `not_notified` event with the reason: the configuration had no `routing` block when the group opened, the policy has since left the configuration, or its first step names no channel that Beacon can deliver to.
+When a group has no policy to run, nothing is queued and the group's timeline gets a `not_notified` event with the reason: the configuration had no `routing` block when the group opened, or the policy has since left the configuration.
 
 ## Groups
 
@@ -50,7 +49,7 @@ Notifications are about a group of alerts, not about each alert; [[configuration
 - **Durable.** A queued notification survives a restart, and exists exactly when the change that caused it was committed.
 - **Several workers.** Each process runs `--notification-workers` workers (default 4), and several replicas can run at once. A worker claims a notification before it sends it, and no other worker takes a claimed notification.
 - **In order per destination.** Notifications about one group to one destination are delivered one at a time, oldest first. An update never overtakes the message it updates. Other groups are not held up.
-- **Updates in place.** When a channel returns a reference to the message it delivered, later notifications about the same group to the same destination are given that reference, so a channel that can edit a message does so and sends nothing new.
+- **Updates in place.** When a channel returns a reference to the message it delivered, later notifications about the same group to the same destination are given that reference, so a channel that can edit a message does so and sends nothing new. An escalation step is the exception: it is there to be noticed, so a channel says the alert again.
 - **At least once.** If a process dies after the service accepted a message but before Beacon recorded it, the message is sent again once the claim runs out, about 45 seconds later. A message is never lost this way, but it can be delivered twice. On a normal shutdown, deliveries in progress finish first.
 
 ## Retries
@@ -73,7 +72,8 @@ Every attempt is recorded with its time, its outcome (`success`, `retryable_erro
 |---|---|
 | `notification_sent` | An attempt delivered the message |
 | `notification_failed` | An attempt failed. The event holds the error and whether another attempt will follow. |
-| `not_notified` | The first notification of a group had nowhere to go. The event holds the reason. |
-| `notification_silenced` | A silence kept a group's notification back. The event holds the silence and when it ends. It is written once per silence the group waits for. |
+| `escalated`, `escalation_exhausted` | A step of the escalation policy ran, or the policy ran out; see [[escalation#On the timeline]] |
+| `not_notified` | The group has no escalation policy to run. The event holds the reason. |
+| `notification_silenced` | A silence kept a group's notification, or an escalation step, back. The event holds the silence and when it ends. It is written once per silence the group waits for. |
 
-Both hold the destination, the reason and the attempt number, and their actor is `system`.
+The first two hold the destination, the reason and the attempt number. The actor of all of them is `system`.
