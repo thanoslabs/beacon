@@ -81,7 +81,7 @@ Every state change is recorded as an event on the alert's timeline, in the same 
 | `snooze_ended` | The snooze runs out and the alert fires again |
 | `resolved` | A person or the source resolves it |
 
-Notifications and escalation add their own events to the same timeline; see [[notifications]] and [[escalation#On the timeline]]. People can act on an alert from its Slack message; see [[slack]].
+Notifications and escalation add their own events to the same timeline; see [[notifications]] and [[escalation#On the timeline]]. People act on an alert from its message in Slack or Discord ([[slack]], [[discord]]) and through the API ([[api#Alerts]]).
 
 Each event has the time it happened and an actor:
 
@@ -89,5 +89,5 @@ Each event has the time it happened and an actor:
 |---|---|
 | `source` | The source that sent the alert or its resolution |
 | `user` | A person. When they acted from a chat service, the event holds the chat service and their identifier in it, and the Beacon user when the account is linked to one ([[access#Chat accounts]]). An account that is not linked may resolve an alert and may not acknowledge or snooze it ([[slack#Who can act]]); its events name the chat account alone, under the name its workspace has for it followed by "(Slack not connected)". |
-| `api_token` | A client using an API token |
+| `api_token` | A client using an API token. The event holds the token's name. |
 | `system` | Beacon itself, for example when a snooze ends |

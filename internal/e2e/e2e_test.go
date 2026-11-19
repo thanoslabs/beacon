@@ -24,6 +24,7 @@ import (
 
 	"github.com/thanoslabs/beacon/internal/auth/oidctest"
 	"github.com/thanoslabs/beacon/internal/discord/discordtest"
+	"github.com/thanoslabs/beacon/internal/email/mailpittest"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
 	"github.com/thanoslabs/beacon/internal/slack/slacktest"
@@ -35,6 +36,7 @@ const (
 	botToken      = "xoxb-e2e-bot-token-marker-5d20"
 	signingSecret = "e2e-signing-secret-marker-9be3"
 	discordToken  = "e2e-discord-bot-token-marker-c7d1"
+	hookSecret    = "e2e-hook-signing-secret-marker-3a9f"
 )
 
 var (
@@ -191,6 +193,8 @@ func launch(t *testing.T, dbURL, dir string) *beacon {
 		"BEACON_SLACK_API_URL=" + b.slack.URL,
 		"BEACON_DISCORD_BOT_TOKEN=" + discordToken,
 		"BEACON_DISCORD_API_URL=" + b.discord.URL,
+		"BEACON_SMTP_PASSWORD=" + mailpittest.Password,
+		"BEACON_HOOK_SIGNING_SECRET=" + hookSecret,
 		"BEACON_OIDC_CLIENT_SECRET=" + oidctest.ClientSecret,
 		"BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH=" + bootstrapHash(t),
 	}
@@ -1456,11 +1460,17 @@ func TestReload(t *testing.T) {
 	// 5. So do the channels: an integration of another service that arrives
 	// with a reload delivers from then on.
 	reloadAddsDiscord(b, twoSteps, 5)
+	reloads := 5
+	if mailpittest.Configured() {
+		reloads++
+		reloadAddsEmail(b, twoSteps, reloads)
+	}
+	reloadAddsWebhook(b, twoSteps, reloads+1)
 
 	if code := b.terminate(); code != 0 {
 		t.Errorf("exit code after SIGTERM = %d, want 0", code)
 	}
-	for _, secret := range []string{sourceToken, botToken, signingSecret, discordToken} {
+	for _, secret := range []string{sourceToken, botToken, signingSecret, discordToken, hookSecret} {
 		if strings.Contains(b.output(), secret) {
 			t.Errorf("the logs contain the credential %q", secret)
 		}

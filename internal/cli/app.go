@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,9 +16,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/thanoslabs/beacon/internal/access"
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/config"
 	"github.com/thanoslabs/beacon/internal/discord"
+	"github.com/thanoslabs/beacon/internal/email"
 	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/notify"
@@ -26,6 +29,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/schedule"
 	"github.com/thanoslabs/beacon/internal/silence"
 	"github.com/thanoslabs/beacon/internal/slack"
+	"github.com/thanoslabs/beacon/internal/webhook"
 )
 
 // provisioner applies a configuration to the running server: it reconciles
@@ -53,13 +57,20 @@ type provisioner struct {
 	// its type, which decides whose interactions a request is checked as.
 	integrationTypes atomic.Pointer[map[string]string]
 	pipeline         *notify.Pipeline
-	auth             *auth.Handler
-	silences         *silence.Handler
-	schedules        *schedule.Store
-	scheduleAPI      *schedule.Handler
-	identities       *identity.Store
-	identityAPI      *identity.Handler
-	linker           *identity.Linker
+	// people is the directory the escalation engine asks. It is told which
+	// integrations reach a person by email address.
+	people   *people
+	auth     *auth.Handler
+	silences *silence.Handler
+	// alertsAPI serves the alerts and their groups.
+	alertsAPI *api.Alerts
+	// provisionedAPI shows what the configuration defines, and the users.
+	provisionedAPI *api.Provisioned
+	schedules      *schedule.Store
+	scheduleAPI    *schedule.Handler
+	identities     *identity.Store
+	identityAPI    *identity.Handler
+	linker         *identity.Linker
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -96,7 +107,13 @@ func (p *provisioner) routes() []access.Route {
 		{Pattern: "POST " + slack.InteractionsPath, Level: access.Public, Handler: http.HandlerFunc(p.handleInteractions)},
 		{Pattern: "POST " + ReloadPath, Level: access.Admin, Handler: http.HandlerFunc(p.handleReload)},
 	}
+	// The description of the API is the same for everyone.
+	routes = append(routes, api.OpenAPIRoutes()...)
 	routes = append(routes, p.auth.Routes()...)
+	// Members see alerts and respond to them.
+	routes = append(routes, p.alertsAPI.Routes()...)
+	// Members read what the configuration defines; nobody changes it here.
+	routes = append(routes, p.provisionedAPI.Routes()...)
 	// Silences are runtime state that members create and end.
 	routes = append(routes, p.silences.Routes()...)
 	// So are the overrides of schedules.
@@ -243,6 +260,7 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 			slog.String("team", s.Team), slog.String("email", s.Email))
 	}
 	p.teams.Store(&cfg.Teams)
+	p.provisionedAPI.SetConfig(cfg)
 	p.countSkipped(cfg.Teams, rows.Skipped)
 
 	p.reportSchedules(ctx, cfg, rotations)
@@ -425,6 +443,14 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	var direct []notify.Via
 	publicKeys := map[string]string{}
 	var applications []discord.Application
+	// The address at which people reach Beacon, for the links in messages
+	// that cannot carry buttons.
+	publicURL := ""
+	if cfg.Auth != nil {
+		publicURL = cfg.Auth.PublicURL
+	}
+	// The integrations that reach a person at their email address.
+	addressed := map[string]bool{}
 	for _, i := range cfg.Integrations {
 		id := integrations[i.Name]
 		switch i.Type {
@@ -446,14 +472,27 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 			direct = append(direct, notify.Via{IntegrationID: id, Name: i.Name, Provider: i.Type})
 			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
 				slog.String("interactions_path", strings.Replace(discord.InteractionsPath, "{name}", i.Name, 1)))
-		default:
-			p.logger.WarnContext(ctx, "this type of integration does not deliver yet, so nothing is sent through it",
-				slog.String("integration", i.Name), slog.String("type", i.Type))
+		case config.IntegrationTypeEmail:
+			channels[id] = email.NewChannel(*i.Email, publicURL)
+			addressed[id] = true
+			direct = append(direct, notify.Via{IntegrationID: id, Name: i.Name, Provider: i.Type})
+			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
+				slog.String("smtp_server", i.Email.Host), slog.String("tls", i.Email.TLS))
+			if publicURL == "" {
+				p.logger.WarnContext(ctx, "emails will carry no link to the alert in Beacon: Beacon does not know its own address; set auth.public_url",
+					slog.String("integration", i.Name))
+			}
+		case config.IntegrationTypeWebhook:
+			channels[id] = webhook.NewChannel(*i.Webhook, publicURL)
+			// The address may hold a token, so only its host is logged.
+			host := ""
+			if u, err := url.Parse(i.Webhook.URL); err == nil {
+				host = u.Host
+			}
+			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type), slog.String("host", host))
 		}
 	}
-	// via returns the integration with a name as a step uses it. One that
-	// does not deliver yet is kept: the step then records that it skipped
-	// it, which is better than leaving it out without a trace.
+	// via returns the integration with a name as a step uses it.
 	types := map[string]string{}
 	for _, i := range cfg.Integrations {
 		types[i.Name] = i.Type
@@ -471,8 +510,14 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 			for _, t := range step.Notify {
 				var target notify.StepTarget
 				switch {
-				case t.Channel != "":
-					target = notify.ChannelTarget(integrations[t.Integration], t.Integration, t.Channel)
+				case t.Integration != "":
+					// An outbound webhook has one address and no channels:
+					// its destination is the integration itself.
+					destination := t.Channel
+					if destination == "" {
+						destination = t.Integration
+					}
+					target = notify.ChannelTarget(integrations[t.Integration], t.Integration, destination)
 				case t.Schedule != "":
 					target = notify.StepTarget{Kind: notify.TargetSchedule, Name: t.Schedule, ID: schedules[t.Schedule], Via: direct}
 				case t.Team != "":
@@ -498,12 +543,15 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 		byID[policies[policy.Name]] = out
 		p.logger.InfoContext(ctx, "escalation policy configured", slog.String("policy", policy.Name), slog.Int("steps", len(out.Steps)), slog.Int("repeat", out.Repeat))
 		if !notifies[policy.Name] {
-			p.logger.WarnContext(ctx, "this escalation policy can notify nobody: none of its targets is reached through an integration that delivers; today that is a Slack or a Discord integration, for channels and for people",
+			p.logger.WarnContext(ctx, "this escalation policy can notify nobody: its targets are people, and no integration in the configuration reaches a person; add a Slack, Discord or email integration",
 				slog.String("policy", policy.Name))
 		}
 	}
 	if cfg.Routing == nil {
 		p.logger.WarnContext(ctx, "alerts are stored but nobody is notified: the configuration has no routing block, so alerts have no escalation policy")
+	}
+	if p.people != nil {
+		p.people.SetAddressed(addressed)
 	}
 	p.pipeline.SetChannels(channels)
 	p.pipeline.SetPolicies(byID)

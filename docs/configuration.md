@@ -65,15 +65,15 @@ An integration is a connection to a notification service.
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | Identity |
-| `type` | yes | `slack`, `discord`, `email` or `webhook`. `slack` and `discord` deliver today; see [[slack]] and [[discord]]. |
+| `type` | yes | `slack`, `discord`, `email` or `webhook`; see [[slack]], [[discord]], [[email]] and [[outbound-webhook]] |
 | `slack`, `discord`, `email` or `webhook` | yes | The settings. Exactly the block that matches `type`. |
 
 | Type | Settings |
 |---|---|
 | `slack` | `bot_token` (secret), `signing_secret` (secret) |
 | `discord` | `bot_token` (secret), `public_key` (64 hexadecimal characters), `application_id` |
-| `email` | `host`, `port`, `from`, `tls` (`starttls`, `implicit` or `none`), and optionally `username` with `password` (secret) |
-| `webhook` | `url`, and optionally `headers`: a map whose values are plain strings or secret references |
+| `email` | `host`, `port`, `from`, `tls` (`starttls`, `implicit` or `none`), and optionally `username` with `password` (secret). `tls: none` with a password is refused unless `host` is `localhost`. |
+| `webhook` | `url`, `signing_secret` (secret, at least 16 characters), and optionally `headers`: a map whose values are plain strings or secret references |
 
 ## Teams
 
@@ -142,9 +142,10 @@ A target has exactly one of these forms:
 | `{schedule: <name>}` | Whoever is on call for the schedule when the step runs, taking overrides into account |
 | `{team: <name>}` | Every member of the team |
 | `{user: <email>}` | One user |
-| `{channel: <channel>, integration: <name>}` | A shared channel, for example a Slack channel |
+| `{channel: <channel>, integration: <name>}` | A shared destination: a Slack channel, a Discord channel by its numeric ID, or an email address |
+| `{integration: <name>}` | An outbound webhook, which has one address and no channels |
 
-A person is reached by a direct message in Slack, through every Slack integration in the configuration, or through the integrations that an optional `via: [<integration>, ...]` on the target names. A person whom no integration can reach is skipped, and the step's event on the timeline says why.
+A person is reached by a direct message in Slack and in Discord and by email, through every such integration in the configuration, or through the integrations that an optional `via: [<integration>, ...]` on the target names. An outbound webhook cannot reach a person. A person whom no integration can reach is skipped, and the step's event on the timeline says why.
 
 The first three accept `via`, a list of integration names that narrows how the person is reached.
 
