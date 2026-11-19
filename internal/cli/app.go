@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/thanoslabs/beacon/internal/access"
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/config"
 	"github.com/thanoslabs/beacon/internal/discord"
@@ -58,9 +59,11 @@ type provisioner struct {
 	pipeline         *notify.Pipeline
 	// people is the directory the escalation engine asks. It is told which
 	// integrations reach a person by email address.
-	people      *people
-	auth        *auth.Handler
-	silences    *silence.Handler
+	people   *people
+	auth     *auth.Handler
+	silences *silence.Handler
+	// alertsAPI serves the alerts and their groups.
+	alertsAPI   *api.Alerts
 	schedules   *schedule.Store
 	scheduleAPI *schedule.Handler
 	identities  *identity.Store
@@ -103,6 +106,8 @@ func (p *provisioner) routes() []access.Route {
 		{Pattern: "POST " + ReloadPath, Level: access.Admin, Handler: http.HandlerFunc(p.handleReload)},
 	}
 	routes = append(routes, p.auth.Routes()...)
+	// Members see alerts and respond to them.
+	routes = append(routes, p.alertsAPI.Routes()...)
 	// Silences are runtime state that members create and end.
 	routes = append(routes, p.silences.Routes()...)
 	// So are the overrides of schedules.

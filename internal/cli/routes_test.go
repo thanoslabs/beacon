@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
@@ -47,6 +48,16 @@ var wantRoutes = []string{
 	"admin  GET /api/v1/tokens",
 	"admin  POST /api/v1/tokens",
 	"admin  DELETE /api/v1/tokens/{id}",
+	"member GET /api/v1/alerts",
+	"member GET /api/v1/alerts/{id}",
+	"member GET /api/v1/alerts/{id}/timeline",
+	"member GET /api/v1/alert-groups/{id}",
+	"member POST /api/v1/alerts/{id}/acknowledge",
+	"member POST /api/v1/alert-groups/{id}/acknowledge",
+	"member POST /api/v1/alerts/{id}/snooze",
+	"member POST /api/v1/alert-groups/{id}/snooze",
+	"member POST /api/v1/alerts/{id}/resolve",
+	"member POST /api/v1/alert-groups/{id}/resolve",
 	"member GET /api/v1/silences",
 	"member POST /api/v1/silences",
 	"member GET /api/v1/silences/{id}",
@@ -69,7 +80,7 @@ func TestRoutes(t *testing.T) {
 	// The routes, registered as beacon serve registers them.
 	logger := slog.New(slog.DiscardHandler)
 	srv := server.New(server.Config{}, logger, nil, server.NewRegistry())
-	for _, route := range (&provisioner{auth: auth.NewHandler(logger, nil), silences: silence.NewHandler(logger, nil), scheduleAPI: schedule.NewHandler(logger, nil),
+	for _, route := range (&provisioner{auth: auth.NewHandler(logger, nil), alertsAPI: api.NewAlerts(logger, nil), silences: silence.NewHandler(logger, nil), scheduleAPI: schedule.NewHandler(logger, nil),
 		identityAPI: identity.NewHandler(logger, nil, nil)}).routes() {
 		srv.Handle(route)
 	}
@@ -114,10 +125,10 @@ func TestRoutes(t *testing.T) {
 			closed++
 		}
 	}
-	if closed != 20 {
-		t.Errorf("%d routes refused a stranger, want 20", closed)
+	if closed != 30 {
+		t.Errorf("%d routes refused a stranger, want 30", closed)
 	}
-	for _, probe := range []string{"GET /", "GET /api/v1/alerts", "GET /api/v1/teams", "GET /api/v1/teams/x", "POST /api/v1/schedules", "DELETE /api/v1/schedules/x", "GET /api/v1/schedules/x/overrides/y", "PUT /api/v1/schedules/x/overrides", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
+	for _, probe := range []string{"GET /", "PUT /api/v1/alerts", "DELETE /api/v1/alerts/x", "GET /api/v1/alert-groups", "POST /api/v1/alerts/x/delete", "GET /api/v1/teams", "GET /api/v1/teams/x", "POST /api/v1/schedules", "DELETE /api/v1/schedules/x", "GET /api/v1/schedules/x/overrides/y", "PUT /api/v1/schedules/x/overrides", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
 		method, path, _ := strings.Cut(probe, " ")
 		if code, body := request(method, path); code != http.StatusUnauthorized {
 			t.Errorf("%s without a session = %d %s, want 401", probe, code, body)

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/thanoslabs/beacon/internal/alert"
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/discord"
 	"github.com/thanoslabs/beacon/internal/identity"
@@ -169,6 +170,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 		people:              directory,
 		auth:                signIn,
 		silences:            silence.NewHandler(logger, silences),
+		alertsAPI:           api.NewAlerts(logger, alerts),
 		schedules:           schedules,
 		scheduleAPI:         schedule.NewHandler(logger, schedules),
 		identities:          identities,

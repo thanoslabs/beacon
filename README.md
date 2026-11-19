@@ -96,7 +96,7 @@ export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmo
 ./bin/beacon hash-password      # hash a password for the bootstrap admin
 ```
 
-The server answers on these endpoints. Everything that is not listed as open in the [access page](docs/access.md) needs a session, and an address that does not exist answers `401` like one that does:
+The server answers on these endpoints; the [API page](docs/api.md) describes how they behave as a whole. Everything that is not listed as open in the [access page](docs/access.md) needs a session, and an address that does not exist answers `401` like one that does:
 
 | Endpoint | Purpose |
 |---|---|
@@ -105,6 +105,7 @@ The server answers on these endpoints. Everything that is not listed as open in 
 | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` | Sign-in through an OpenID Connect identity provider. See the [access page](docs/access.md). |
 | `GET /api/v1/me` | Who is signed in. Needs a session. |
 | `GET /api/v1/me/identities`, `POST /api/v1/me/identities/<integration>/link-code`, `DELETE /api/v1/me/identities/<integration>` | The chat accounts linked to whoever is signed in, a one-time code with which they link their Discord account, and its removal. See the [access page](docs/access.md#chat-accounts). |
+| `GET /api/v1/alerts`, `GET /api/v1/alerts/<id>`, `GET /api/v1/alerts/<id>/timeline`, `POST /api/v1/alerts/<id>/acknowledge`, `.../snooze`, `.../resolve`, and the same under `/api/v1/alert-groups/<id>` | Alerts: list with filters, read, and act on one alert or on a whole group. Needs a session or a token, with either role. See the [API page](docs/api.md#alerts). |
 | `POST /api/v1/config/reload` | Reloads the configuration. Needs the admin role. |
 | `GET`, `POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | API tokens for automation. Needs the admin role. |
 | `GET`, `POST /api/v1/silences`, `GET`, `DELETE /api/v1/silences/<id>` | Silences. Needs a session or a token, with either role. See the [silences page](docs/silences.md). |
