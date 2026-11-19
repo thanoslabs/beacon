@@ -27,8 +27,9 @@ var (
 // actionsFixture is the pipeline fixture plus the interactions endpoint.
 type actionsFixture struct {
 	*pipelineFixture
-	url  string
-	logs *bytes.Buffer
+	url          string
+	logs         *bytes.Buffer
+	interactions *slack.Interactions
 }
 
 func newActionsFixture(t *testing.T) *actionsFixture {
@@ -36,7 +37,8 @@ func newActionsFixture(t *testing.T) *actionsFixture {
 	f := &actionsFixture{pipelineFixture: newPipelineFixture(t), logs: &bytes.Buffer{}}
 	mux := http.NewServeMux()
 	secrets := map[string]config.Secret{"slack": config.NewSecret(config.SecretRef{}, signingSecret)}
-	slack.NewInteractions(slog.New(slog.NewJSONHandler(f.logs, nil)), f.alerts, secrets).Register(mux)
+	f.interactions = slack.NewInteractions(slog.New(slog.NewJSONHandler(f.logs, nil)), f.alerts, secrets)
+	f.interactions.Register(mux)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	f.url = srv.URL + "/api/v1/integrations/slack/interactions"

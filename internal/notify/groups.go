@@ -151,7 +151,7 @@ func (p *Pipeline) notifyGroup(ctx context.Context, tx pgx.Tx, g alert.Group, al
 
 	switch {
 	case g.NotifiedAt == nil && loud:
-		err = p.startEscalation(ctx, tx, g)
+		err = p.startEscalation(ctx, tx, g, alerts)
 	case g.NotifiedAt != nil && news:
 		reason := ReasonGroupUpdate
 		if g.Status == alert.GroupResolved {
@@ -192,62 +192,10 @@ func (p *Pipeline) unsilenced(ctx context.Context, g alert.Group, alerts []alert
 	return shown, nil
 }
 
-// Policy is what the pipeline needs to know of an escalation policy.
-type Policy struct {
-	// Name is the policy's name in the configuration.
-	Name string
-	// FirstStep lists the shared destinations that the first step of the
-	// policy notifies: its {channel, integration} targets whose integration
-	// has a channel that delivers.
-	FirstStep []Target
-}
-
 // EventNotNotified is written on the timeline of a group whose first
-// notification went to nobody, with the reason.
+// notification went to nobody because it has no escalation policy to run,
+// with the reason.
 const EventNotNotified alert.EventType = "not_notified"
-
-// startEscalation begins telling people about a group. It runs once per
-// group, when the group's wait is over, inside the transaction that marks the
-// group as notified.
-//
-// SEAM FOR THE ESCALATION ENGINE (milestone 5, issue 34). This function is
-// the one place where a group starts to be escalated, and today it is the
-// whole of escalation: it queues one notification for each channel target in
-// the first step of the group's policy, and that is all. Later steps, step
-// timeouts and repeats do not run, and the schedule, team and user targets
-// of the first step are not resolved to people, so they are notified of
-// nothing.
-//
-// The engine is expected to replace the body: insert the group's row in
-// `escalations` here (policy, step 0, the step's timeout as next_step_at),
-// queue the first step with Enqueue as below, including the people it
-// resolves, and let its own worker run the later steps from that row. The
-// rest of this file need not change: updates already go to everyone who was
-// told, whoever told them.
-func (p *Pipeline) startEscalation(ctx context.Context, tx pgx.Tx, g alert.Group) error {
-	policy, known := (*p.policies.Load())[g.EscalationPolicyID]
-	var why string
-	switch {
-	case g.EscalationPolicyID == "":
-		why = "the group has no escalation policy: the configuration had no routing block when it opened"
-	case !known:
-		why = "the escalation policy of the group is no longer in the configuration"
-	case len(policy.FirstStep) == 0:
-		why = fmt.Sprintf("the first step of escalation policy %q names no channel that Beacon can deliver to", policy.Name)
-	}
-	if why != "" {
-		p.logger.WarnContext(ctx, "an alert group notifies nobody", slog.String("group_id", g.ID), slog.String("reason", why))
-		return alert.AppendEvent(ctx, tx, &alert.Event{GroupID: g.ID, Type: EventNotNotified, Actor: alert.System(), OccurredAt: p.now(),
-			Data: map[string]any{"reason": why}})
-	}
-	for _, t := range policy.FirstStep {
-		err := p.Enqueue(ctx, tx, Notification{GroupID: g.ID, IntegrationID: t.IntegrationID, Destination: t.Destination, Reason: ReasonEscalationStep})
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 // immediate maps the state changes that are told at once, when a person or
 // Beacon itself made them, to whether they can end a group.
@@ -258,8 +206,9 @@ var immediate = map[alert.EventType]bool{
 	alert.EventResolved:     true,
 }
 
-// Observe is an alert observer that queues an update when a person, or
-// Beacon itself, changes the state of an alert. Register it with
+// Observe is an alert observer. It stops and restarts the escalation of a
+// group as the state of its alerts changes, and it queues an update when a
+// person, or Beacon itself, changes the state of an alert. Register it with
 // alert.Store.Observe.
 //
 // It queues nothing for what a source reports: that is batched by the
@@ -267,6 +216,10 @@ var immediate = map[alert.EventType]bool{
 // yet either: there is no message to update, and the first one will show the
 // state as it is by then.
 func (p *Pipeline) Observe(ctx context.Context, tx pgx.Tx, ev alert.Event, _ alert.Alert) error {
+	// Escalation follows every change of state, whoever made it.
+	if err := p.observeEscalation(ctx, tx, ev); err != nil {
+		return err
+	}
 	if !immediate[ev.Type] || ev.Actor.Type == alert.ActorSource {
 		return nil
 	}
