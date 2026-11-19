@@ -17,6 +17,7 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[grafana]]: send the alerts of Grafana alerting to Beacon
 - [[webhook]]: send alerts to Beacon as JSON over HTTP
 - [[schedules]]: on-call rotations, handoffs, time zones and recorded shifts
+- [[escalation]]: how a policy pages people step by step until someone responds
 - [[silences]]: keep Beacon quiet about matching alerts for a period, through the API
 - [[notifications]]: how notifications are queued, retried and recorded
 - [[slack]]: set up the Slack app and send alerts to a channel

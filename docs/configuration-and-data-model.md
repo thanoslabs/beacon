@@ -119,7 +119,7 @@ Each target is a map with exactly one of these forms:
 | `{user: <email>}` | One user |
 | `{channel: <channel>, integration: <name>}` | A shared channel, for example a Slack channel |
 
-People targets (`schedule`, `team`, `user`) accept an optional `via` list of integration names. Without it, the person is notified through every integration that can reach them directly: a Slack or Discord direct message when their account is linked, and email.
+People targets (`schedule`, `team`, `user`) accept an optional `via` list of integration names. Without it, the person is notified through every integration that can reach them directly: a Slack or Discord direct message when their account is linked, and email. Of these, Slack direct messages exist today.
 
 ### Routing
 
@@ -421,7 +421,12 @@ A unique index on (`source_id`, `fingerprint`) for rows whose status is not `res
 > [!note] Built up over several migrations
 > The first migration for these tables leaves out the columns that reference tables which do not exist yet: `routing_rule_id`, `team_id` and `escalation_policy_id`. The migrations that create those tables add them.
 
-**`escalations`**: one row per open alert group. `alert_group_id`, `escalation_policy_id`, `step_index`, `pass` (which repeat), `next_step_at`, `status` (`active`, `acknowledged`, `exhausted` or `resolved`). Workers claim due rows with `SELECT ... FOR UPDATE SKIP LOCKED`, so a timer fires once when several replicas run.
+**`escalations`**: one row per alert group that has been escalated, keyed by `alert_group_id`. `escalation_policy_id`, `step_index`, `pass` (which repeat), `next_step_at`, `status` (`active`, `acknowledged`, `exhausted` or `resolved`), `silence_id`, `created_at`, `updated_at`. Workers claim due rows with `SELECT ... FOR UPDATE SKIP LOCKED` and move `next_step_at` in the same transaction, so a timer fires once when several replicas run and survives a restart.
+
+- `step_index` is the step that ran last in the pass in progress, counted from 0. It is -1 for an escalation that starts again, until its first step has run.
+- `next_step_at` is the timer, and is null exactly when the status is not `active`. A row is `acknowledged` when no alert of the group is firing, which acknowledging, snoozing and resolving bring about; it becomes `active` again when one fires.
+- `silence_id` names the silence whose end the next step waits for when every firing alert of the group is silenced, as `alert_groups.silence_id` does for the group's notification. The first version of this design did not have it.
+- The policy itself is not copied into the row: the steps are read from the configuration when each step runs, so a reload applies to escalations in progress. [[escalation]] describes the rules.
 
 **`alert_events`** (append only)
 
@@ -450,7 +455,7 @@ The author is exactly one of `created_by`, which references `users`, and `create
 | `id` | `uuid` | |
 | `alert_group_id` | `uuid` | |
 | `integration_id` | `uuid` | |
-| `user_id` | `uuid` | Null for channel targets |
+| `user_id` | `uuid` | The person the message is for. Null for channel targets. |
 | `destination` | `text` | Channel, address or URL, resolved when queued |
 | `reason` | `text` | `escalation_step`, `group_update`, `resolved` |
 | `status` | `text` | `pending`, `sent` or `failed` |
@@ -523,15 +528,15 @@ These are judgement calls made in this proposal. Each can be changed before the 
 | 10 | Provisioned objects are copied into one table per kind with a `jsonb` definition, and removed objects keep their row | One generic table for all kinds; or fully normalised tables per kind |
 | 11 | Routing rules are a flat ordered list where the first match wins | A nested routing tree as in Alertmanager |
 | 12 | Keys are random `uuid` values, with `bigint` identity for append-only logs; no extensions | Time-ordered UUIDs, which need a newer minimum Postgres version or generation in the application |
-| 13 | Escalation steps name their targets, and people are reached through every integration that can reach them unless `via` narrows it | Per-user notification rules, which are a later requirement |
+| 13 | Escalation steps name their targets, and people are reached through every integration that can reach them unless `via` narrows it. With Slack as the only channel so far, that is a direct message to the Slack account linked by email address. | Per-user notification rules, which are a later requirement |
 | 14 | Severity levels are fixed: `critical`, `warning`, `info` | Configurable levels |
 
 ## Open questions
 
 1. **Roles from the identity provider.** *Resolved (issues 19 and 20), for the project owner to confirm:* the identity provider's settings, the role mapping (`auth.roles.admin`, `auth.roles.member`) and the name of the claim (`auth.oidc.groups_claim`) live in the `auth` block in YAML. The alternative was process settings beside the client identifier; the files won because the mapping names groups just as `teams[].groups` does, and belongs in the same review. A person in no mapped group has no access; with no mapping at all, everyone is a member and nobody an admin.
 2. **A user's email address changes.** *Resolved for now (issue 19), for the project owner to confirm:* a user is identified by the provider's issuer and subject, so the account and its history survive a change of address, and the stored address is updated at the next sign-in. The files must then be changed to the new address; until they are, the old address in a team or rotation is an unknown user and is skipped. The alternative is to let the files name a stable identifier, which nobody could write by hand.
-3. **Unknown users in a rotation.** The requirements say an unknown user in a team is skipped and logged. This proposal applies the same rule to rotation members. The alternative is to treat it as an error that blocks applying the schedule, since a skipped member changes who is on call.
-4. **Must rotation members belong to the owning team?** The proposal does not require it, so someone from another team can cover. Requiring it would catch mistakes.
+3. **Unknown users in a rotation.** *Resolved for now (issue 29), for the project owner to confirm:* an unknown user in a rotation is passed over, logged as an error and counted in `beacon_schedule_members_skipped`, as in a team, and takes their place at the first handoff after they have signed in. When no member is a user, nobody is on call, which is logged as an error at every handoff. The alternative is to treat it as an error that blocks applying the schedule, since a skipped member changes who is on call; it would make a schedule unusable until its last member has signed in.
+4. **Must rotation members belong to the owning team?** *Resolved for now (issues 29 and 31), for the project owner to confirm:* no. Someone from another team can be in a rotation, and an override can put any user on call. Requiring it would catch mistakes.
 5. **Service as an object.** *Resolved for now (issue 27), for the project owner to confirm:* a service stays a plain name on the alert. Routing sets it from the rule's `service`, or from the alert's `service` label, and nothing else is attached to it. The alternative, a provisioned `services` kind with an owning team, would let routing find the team from the service and would bound the values a metric label can take; it can be added later without changing what is stored on an alert, since the name would become the reference.
 6. **Shared channels for a team.** A shared channel is named in each escalation step. Should a team have a default channel, so that policies need not repeat it?
 7. **Minimum Postgres version.** No feature here needs a recent version. Stating a minimum (for example the oldest release still supported upstream) would let later work rely on it.

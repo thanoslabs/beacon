@@ -67,6 +67,9 @@ type Pipeline struct {
 	// silences is where the pipeline learns which alerts are silenced. It
 	// holds nil until SetSilences is called, and then nothing is.
 	silences atomic.Pointer[Silences]
+	// people resolves the people targets of escalation steps. It holds nil
+	// until SetPeople is called.
+	people atomic.Pointer[People]
 }
 
 // New returns a pipeline. Register its channels before calling Run.
@@ -138,12 +141,12 @@ func (p *Pipeline) SetSilences(s Silences) {
 
 // Enqueue queues n for delivery through tx, so the notification exists if and
 // only if the change that caused it commits. Only GroupID, IntegrationID,
-// Destination and Reason are read.
+// Destination, Reason and UserID are read.
 func (p *Pipeline) Enqueue(ctx context.Context, tx pgx.Tx, n Notification) error {
 	now := p.now()
 	_, err := tx.Exec(ctx, `
-		INSERT INTO notifications (alert_group_id, integration_id, destination, reason, next_attempt_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $5)`, n.GroupID, n.IntegrationID, n.Destination, n.Reason, now)
+		INSERT INTO notifications (alert_group_id, integration_id, destination, reason, next_attempt_at, created_at, user_id)
+		VALUES ($1, $2, $3, $4, $5, $5, $6)`, n.GroupID, n.IntegrationID, n.Destination, n.Reason, now, nullable(n.UserID))
 	if err != nil {
 		return fmt.Errorf("queue notification: %w", err)
 	}
@@ -346,6 +349,13 @@ func (p *Pipeline) backoff(attempts int) time.Duration {
 	}
 	d = min(d, p.cfg.BackoffMax)
 	return d - time.Duration(rand.Int64N(int64(d)/5+1))
+}
+
+func nullable(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // truncate shortens s to at most n bytes of text that Postgres accepts.
