@@ -22,8 +22,7 @@ schedules:
         time: "09:00"
 ```
 
-> [!warning] What works today
-> Beacon runs the rotation, records the shifts, applies changes to a definition safely, takes overrides and answers who is on call. Escalation policies do not page the person on call yet.
+A step of an escalation policy that names a schedule pages whoever is on call for it at that moment; see [[escalation]].
 
 ## The file is the intent, the database is the position
 
@@ -200,7 +199,7 @@ A list answers `{"overrides": [...]}`, by start, at most 1000.
 
 The person on call for a schedule is the person of the override in force, and otherwise the person the rotation has. For a team it is the person on call for each schedule that the team owns.
 
-The answer is worked out when it is asked for: a handoff that fell due a second ago, or an override that has just begun, counts even if the worker has not recorded it yet. Escalation asks the same question in the same way.
+The answer is worked out when it is asked for: a handoff that fell due a second ago, or an override that has just begun, counts even if the worker has not recorded it yet. A step of an escalation policy asks the same question in the same way, when it runs.
 
 ```
 GET /api/v1/schedules                  every schedule, with who is on call

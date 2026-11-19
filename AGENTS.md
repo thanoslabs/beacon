@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules run their rotations and record every shift. Paging the person on call, escalation beyond a policy's first step and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules run their rotations with overrides, and escalation policies page the person on call, teams and channels step by step until someone responds. People are reached through Slack only; Discord, email, outbound webhooks and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -55,6 +55,7 @@ Tooling:
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
 │   ├── config/               # Typed provisioned objects, the YAML loader and the Secret type
 │   ├── e2e/                  # End-to-end tests: the real binary, Postgres and a fake Slack
+│   ├── identity/             # Which Slack or Discord account belongs to which user: lookup by email, link codes
 │   ├── ingest/               # Receivers for Alertmanager, Grafana and the generic webhook: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
 │   ├── notify/               # Notification queue, workers, retries and the Channel interface
@@ -188,6 +189,15 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - The identity provider is discovered lazily, so Beacon starts and handles alerts while it is down. Do not make the start depend on it.
 - Tests that need a real provider use `oidctest` against the Dex in `compose.yaml` (`dev/dex/config.yaml` holds its users). Without `BEACON_TEST_OIDC_ISSUER` they are skipped locally and fail in CI. Use the hand-written provider in `internal/auth/fake_test.go` only for what a real one will not do, such as a token that is wrong in one way. Beacon has no account at any hosted provider; say in the PR that those are unverified.
 
+### Chat identities
+
+- `internal/identity` owns `user_identities`, `identity_lookups` and `identity_link_codes`. `docs/access.md` (Chat accounts) and `docs/slack.md` (People) describe it; keep them true.
+- An identity belongs to a user and an integration. An account is never moved from one user to another: `Store.Link` returns `ErrTaken`, and callers log it and leave things as they are.
+- `Linker` finds Slack accounts by email address. Whom it has asked about is in `identity_lookups`, claimed in the statement that selects them, so replicas do not repeat each other and Slack's rate limit is respected; do not replace it with a cache in the process. A failed lookup ends the pass for that integration.
+- A new chat service is an `identity.Integration` that the provisioner builds: with a `Lookup` when the service can be asked by email address, without one when people link their accounts themselves (`StartLink`, `CompleteLink`).
+- Link codes are random, short-lived and stored as SHA-256 hashes, like session tokens. `CompleteLink` trusts its caller to have verified that the request comes from the chat service and from that account; a route that calls it must check the service's signature first.
+- Whoever acts from chat is turned into an actor in one place, `slack.Interactions.actor`: the linked user when there is one, the chat account alone otherwise. A failed lookup must never lose the action.
+
 ### Ingestion
 
 - `internal/ingest` serves `POST /api/v1/ingest/<source>`. The type of the source decides which payload is read: `docs/webhook.md` is the contract for the generic JSON payload, `docs/alertmanager.md` for Alertmanager's and `docs/grafana.md` for Grafana's. Every payload error must name the field at fault.
@@ -219,16 +229,28 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - A new notification service is a type that implements `notify.Channel`, registered with `Pipeline.Register`. The pipeline must not learn anything specific to a service. A channel returns `notify.Permanent` for failures that retrying cannot fix and `notify.RetryAfter` when the service says how long to wait; anything else is retried with backoff. Channel errors are stored and shown on the timeline, so they must never contain a credential.
 - Delivery is at least once. A channel should make a repeated `Send` harmless where the service allows it.
 - Notifications are about groups, and `internal/notify/groups.go` decides when one is queued: what sources report is batched by the group's timer (`Pipeline.NotifyDueGroups`, run every second by `RunGroups`), and what people do is told at once by the observer `Pipeline.Observe`. Updates go to every destination that was told about the group before, and a destination with a notification still waiting gets no second one, because a message is built when it is delivered.
-- `Pipeline.startEscalation` is the seam for the escalation engine (issue 34) and says so in its comment. It runs once per group, when the group's wait is over, and today it is all of escalation: one notification to each channel target in the first step of the group's policy. People targets, later steps, timeouts and repeats do nothing, and the provisioner logs a warning for each policy that has any. The engine should replace its body, not add a second path to `Enqueue`.
+- A notification for one person carries their `UserID`, and its destination is where the integration reaches them, resolved when it is queued.
 - Tests of timing move the clock (`SetClock` on the store and the pipeline) and call `NotifyDueGroups` themselves. Do not sleep and do not wait for the ticker.
+
+### Escalation
+
+- The engine is `internal/notify/escalation.go`, and `docs/escalation.md` describes its rules; keep it true. It owns the `escalations` table: one row per group, whose `next_step_at` is the timer.
+- `Pipeline.startEscalation` runs the first step, in the transaction that marks the group as notified. `Pipeline.EscalateDue` runs later steps: it claims a due row under `FOR UPDATE SKIP LOCKED`, reads the row from its own table alone, and moves the timer in the same transaction. `Pipeline.Observe` stops an escalation when no alert of its group is firing and restarts it when one fires again, in the transaction of the change. Do not add another place that writes `escalations`.
+- A step asks `Pipeline.quiet` before it notifies, as a group's notification does: while every firing alert is silenced it waits for the silence, and `WakeEscalationsWaitingFor` wakes it when the silence is expired.
+- The pipeline learns about people through `notify.People` and nothing else: who is on call (`schedule.Store.OnCall`), who is in a team, and where an integration reaches a person (`identity.Store.Address`). The adapter is `internal/cli/people.go`. People are resolved when the step runs, inside its transaction.
+- A target that cannot be notified is skipped, logged (`escalation target not notified`) and listed in the `skipped` of the step's `escalated` event with a reason. It never fails the step. Every step that runs writes one `escalated` event.
+- The steps are read from the policies of the active configuration each time (`SetPolicies`), never copied into the row, so a reload applies to escalations in progress. The provisioner resolves the names of schedules, teams and integrations to rows when it builds a `notify.Policy`.
+- Tests move the clock (`SetClock`) and call `EscalateDue` themselves, like the tests of group timers. `TestEscalationTimersSurviveARestartAndFireOnce` is the guard for the claim.
 
 ### Slack
 
-- `internal/slack` is the Slack channel. It calls two Web API methods, `chat.postMessage` and `chat.update`, with the standard library; there is no Slack SDK.
+- `internal/slack` is the Slack channel. It calls three Web API methods, `chat.postMessage`, `chat.update` and `users.lookupByEmail`, with the standard library; there is no Slack SDK. `users.lookupByEmail` takes its argument in the query, not as JSON, and the fake refuses to read it from a JSON body.
 - Beacon has no Slack credentials for testing. Test against `slacktest`, the fake Slack, which checks requests against the documented shapes and limits. When you change what is sent, read Slack's current documentation rather than trusting memory, teach the fake the same rule, and say in the PR that real delivery is unverified.
+- A notification with the reason `escalation_step` to a destination that already has the group's message posts a new message and turns the old one into a pointer (`superseded`): an edit notifies nobody. Every other notification edits in place.
+- A person is paged by `chat.postMessage` with their user ID as the channel, which opens the app's direct conversation with them and needs the app's Messages tab.
 - A message is about an alert group. `render` shows a group of one alert as that alert, and a larger group as what its alerts share and a bounded list of them; the state shown and the buttons offered are derived from all the alerts.
 - Everything that comes from an alert passes through `escape` before it goes into message text, and each part is clipped so a message stays within Block Kit's limits.
-- Button presses arrive at `POST /api/v1/integrations/<name>/interactions`. The handler verifies the Slack signature over the raw body before it parses anything; keep it that way. It answers within Slack's three seconds, and changes alerts only through `alert.Store.ApplyToGroup` with `alert.ChatUser`, so the timeline records the Slack user in the form that identity linking will use.
+- Button presses arrive at `POST /api/v1/integrations/<name>/interactions`. The handler verifies the Slack signature over the raw body before it parses anything; keep it that way. It answers within Slack's three seconds, and changes alerts only through `alert.Store.ApplyToGroup`, as the Beacon user the Slack account is linked to (`alert.LinkedChatUser`) or, when it is linked to nobody, as the Slack account alone (`alert.ChatUser`).
 - The buttons a message offers are derived from the state machine (`alert.Next`), so they cannot drift from what is allowed.
 - `docs/slack.md` is the setup guide. Update it when scopes or settings change.
 
@@ -236,7 +258,7 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 - `internal/e2e` builds the binary, runs it as a process against a real Postgres and the fake Slack, and uses it only from outside: the webhook as a source would, the interactions endpoint as Slack would. It reads the database to check what was stored and never writes to it. The tests run with `go test ./...`, so CI runs them against the Postgres from `compose.yaml`.
 - The test configuration sets `group_wait: 0s` and `group_interval: 1s`, so a notification follows a delivery within about two seconds. The tests wait for the message they expect, never for a time, and must not count notifications: how many updates a group gets depends on what the timer batched.
-- `TestFirstPath` is the path the product exists for: webhook in, Slack message out, acknowledgement from Slack, resolve from the source. A change that breaks it is not ready. Extend these tests when a feature changes that path, for example when routing decides where the message goes.
+- `TestFirstPath` is the path the product exists for: webhook in, Slack message out, acknowledgement from Slack, resolve from the source. `TestFirstPathWithEscalation` is the same path with people in it: the person on call is paged, the second step tells the team and a channel, and an acknowledgement stops the escalation. A change that breaks either is not ready. Extend these tests when a feature changes that path, for example when routing decides where the message goes.
 - Prefer a package test for a single behaviour; add an end-to-end test for a path that crosses packages.
 
 To add a subcommand, add a file under `internal/cli/` and register it in `commands()` in `internal/cli/cli.go`. Commands take their environment, output streams and arguments as parameters, so tests can run them in-process.

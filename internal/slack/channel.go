@@ -10,9 +10,11 @@ import (
 
 // Channel delivers notifications to Slack. It implements notify.Channel.
 //
-// The first notification about an alert group posts a message. Later ones
-// edit that message in place, so a channel shows one message per alert with
-// its current state.
+// The first notification about an alert group posts a message. Updates
+// edit that message in place, so a destination shows one message per group
+// with its current state. An escalation step that reaches a destination
+// again posts a new message, because an edit notifies nobody; the message it
+// replaces is turned into a pointer to it.
 type Channel struct {
 	client *Client
 }
@@ -27,7 +29,21 @@ func NewChannel(client *Client) *Channel {
 // Slack needs to update the message later.
 func (c *Channel) Send(ctx context.Context, m notify.Message) (string, error) {
 	msg := render(m)
-	if channelID, ts, ok := strings.Cut(m.PreviousRef, ":"); ok {
+	channelID, ts, hasPrevious := strings.Cut(m.PreviousRef, ":")
+	if hasPrevious && m.Notification.Reason == notify.ReasonEscalationStep {
+		// Asking again must be heard. Editing the message that is there
+		// would change it silently, so the alert is said again.
+		newChannel, newTS, err := c.client.postMessage(ctx, strings.TrimPrefix(m.Notification.Destination, "#"), msg)
+		if err != nil {
+			return "", err
+		}
+		// The old message would go stale: updates follow the new one. It
+		// becomes a pointer. If that fails the page was still delivered,
+		// and the old message merely keeps its last state.
+		_ = c.client.updateMessage(ctx, channelID, ts, superseded(msg))
+		return newChannel + ":" + newTS, nil
+	}
+	if hasPrevious {
 		err := c.client.updateMessage(ctx, channelID, ts, msg)
 		if err == nil {
 			return m.PreviousRef, nil
