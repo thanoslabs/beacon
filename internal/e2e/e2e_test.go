@@ -840,10 +840,15 @@ func TestGrouping(t *testing.T) {
 		t.Errorf("the resolved message still has buttons:\n%s", msg.JSON())
 	}
 
-	// 6. Two groups, two messages, however many alerts and changes.
-	if n := len(b.slack.Calls("chat.postMessage")); n != 2 {
-		t.Errorf("%d messages were posted, want 2", n)
+	// 6. Two groups, and three messages however many alerts and changes:
+	// one for each group, and one more when the alert that joined the
+	// acknowledged group made its escalation start again. Asking again is
+	// said in a new message, because an edit notifies nobody; the message
+	// it replaced points to it.
+	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
+		t.Errorf("%d messages were posted, want 3", n)
 	}
+	b.find("the pointer that the first message became", contains("Beacon sent this alert again"))
 	var open, resolved int
 	if err := b.db.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE status = 'open'), count(*) FILTER (WHERE status = 'resolved') FROM alert_groups`).Scan(&open, &resolved); err != nil || open != 1 || resolved != 1 {
 		t.Errorf("%d open and %d resolved groups, %v; want 1 and 1", open, resolved, err)
@@ -852,8 +857,8 @@ func TestGrouping(t *testing.T) {
 	// 7. The same problem again is a new group with a new message.
 	fire("DiskFull", "db1")
 	b.find("the new group in Slack", diskFull("*Firing*", "*DiskFull on db1*"))
-	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
-		t.Errorf("%d messages were posted, want 3", n)
+	if n := len(b.slack.Calls("chat.postMessage")); n != 4 {
+		t.Errorf("%d messages were posted, want 4", n)
 	}
 }
 
@@ -1842,6 +1847,42 @@ func TestSlackIdentity(t *testing.T) {
 	}
 }
 
+// escalationConfiguration is sign-in, a daily rotation of Ada and Grace,
+// and a policy whose first step pages whoever is on call and whose second,
+// three seconds later, tells the whole team and a channel. The second step
+// has a long timeout, so that nothing the test does not cause can follow it.
+func escalationConfiguration(t *testing.T) string {
+	t.Helper()
+	cfg := strings.Replace(signInConfiguration(t), `    steps:
+      - notify:
+          - channel: C0ALERTS
+            integration: slack
+        timeout: 5m
+`, `    steps:
+      - notify:
+          - schedule: primary
+        timeout: 3s
+      - notify:
+          - team: platform
+          - channel: C0ALERTS
+            integration: slack
+        timeout: 10m
+`, 1)
+	if cfg == signInConfiguration(t) {
+		t.Fatal("the configuration has no policy to change")
+	}
+	return cfg + `schedules:
+  - name: primary
+    team: platform
+    time_zone: UTC
+    rotation:
+      members: [ada@example.com, grace@example.com]
+      shift_length: 1d
+      handoff:
+        time: "09:00"
+`
+}
+
 // escalationSteps reads the escalation events of the one group as
 // "pass.step: who was notified", and the state of its escalation.
 func (b *beacon) escalationSteps() (steps []string, status string) {
@@ -1862,6 +1903,118 @@ func (b *beacon) escalationSteps() (steps []string, status string) {
 		b.t.Fatalf("read escalation: %v", err)
 	}
 	return steps, status
+}
+
+// TestFirstPathWithEscalation is the first path with people in it: an alert
+// comes in, the person on call is paged in a direct message, nobody
+// responds, the policy's second step tells the team and a channel, a team
+// member acknowledges from Slack, which stops the escalation, and the
+// source resolves the alert.
+func TestFirstPathWithEscalation(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, escalationConfiguration(t)))
+	b.waitUntilServing()
+	b.slack.AddUser(oidctest.Ada, "U0ADA")
+	b.slack.AddUser(oidctest.Grace, "U0GRACE")
+
+	// Ada and Grace sign in. Beacon finds their Slack accounts, and Ada,
+	// first in the rotation, is on call.
+	for _, who := range []string{oidctest.Ada, oidctest.Grace} {
+		if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), who, oidctest.Password); code != http.StatusOK {
+			t.Fatalf("sign-in of %s = %d %s", who, code, body)
+		}
+		if who == oidctest.Ada {
+			// Ada is a user before Grace is, so the rotation starts with her.
+			b.waitFor("Ada to be on call", func() bool { who, _ := b.onCall("primary"); return who == oidctest.Ada })
+		}
+	}
+	b.waitFor("both Slack accounts to be linked", func() bool {
+		var n int
+		err := b.db.QueryRow(context.Background(), `SELECT count(*) FROM user_identities`).Scan(&n)
+		return err == nil && n == 2
+	})
+
+	// 1. The alert. The first step pages the person on call, and only her.
+	code, res := b.webhook(diskFull)
+	if code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	alertID := res["alert_id"]
+	page := b.find("the page to the person on call", inChannel(slacktest.DM("U0ADA"), "*Firing*", "Disk is full on db1", "beacon_acknowledge"))
+	if page.Text != "[FIRING] critical: Disk is full on db1" {
+		t.Errorf("page = %+v", page)
+	}
+
+	// 2. Nobody responds. Three seconds later the second step tells the
+	// team, which is Ada and Grace, and the channel.
+	fromGrace := b.find("the second step to the other team member", inChannel(slacktest.DM("U0GRACE"), "*Firing*", "Disk is full on db1"))
+	b.find("the second step to the channel", inChannel("C0ALERTS", "*Firing*", "Disk is full on db1"))
+	// Ada is asked again in a new message; the first became a pointer to it.
+	b.waitFor("Ada to be asked again", func() bool {
+		var firing, pointers int
+		for _, m := range b.slack.Messages() {
+			if m.Channel == slacktest.DM("U0ADA") && strings.Contains(m.JSON(), "*Firing*") {
+				firing++
+			}
+			if m.Channel == slacktest.DM("U0ADA") && strings.Contains(m.JSON(), "Beacon sent this alert again") {
+				pointers++
+			}
+		}
+		return firing == 1 && pointers == 1
+	})
+	steps, status := b.escalationSteps()
+	if want := []string{"1.1: schedule primary ada@example.com", "1.2: channel C0ALERTS, team platform ada@example.com, team platform grace@example.com"}; strings.Join(steps, "\n") != strings.Join(want, "\n") || status != "active, timer running" {
+		t.Fatalf("escalation: %s\n  %s\nwant active with\n  %s", status, strings.Join(steps, "\n  "), strings.Join(want, "\n  "))
+	}
+	// Each page names the person it is for.
+	var forUsers string
+	err := b.db.QueryRow(context.Background(), `SELECT string_agg(n.destination || '=' || COALESCE(u.email, '-'), ' ' ORDER BY n.destination)
+		FROM notifications n LEFT JOIN users u ON u.id = n.user_id WHERE n.reason = 'escalation_step'`).Scan(&forUsers)
+	if want := "C0ALERTS=- U0ADA=ada@example.com U0ADA=ada@example.com U0GRACE=grace@example.com"; err != nil || forUsers != want {
+		t.Errorf("pages: %s, %v\nwant:  %s", forUsers, err, want)
+	}
+
+	// 3. Grace acknowledges from her direct message. That is recorded as
+	// her, shown everywhere the group was told about, and stops the
+	// escalation: its timer is gone.
+	if code := b.click(fromGrace, "beacon_acknowledge", slacktest.User{ID: "U0GRACE", Username: "grace.in.slack"}); code != http.StatusOK {
+		t.Fatalf("acknowledge = %d", code)
+	}
+	if got := b.status(alertID); got != "acknowledged" {
+		t.Fatalf("the alert is %s, want acknowledged", got)
+	}
+	var by string
+	if err := b.db.QueryRow(context.Background(), `SELECT u.email FROM alerts a JOIN users u ON u.id = a.acknowledged_by WHERE a.id = $1`, alertID).Scan(&by); err != nil || by != oidctest.Grace {
+		t.Errorf("acknowledged by %q, %v; want Grace", by, err)
+	}
+	if _, status := b.escalationSteps(); status != "acknowledged" {
+		t.Errorf("escalation after the acknowledgement: %s, want it stopped with no timer", status)
+	}
+	for _, channel := range []string{slacktest.DM("U0ADA"), slacktest.DM("U0GRACE"), "C0ALERTS"} {
+		b.find("the acknowledgement in "+channel, inChannel(channel, "*Acknowledged*", "Acknowledged by "))
+	}
+
+	// 4. The source resolves the alert.
+	if code, res := b.webhook(diskFullResolved); code != http.StatusOK {
+		t.Fatalf("resolve webhook = %d %v", code, res)
+	}
+	for _, channel := range []string{slacktest.DM("U0ADA"), slacktest.DM("U0GRACE"), "C0ALERTS"} {
+		b.find("the resolution in "+channel, inChannel(channel, "*Resolved*", "Resolved by the source"))
+	}
+	steps, status = b.escalationSteps()
+	if len(steps) != 2 || status != "resolved" {
+		t.Errorf("at the end the escalation is %s after %d steps, want resolved after 2:\n  %s", status, len(steps), strings.Join(steps, "\n  "))
+	}
+
+	if code := b.terminate(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+	logs := b.output()
+	for _, secret := range []string{sourceToken, botToken, signingSecret, oidctest.ClientSecret} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("the logs contain the credential %q", secret)
+		}
+	}
 }
 
 // TestEscalationSurvivesARestart stops the process between two steps of a

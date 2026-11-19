@@ -9,6 +9,7 @@ import (
 
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/config"
+	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/slack"
 	"github.com/thanoslabs/beacon/internal/slack/slacktest"
 )
@@ -197,5 +198,60 @@ func TestDirectMessage(t *testing.T) {
 	var apiErr *slack.APIError
 	if !errors.As(err, &apiErr) || apiErr.Code != "channel_not_found" {
 		t.Errorf("Send to an unknown member = %v", err)
+	}
+}
+
+// TestEscalationStepIsSaidAgain: when an escalation step reaches a
+// destination that already has the group's message, the alert is posted
+// again, because an edit notifies nobody. The old message becomes a pointer
+// without buttons, and updates follow the new one.
+func TestEscalationStepIsSaidAgain(t *testing.T) {
+	fake := slacktest.New(t, botToken)
+	ch := newChannel(fake.URL)
+	ctx := context.Background()
+
+	first, err := ch.Send(ctx, message(alert.StatusFiring, "#alerts", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again := message(alert.StatusFiring, "#alerts", first)
+	again.Notification.Reason = notify.ReasonEscalationStep
+	second, err := ch.Send(ctx, again)
+	if err != nil || second == first || !strings.HasPrefix(second, "C0ALERTS:") {
+		t.Fatalf("Send of a step = %q after %q, %v; want another message", second, first, err)
+	}
+	msgs := fake.Messages()
+	if len(msgs) != 2 {
+		t.Fatalf("%d messages, want 2", len(msgs))
+	}
+	if old := msgs[0]; old.Updates != 1 || !strings.Contains(old.JSON(), "Beacon sent this alert again") || strings.Contains(old.JSON(), "beacon_acknowledge") ||
+		old.Text != "Sent again below: [FIRING] critical: Disk is full" {
+		t.Errorf("the old message: %q %s", old.Text, old.JSON())
+	}
+	if fresh := msgs[1]; fresh.Updates != 0 || !strings.Contains(fresh.JSON(), "beacon_acknowledge") || fresh.Text != "[FIRING] critical: Disk is full" {
+		t.Errorf("the new message: %q %s", fresh.Text, fresh.JSON())
+	}
+
+	// An update goes to the new message, in place.
+	if ref, err := ch.Send(ctx, message(alert.StatusAcknowledged, "#alerts", second)); err != nil || ref != second {
+		t.Fatalf("update = %q, %v", ref, err)
+	}
+	if msgs := fake.Messages(); len(msgs) != 2 || msgs[1].Updates != 1 || msgs[0].Updates != 1 {
+		t.Errorf("after the update: %+v", msgs)
+	}
+
+	// The old message is gone: the step is delivered all the same.
+	channelID, ts, _ := strings.Cut(second, ":")
+	fake.Delete(channelID, ts)
+	again = message(alert.StatusFiring, "#alerts", second)
+	again.Notification.Reason = notify.ReasonEscalationStep
+	if third, err := ch.Send(ctx, again); err != nil || third == second {
+		t.Errorf("Send of a step whose old message was deleted = %q, %v", third, err)
+	}
+	// And a step that cannot be posted is a failure, with nothing edited.
+	fake.Fail("chat.postMessage", slacktest.Failure{Status: http.StatusServiceUnavailable})
+	updates := len(fake.Calls("chat.update"))
+	if _, err := ch.Send(ctx, again); err == nil || len(fake.Calls("chat.update")) != updates {
+		t.Errorf("a step that Slack refused: %v, with %d more edits", err, len(fake.Calls("chat.update"))-updates)
 	}
 }
