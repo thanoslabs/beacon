@@ -80,7 +80,7 @@ Every state change is recorded as an event on the alert's timeline, in the same 
 | `snooze_ended` | The snooze runs out and the alert fires again |
 | `resolved` | A person or the source resolves it |
 
-Notifications add their own events to the same timeline; see [[notifications]]. People can act on an alert from its Slack message; see [[slack]].
+Notifications and escalation add their own events to the same timeline; see [[notifications]] and [[escalation#On the timeline]]. People can act on an alert from its Slack message; see [[slack]].
 
 Each event has the time it happened and an actor:
 

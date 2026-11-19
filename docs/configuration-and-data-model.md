@@ -119,7 +119,7 @@ Each target is a map with exactly one of these forms:
 | `{user: <email>}` | One user |
 | `{channel: <channel>, integration: <name>}` | A shared channel, for example a Slack channel |
 
-People targets (`schedule`, `team`, `user`) accept an optional `via` list of integration names. Without it, the person is notified through every integration that can reach them directly: a Slack or Discord direct message when their account is linked, and email.
+People targets (`schedule`, `team`, `user`) accept an optional `via` list of integration names. Without it, the person is notified through every integration that can reach them directly: a Slack or Discord direct message when their account is linked, and email. Of these, Slack direct messages exist today.
 
 ### Routing
 
@@ -421,7 +421,12 @@ A unique index on (`source_id`, `fingerprint`) for rows whose status is not `res
 > [!note] Built up over several migrations
 > The first migration for these tables leaves out the columns that reference tables which do not exist yet: `routing_rule_id`, `team_id` and `escalation_policy_id`. The migrations that create those tables add them.
 
-**`escalations`**: one row per open alert group. `alert_group_id`, `escalation_policy_id`, `step_index`, `pass` (which repeat), `next_step_at`, `status` (`active`, `acknowledged`, `exhausted` or `resolved`). Workers claim due rows with `SELECT ... FOR UPDATE SKIP LOCKED`, so a timer fires once when several replicas run.
+**`escalations`**: one row per alert group that has been escalated, keyed by `alert_group_id`. `escalation_policy_id`, `step_index`, `pass` (which repeat), `next_step_at`, `status` (`active`, `acknowledged`, `exhausted` or `resolved`), `silence_id`, `created_at`, `updated_at`. Workers claim due rows with `SELECT ... FOR UPDATE SKIP LOCKED` and move `next_step_at` in the same transaction, so a timer fires once when several replicas run and survives a restart.
+
+- `step_index` is the step that ran last in the pass in progress, counted from 0. It is -1 for an escalation that starts again, until its first step has run.
+- `next_step_at` is the timer, and is null exactly when the status is not `active`. A row is `acknowledged` when no alert of the group is firing, which acknowledging, snoozing and resolving bring about; it becomes `active` again when one fires.
+- `silence_id` names the silence whose end the next step waits for when every firing alert of the group is silenced, as `alert_groups.silence_id` does for the group's notification. The first version of this design did not have it.
+- The policy itself is not copied into the row: the steps are read from the configuration when each step runs, so a reload applies to escalations in progress. [[escalation]] describes the rules.
 
 **`alert_events`** (append only)
 
@@ -450,7 +455,7 @@ The author is exactly one of `created_by`, which references `users`, and `create
 | `id` | `uuid` | |
 | `alert_group_id` | `uuid` | |
 | `integration_id` | `uuid` | |
-| `user_id` | `uuid` | Null for channel targets |
+| `user_id` | `uuid` | The person the message is for. Null for channel targets. |
 | `destination` | `text` | Channel, address or URL, resolved when queued |
 | `reason` | `text` | `escalation_step`, `group_update`, `resolved` |
 | `status` | `text` | `pending`, `sent` or `failed` |
