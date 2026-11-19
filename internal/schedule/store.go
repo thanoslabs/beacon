@@ -579,6 +579,8 @@ func nullable(s string) *string {
 // OnCall is who is on call for a schedule at a moment.
 type OnCall struct {
 	ScheduleID string
+	// Schedule is the name of the schedule.
+	Schedule string
 	// UserID and Email are the person on call. Both are empty when nobody
 	// is: no member of the rotation is a user, and no override is in force.
 	UserID string
@@ -610,7 +612,8 @@ func (s *Store) OnCall(ctx context.Context, q Querier, scheduleID string) (OnCal
 	if err != nil {
 		return OnCall{}, fmt.Errorf("read position: %w", err)
 	}
-	if _, err := describe(ctx, q, &pos); err != nil {
+	name, err := describe(ctx, q, &pos)
+	if err != nil {
 		return OnCall{}, err
 	}
 	members := pos.Definition.Members
@@ -636,7 +639,7 @@ func (s *Store) OnCall(ctx context.Context, q Querier, scheduleID string) (OnCal
 		}
 		state = next
 	}
-	out := OnCall{ScheduleID: scheduleID, UserID: userID, Email: state.Member, Since: state.ShiftStart, Until: state.Due(), Rotation: state.Member}
+	out := OnCall{ScheduleID: scheduleID, Schedule: name, UserID: userID, Email: state.Member, Since: state.ShiftStart, Until: state.Due(), Rotation: state.Member}
 
 	o, active, err := activeOverride(ctx, q, scheduleID, now)
 	if err != nil {

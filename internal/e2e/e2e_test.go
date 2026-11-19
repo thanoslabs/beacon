@@ -386,7 +386,7 @@ func TestFirstPath(t *testing.T) {
 	// Slack has the message a moment before Beacon has recorded that it was
 	// delivered. The press must come after that, as a person's would, or
 	// the two events can reach the timeline in either order.
-	b.timeline(alertID, 2)
+	b.timeline(alertID, 3)
 
 	// 3. Someone acknowledges it from Slack.
 	if code := b.click(msg, "beacon_acknowledge", alice); code != http.StatusOK {
@@ -413,7 +413,7 @@ func TestFirstPath(t *testing.T) {
 
 	// 4. The source reports that the problem is over, once the delivery of
 	// the acknowledgement is on record too.
-	b.timeline(alertID, 4)
+	b.timeline(alertID, 5)
 	code, res = b.webhook(diskFullResolved)
 	if code != http.StatusOK || res["result"] != "resolved" || res["alert_id"] != alertID {
 		t.Fatalf("resolve webhook = %d %v, want the alert resolved", code, res)
@@ -429,6 +429,7 @@ func TestFirstPath(t *testing.T) {
 	}
 	want := []string{
 		"fired by source",
+		"escalated by system",
 		"notification_sent by system",
 		"acknowledged by user slack:U0ALICE",
 		"notification_sent by system",
@@ -495,7 +496,7 @@ func TestSourceResolvesAnAlertNobodyTook(t *testing.T) {
 	if len(responses) != 1 || responses[0]["text"] != "Nothing changed: this alert is already resolved." {
 		t.Errorf("answer to the late acknowledge = %v", responses)
 	}
-	want := []string{"fired by source", "notification_sent by system", "resolved by source", "notification_sent by system"}
+	want := []string{"fired by source", "escalated by system", "notification_sent by system", "resolved by source", "notification_sent by system"}
 	if got := b.timeline(alertID, len(want)); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("timeline:\n  %s\nwant:\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
 	}
@@ -839,10 +840,15 @@ func TestGrouping(t *testing.T) {
 		t.Errorf("the resolved message still has buttons:\n%s", msg.JSON())
 	}
 
-	// 6. Two groups, two messages, however many alerts and changes.
-	if n := len(b.slack.Calls("chat.postMessage")); n != 2 {
-		t.Errorf("%d messages were posted, want 2", n)
+	// 6. Two groups, and three messages however many alerts and changes:
+	// one for each group, and one more when the alert that joined the
+	// acknowledged group made its escalation start again. Asking again is
+	// said in a new message, because an edit notifies nobody; the message
+	// it replaced points to it.
+	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
+		t.Errorf("%d messages were posted, want 3", n)
 	}
+	b.find("the pointer that the first message became", contains("Beacon sent this alert again"))
 	var open, resolved int
 	if err := b.db.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE status = 'open'), count(*) FILTER (WHERE status = 'resolved') FROM alert_groups`).Scan(&open, &resolved); err != nil || open != 1 || resolved != 1 {
 		t.Errorf("%d open and %d resolved groups, %v; want 1 and 1", open, resolved, err)
@@ -851,8 +857,8 @@ func TestGrouping(t *testing.T) {
 	// 7. The same problem again is a new group with a new message.
 	fire("DiskFull", "db1")
 	b.find("the new group in Slack", diskFull("*Firing*", "*DiskFull on db1*"))
-	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
-		t.Errorf("%d messages were posted, want 3", n)
+	if n := len(b.slack.Calls("chat.postMessage")); n != 4 {
+		t.Errorf("%d messages were posted, want 4", n)
 	}
 }
 
@@ -912,6 +918,13 @@ routing:
       escalation_policy: urgent
 `
 
+// inChannel matches a message in a channel, or a direct conversation, that
+// contains every one of the substrings.
+func inChannel(channel string, substrings ...string) func(slacktest.Message) bool {
+	all := contains(substrings...)
+	return func(m slacktest.Message) bool { return m.Channel == channel && all(m) }
+}
+
 // TestRouting sends alerts that match the first rule, a later rule and no
 // rule through the real binary, and follows each to its channel.
 func TestRouting(t *testing.T) {
@@ -943,9 +956,6 @@ func TestRouting(t *testing.T) {
 		}
 		return got
 	}
-	inChannel := func(channel, text string) func(slacktest.Message) bool {
-		return func(m slacktest.Message) bool { return m.Channel == channel && strings.Contains(m.JSON(), text) }
-	}
 
 	// 1. The first rule. The second would match too; the first one wins.
 	first := fire(`{"alertname": "ReplicationLag", "team": "dba", "priority": "P1", "service": "from-the-alert"}`)
@@ -971,9 +981,9 @@ func TestRouting(t *testing.T) {
 		t.Errorf("metric:\n%s\nwant:\n%s", got, want)
 	}
 
-	// Each alert went to one channel, and the person in the first step of
-	// "urgent" was told nothing: the log says that such targets do nothing
-	// yet.
+	// Each alert went to one channel. The person in the first step of
+	// "urgent" has never signed in, so that target was skipped: the step on
+	// the timeline and the log say so.
 	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
 		t.Errorf("%d messages were posted, want 3", n)
 	}
@@ -981,8 +991,14 @@ func TestRouting(t *testing.T) {
 	if err := b.db.QueryRow(context.Background(), `SELECT string_agg(destination, ',' ORDER BY destination) FROM notifications`).Scan(&destinations); err != nil || destinations != "C0ALERTS,C0DBA,C0URGENT" {
 		t.Errorf("notifications went to %q, %v", destinations, err)
 	}
-	if !strings.Contains(b.output(), `"msg":"escalation is not implemented yet: only the channel targets of a policy's first step are notified, once; its schedule, team and user targets, its later steps and its repeats do nothing","policy":"urgent","first_step_people_targets_skipped":1,"later_steps_skipped":1,"repeats_skipped":1`) {
-		t.Errorf("the log does not say what of the policy is skipped")
+	var skipped string
+	err := b.db.QueryRow(context.Background(), `SELECT e.data->'skipped'->0->>'target' || ': ' || (e.data->'skipped'->0->>'reason')
+		FROM alert_events e WHERE e.type = 'escalated' AND e.data->>'policy' = 'urgent'`).Scan(&skipped)
+	if err != nil || skipped != "user ada@example.com: no user has this email address" {
+		t.Errorf("the step of the urgent policy skipped %q, %v; want the person who is not a user", skipped, err)
+	}
+	if !strings.Contains(b.output(), `"msg":"escalation target not notified"`) {
+		t.Errorf("the log does not say that a target was not notified")
 	}
 
 	// 4. A reload changes the rules for alerts that arrive afterwards. The
@@ -1321,6 +1337,24 @@ func TestReload(t *testing.T) {
 		t.Errorf("metrics after the last reload:\n%s", got)
 	}
 
+	// 4. The escalation engine follows the configuration too. The policy
+	// gets a second step and a short timeout; a group that opens afterwards
+	// is escalated by the policy as it is now.
+	b.slack.AddChannel("second-line", "C0SECOND")
+	twoSteps := strings.Replace(fixed, "        timeout: 5m\n", "        timeout: 1s\n      - notify:\n          - channel: C0SECOND\n            integration: slack\n        timeout: 5m\n", 1)
+	if twoSteps == fixed {
+		t.Fatal("the configuration has no step to change")
+	}
+	logs = b.reload(twoSteps, 4)
+	if !strings.Contains(logs, `"msg":"escalation policy configured","policy":"default","steps":2,"repeat":0`) {
+		t.Errorf("the logs do not show the policy with two steps")
+	}
+	if code, res := b.webhookTo("second", `{"labels": {"alertname": "AfterReload", "severity": "critical"}}`); code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	b.find("the first step of the reloaded policy", inChannel("C0ALERTS", "AfterReload"))
+	b.find("the second step of the reloaded policy", inChannel("C0SECOND", "AfterReload"))
+
 	if code := b.terminate(); code != 0 {
 		t.Errorf("exit code after SIGTERM = %d, want 0", code)
 	}
@@ -1634,6 +1668,28 @@ func TestScheduleRotation(t *testing.T) {
 	if open, closed := overrideShifts(); open != 1 || closed != 0 {
 		t.Errorf("%d open and %d closed override shifts after the override began, want 1 and 0", open, closed)
 	}
+	// Who is on call, for the schedule and for its team: Grace, covering Ada.
+	onCallNow := func(path string) map[string]any {
+		t.Helper()
+		code, body := b.api(member, "GET", path, "", "")
+		if code != http.StatusOK {
+			t.Fatalf("GET %s = %d %v", path, code, body)
+		}
+		if list, ok := body["on_call"].([]any); ok && len(list) == 1 {
+			return list[0].(map[string]any)
+		}
+		on, _ := body["on_call"].(map[string]any)
+		return on
+	}
+	for _, path := range []string{"/api/v1/schedules/primary", "/api/v1/teams/platform/on-call"} {
+		if on := onCallNow(path); on["user"] != "grace@example.com" || on["rotation_user"] != "ada@example.com" || on["override"] == nil {
+			t.Errorf("GET %s during the override: on call %v", path, on)
+		}
+	}
+	code, timeline := b.api(member, "GET", "/api/v1/schedules/primary/shifts", "", "")
+	if upcoming, _ := timeline["shifts"].([]any); code != http.StatusOK || len(upcoming) < 10 || upcoming[0].(map[string]any)["user"] != "grace@example.com" || upcoming[1].(map[string]any)["user"] != "ada@example.com" {
+		t.Errorf("GET shifts = %d %v", code, timeline)
+	}
 	if code, body := b.api(admin, "POST", "/api/v1/schedules/primary/overrides", "", `{"user": "ada@example.com", "duration": "30m"}`); code != http.StatusConflict {
 		t.Errorf("an overlapping override = %d %v, want 409", code, body)
 	}
@@ -1642,6 +1698,9 @@ func TestScheduleRotation(t *testing.T) {
 	}
 	if open, closed := overrideShifts(); open != 0 || closed != 1 {
 		t.Errorf("%d open and %d closed override shifts after the override was removed, want 0 and 1", open, closed)
+	}
+	if on := onCallNow("/api/v1/schedules/primary"); on["user"] != "ada@example.com" || on["override"] != nil {
+		t.Errorf("on call after the override was removed: %v", on)
 	}
 
 	// A restart in the middle of the shift.
@@ -1686,6 +1745,328 @@ func TestScheduleRotation(t *testing.T) {
 	err = b.db.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE ends_at IS NULL), count(*) FILTER (WHERE ends_at IS NOT NULL) FROM shifts WHERE kind = 'rotation'`).Scan(&open, &closed)
 	if who, _ := b.onCall("primary"); err != nil || open != 0 || closed != 1 || who != "" {
 		t.Errorf("after the schedule was removed: %d open and %d closed shifts, %q on call (%v)", open, closed, who, err)
+	}
+}
+
+// waitFor polls until cond holds, and fails the test with what if it does
+// not within half a minute.
+func (b *beacon) waitFor(what string, cond func() bool) {
+	b.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			b.t.Fatalf("timed out waiting for %s\n%s", what, b.output())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestSlackIdentity links people to their Slack accounts in the real
+// binary. Ada has an account in the workspace with her address: Beacon
+// finds it after she signs in, shows it to her, and attributes what she
+// does in Slack to her. Grace has none: that is logged and counted.
+func TestSlackIdentity(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, signInConfiguration(t)))
+	b.waitUntilServing()
+	b.slack.AddUser(oidctest.Ada, "U0ADA")
+
+	admin := oidctest.Browser(t, strings.TrimPrefix(b.url, "http://"))
+	if code, body := oidctest.SignIn(t, admin, oidctest.Ada, oidctest.Password); code != http.StatusOK {
+		t.Fatalf("sign-in = %d %s", code, body)
+	}
+	identities := func(client *http.Client) []any {
+		t.Helper()
+		code, body := b.api(client, "GET", "/api/v1/me/identities", "", "")
+		list, _ := body["identities"].([]any)
+		if code != http.StatusOK || list == nil {
+			t.Fatalf("GET /api/v1/me/identities = %d %v", code, body)
+		}
+		return list
+	}
+	b.waitFor("Ada's Slack account to be linked", func() bool { return len(identities(admin)) == 1 })
+	if got := identities(admin)[0].(map[string]any); got["integration"] != "slack" || got["provider"] != "slack" || got["external_id"] != "U0ADA" || got["origin"] != "email" {
+		t.Errorf("Ada's identity = %v", got)
+	}
+
+	// Grace is not in the workspace.
+	member := oidctest.Browser(t, strings.TrimPrefix(b.url, "http://"))
+	if code, body := oidctest.SignIn(t, member, oidctest.Grace, oidctest.Password); code != http.StatusOK {
+		t.Fatalf("sign-in = %d %s", code, body)
+	}
+	b.waitFor("the gap to be logged", func() bool {
+		return strings.Contains(b.output(), `"msg":"no account in the chat service has this user's email address, so they cannot be reached directly through this integration; Beacon asks again in an hour","integration":"slack","provider":"slack"`)
+	})
+	if len(identities(member)) != 0 {
+		t.Errorf("Grace has identities: %v", identities(member))
+	}
+	b.waitFor("the metric of users without an identity", func() bool {
+		return b.metrics("beacon_users_without_identity") == `beacon_users_without_identity{integration="slack"} 1`
+	})
+
+	// Ada acknowledges from Slack, under whatever name she has there. The
+	// timeline and the alert name the Beacon user.
+	code, res := b.webhook(diskFull)
+	if code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	msg := b.message("the alert", contains("Disk is full on db1"))
+	if code := b.click(msg, "beacon_acknowledge", slacktest.User{ID: "U0ADA", Username: "ada.in.slack"}); code != http.StatusOK {
+		t.Fatalf("click = %d", code)
+	}
+	var (
+		actor, name string
+		by          bool
+	)
+	err := b.db.QueryRow(context.Background(), `
+		SELECT u.email, COALESCE(a.acknowledged_by = u.id, false), e.data->>'actor_name'
+		FROM alert_events e JOIN users u ON u.id = e.actor_id JOIN alerts a ON a.id = e.alert_id
+		WHERE e.type = 'acknowledged' AND e.actor_provider = 'slack' AND e.actor_external_id = 'U0ADA'`).Scan(&actor, &by, &name)
+	if err != nil || actor != oidctest.Ada || !by || name == "" || name == "ada.in.slack" {
+		t.Errorf("the acknowledgement is by %q (acknowledged_by matches: %v, name %q), %v; want the user Ada", actor, by, name, err)
+	}
+	b.message("the acknowledgement by the Beacon user", contains("Acknowledged by "+name))
+
+	// Someone in the channel who is no Beacon user can still act, and is
+	// recorded as the Slack account.
+	if code := b.click(b.slack.Messages()[0], "beacon_resolve", slacktest.User{ID: "U0GUEST", Username: "guest"}); code != http.StatusOK {
+		t.Fatalf("click = %d", code)
+	}
+	b.message("the resolution", contains("Resolved by guest"))
+	var unlinked int
+	err = b.db.QueryRow(context.Background(), `SELECT count(*) FROM alert_events WHERE type = 'resolved' AND actor_id IS NULL AND actor_external_id = 'U0GUEST'`).Scan(&unlinked)
+	if err != nil || unlinked != 1 {
+		t.Errorf("%d resolved events by the unlinked account, %v; want 1", unlinked, err)
+	}
+
+	if code := b.terminate(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+	if logs := b.output(); strings.Contains(logs, botToken) || strings.Contains(logs, signingSecret) {
+		t.Error("the logs contain a Slack credential")
+	}
+}
+
+// escalationConfiguration is sign-in, a daily rotation of Ada and Grace,
+// and a policy whose first step pages whoever is on call and whose second,
+// three seconds later, tells the whole team and a channel. The second step
+// has a long timeout, so that nothing the test does not cause can follow it.
+func escalationConfiguration(t *testing.T) string {
+	t.Helper()
+	cfg := strings.Replace(signInConfiguration(t), `    steps:
+      - notify:
+          - channel: C0ALERTS
+            integration: slack
+        timeout: 5m
+`, `    steps:
+      - notify:
+          - schedule: primary
+        timeout: 3s
+      - notify:
+          - team: platform
+          - channel: C0ALERTS
+            integration: slack
+        timeout: 10m
+`, 1)
+	if cfg == signInConfiguration(t) {
+		t.Fatal("the configuration has no policy to change")
+	}
+	return cfg + `schedules:
+  - name: primary
+    team: platform
+    time_zone: UTC
+    rotation:
+      members: [ada@example.com, grace@example.com]
+      shift_length: 1d
+      handoff:
+        time: "09:00"
+`
+}
+
+// escalationSteps reads the escalation events of the one group as
+// "pass.step: who was notified", and the state of its escalation.
+func (b *beacon) escalationSteps() (steps []string, status string) {
+	b.t.Helper()
+	rows, err := b.db.Query(context.Background(), `
+		SELECT (e.data->>'pass') || '.' || (e.data->>'step') || ': ' || COALESCE((
+			SELECT string_agg((n->>'target') || COALESCE(' ' || (n->>'user'), ''), ', ' ORDER BY (n->>'target'), (n->>'user'))
+			FROM jsonb_array_elements(e.data->'notified') n), 'nobody')
+		FROM alert_events e WHERE e.type = 'escalated' ORDER BY e.id`)
+	if err != nil {
+		b.t.Fatalf("read escalation events: %v", err)
+	}
+	if steps, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+		b.t.Fatalf("read escalation events: %v", err)
+	}
+	err = b.db.QueryRow(context.Background(), `SELECT status || CASE WHEN next_step_at IS NULL THEN '' ELSE ', timer running' END FROM escalations`).Scan(&status)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		b.t.Fatalf("read escalation: %v", err)
+	}
+	return steps, status
+}
+
+// TestFirstPathWithEscalation is the first path with people in it: an alert
+// comes in, the person on call is paged in a direct message, nobody
+// responds, the policy's second step tells the team and a channel, a team
+// member acknowledges from Slack, which stops the escalation, and the
+// source resolves the alert.
+func TestFirstPathWithEscalation(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, escalationConfiguration(t)))
+	b.waitUntilServing()
+	b.slack.AddUser(oidctest.Ada, "U0ADA")
+	b.slack.AddUser(oidctest.Grace, "U0GRACE")
+
+	// Ada and Grace sign in. Beacon finds their Slack accounts, and Ada,
+	// first in the rotation, is on call.
+	for _, who := range []string{oidctest.Ada, oidctest.Grace} {
+		if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), who, oidctest.Password); code != http.StatusOK {
+			t.Fatalf("sign-in of %s = %d %s", who, code, body)
+		}
+		if who == oidctest.Ada {
+			// Ada is a user before Grace is, so the rotation starts with her.
+			b.waitFor("Ada to be on call", func() bool { who, _ := b.onCall("primary"); return who == oidctest.Ada })
+		}
+	}
+	b.waitFor("both Slack accounts to be linked", func() bool {
+		var n int
+		err := b.db.QueryRow(context.Background(), `SELECT count(*) FROM user_identities`).Scan(&n)
+		return err == nil && n == 2
+	})
+
+	// 1. The alert. The first step pages the person on call, and only her.
+	code, res := b.webhook(diskFull)
+	if code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	alertID := res["alert_id"]
+	page := b.find("the page to the person on call", inChannel(slacktest.DM("U0ADA"), "*Firing*", "Disk is full on db1", "beacon_acknowledge"))
+	if page.Text != "[FIRING] critical: Disk is full on db1" {
+		t.Errorf("page = %+v", page)
+	}
+
+	// 2. Nobody responds. Three seconds later the second step tells the
+	// team, which is Ada and Grace, and the channel.
+	fromGrace := b.find("the second step to the other team member", inChannel(slacktest.DM("U0GRACE"), "*Firing*", "Disk is full on db1"))
+	b.find("the second step to the channel", inChannel("C0ALERTS", "*Firing*", "Disk is full on db1"))
+	// Ada is asked again in a new message; the first became a pointer to it.
+	b.waitFor("Ada to be asked again", func() bool {
+		var firing, pointers int
+		for _, m := range b.slack.Messages() {
+			if m.Channel == slacktest.DM("U0ADA") && strings.Contains(m.JSON(), "*Firing*") {
+				firing++
+			}
+			if m.Channel == slacktest.DM("U0ADA") && strings.Contains(m.JSON(), "Beacon sent this alert again") {
+				pointers++
+			}
+		}
+		return firing == 1 && pointers == 1
+	})
+	steps, status := b.escalationSteps()
+	if want := []string{"1.1: schedule primary ada@example.com", "1.2: channel C0ALERTS, team platform ada@example.com, team platform grace@example.com"}; strings.Join(steps, "\n") != strings.Join(want, "\n") || status != "active, timer running" {
+		t.Fatalf("escalation: %s\n  %s\nwant active with\n  %s", status, strings.Join(steps, "\n  "), strings.Join(want, "\n  "))
+	}
+	// Each page names the person it is for.
+	var forUsers string
+	err := b.db.QueryRow(context.Background(), `SELECT string_agg(n.destination || '=' || COALESCE(u.email, '-'), ' ' ORDER BY n.destination)
+		FROM notifications n LEFT JOIN users u ON u.id = n.user_id WHERE n.reason = 'escalation_step'`).Scan(&forUsers)
+	if want := "C0ALERTS=- U0ADA=ada@example.com U0ADA=ada@example.com U0GRACE=grace@example.com"; err != nil || forUsers != want {
+		t.Errorf("pages: %s, %v\nwant:  %s", forUsers, err, want)
+	}
+
+	// 3. Grace acknowledges from her direct message. That is recorded as
+	// her, shown everywhere the group was told about, and stops the
+	// escalation: its timer is gone.
+	if code := b.click(fromGrace, "beacon_acknowledge", slacktest.User{ID: "U0GRACE", Username: "grace.in.slack"}); code != http.StatusOK {
+		t.Fatalf("acknowledge = %d", code)
+	}
+	if got := b.status(alertID); got != "acknowledged" {
+		t.Fatalf("the alert is %s, want acknowledged", got)
+	}
+	var by string
+	if err := b.db.QueryRow(context.Background(), `SELECT u.email FROM alerts a JOIN users u ON u.id = a.acknowledged_by WHERE a.id = $1`, alertID).Scan(&by); err != nil || by != oidctest.Grace {
+		t.Errorf("acknowledged by %q, %v; want Grace", by, err)
+	}
+	if _, status := b.escalationSteps(); status != "acknowledged" {
+		t.Errorf("escalation after the acknowledgement: %s, want it stopped with no timer", status)
+	}
+	for _, channel := range []string{slacktest.DM("U0ADA"), slacktest.DM("U0GRACE"), "C0ALERTS"} {
+		b.find("the acknowledgement in "+channel, inChannel(channel, "*Acknowledged*", "Acknowledged by "))
+	}
+
+	// 4. The source resolves the alert.
+	if code, res := b.webhook(diskFullResolved); code != http.StatusOK {
+		t.Fatalf("resolve webhook = %d %v", code, res)
+	}
+	for _, channel := range []string{slacktest.DM("U0ADA"), slacktest.DM("U0GRACE"), "C0ALERTS"} {
+		b.find("the resolution in "+channel, inChannel(channel, "*Resolved*", "Resolved by the source"))
+	}
+	steps, status = b.escalationSteps()
+	if len(steps) != 2 || status != "resolved" {
+		t.Errorf("at the end the escalation is %s after %d steps, want resolved after 2:\n  %s", status, len(steps), strings.Join(steps, "\n  "))
+	}
+
+	if code := b.terminate(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+	logs := b.output()
+	for _, secret := range []string{sourceToken, botToken, signingSecret, oidctest.ClientSecret} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("the logs contain the credential %q", secret)
+		}
+	}
+}
+
+// TestEscalationSurvivesARestart stops the process between two steps of a
+// policy. The timer of the second step is in Postgres: two processes that
+// start afterwards find it, and exactly one of them runs the step. The
+// policy then runs out, which is recorded once.
+func TestEscalationSurvivesARestart(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	// Six seconds leave the first process time to stop before the second
+	// step is due, also on a slow machine.
+	cfg := strings.Replace(configuration, "        timeout: 5m\n", "        timeout: 6s\n      - notify:\n          - channel: C0SECOND\n            integration: slack\n        timeout: 2s\n", 1)
+	first := launch(t, dbURL, writeConfig(t, cfg))
+	first.waitUntilServing()
+	if code, res := first.webhook(diskFull); code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	first.message("the first step", contains("Disk is full on db1"))
+	if code := first.terminate(); code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if steps, status := first.escalationSteps(); len(steps) != 1 || status != "active, timer running" {
+		t.Fatalf("when the process stopped: %s after %v", status, steps)
+	}
+
+	replicas := []*beacon{launch(t, dbURL, writeConfig(t, cfg)), launch(t, dbURL, writeConfig(t, cfg))}
+	for _, r := range replicas {
+		r.slack.AddChannel("second-line", "C0SECOND")
+	}
+	for _, r := range replicas {
+		r.waitUntilServing()
+	}
+	first.waitFor("the policy to run out", func() bool {
+		var n int
+		err := first.db.QueryRow(context.Background(), `SELECT count(*) FROM alert_events WHERE type = 'escalation_exhausted'`).Scan(&n)
+		return err == nil && n > 0
+	})
+	steps, status := first.escalationSteps()
+	if want := "1.1: channel C0ALERTS | 1.2: channel C0SECOND"; strings.Join(steps, " | ") != want || status != "exhausted" {
+		t.Errorf("escalation: %s after %q; want exhausted after %q", status, strings.Join(steps, " | "), want)
+	}
+	var exhausted, pages int
+	err := first.db.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM alert_events WHERE type = 'escalation_exhausted'),
+		(SELECT count(*) FROM notifications WHERE reason = 'escalation_step')`).Scan(&exhausted, &pages)
+	if err != nil || exhausted != 1 || pages != 2 {
+		t.Errorf("%d exhausted events and %d pages, %v; want 1 and 2", exhausted, pages, err)
+	}
+	// The second step reached Slack once, through one of the two.
+	first.waitFor("the second step in Slack", func() bool {
+		return len(replicas[0].slack.Calls("chat.postMessage"))+len(replicas[1].slack.Calls("chat.postMessage")) >= 1
+	})
+	if n := len(replicas[0].slack.Calls("chat.postMessage")) + len(replicas[1].slack.Calls("chat.postMessage")); n != 1 {
+		t.Errorf("the second step was posted %d times, want once", n)
 	}
 }
 
