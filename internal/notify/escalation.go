@@ -24,8 +24,12 @@ import (
 //     still firing, the next step runs (EscalateDue). After the last step
 //     the policy starts again, as often as it says, and then gives up.
 //   - Escalation stops when no alert of the group is firing any more:
-//     acknowledged, snoozed or resolved (Observe). It starts again from the
-//     first step when one fires again.
+//     acknowledged, snoozed or resolved (Observe).
+//   - A group is paged once. After its escalation has stopped, an alert that
+//     joins the group pages nobody: the messages that exist are updated,
+//     and that is all. The one exception is a snooze that runs out, which
+//     starts the policy again, because being asked again is what a snooze
+//     is for.
 //
 // Where a group is in its policy is a row in the escalations table, and its
 // timer is a column of that row. Nothing is kept in the process.
@@ -521,10 +525,21 @@ func resolve(ctx context.Context, tx pgx.Tx, people People, target StepTarget) (
 //   - When no alert of the group is firing any more, because the last one
 //     was acknowledged, snoozed or resolved, by a person or by the source,
 //     the escalation stops and its timer is cleared.
-//   - When an alert fires in a group whose escalation had stopped that way,
-//     because a snooze ended or a new alert joined, the escalation starts
-//     again from its first step, at the next look of the worker. Nobody has
-//     taken the alert that fires.
+//   - When a snooze runs out in a group whose escalation had stopped that
+//     way, the escalation starts again from its first step, at the next
+//     look of the worker. The person who snoozed asked to be reminded.
+//   - When a new alert joins such a group, nothing happens here. One page
+//     per alert group: the group was taken, and the alert that joins is
+//     shown in the messages that exist, which the group's timer updates
+//     without notifying anyone.
+//
+// SEAM FOR THE RE-PAGE POLICY (issue 100). A policy will be able to state an
+// interval after which a group that is still not resolved is paged again,
+// also after it was acknowledged or its policy ran out. That belongs here
+// and in endEscalation: instead of clearing next_step_at when an escalation
+// stops, set it to the re-page time and let escalate run the first step
+// again when it falls due. Without that setting, the rule below stands: an
+// alert that fires into a group that was taken does not restart anything.
 func (p *Pipeline) observeEscalation(ctx context.Context, tx pgx.Tx, ev alert.Event) error {
 	now := p.now()
 	switch ev.Type {
@@ -538,7 +553,7 @@ func (p *Pipeline) observeEscalation(ctx context.Context, tx pgx.Tx, ev alert.Ev
 		if err != nil {
 			return fmt.Errorf("stop escalation: %w", err)
 		}
-	case alert.EventFired, alert.EventSnoozeEnded:
+	case alert.EventSnoozeEnded:
 		_, err := tx.Exec(ctx, `
 			UPDATE escalations SET status = 'active', step_index = -1, pass = 0, next_step_at = $2, updated_at = $2
 			WHERE alert_group_id = $1 AND status = 'acknowledged'`, ev.GroupID, now)

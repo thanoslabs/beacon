@@ -821,8 +821,9 @@ func TestGrouping(t *testing.T) {
 	}
 	b.find("the acknowledgement in Slack", diskFull("*Acknowledged*", "2 alerts: 2 acknowledged", "Acknowledged by alice"))
 
-	// 4. A third alert joins the acknowledged group: it is new, so the
-	// group fires again.
+	// 4. A third alert joins the acknowledged group. It is new and firing,
+	// and the message says so; but a group is paged once, so the message is
+	// edited and nobody is asked again.
 	fire("DiskFull", "db3")
 	msg = b.find("the new alert in the group", diskFull("*Firing*", "3 alerts: 1 firing, 2 acknowledged"))
 	if !strings.Contains(msg.JSON(), "beacon_acknowledge") {
@@ -840,15 +841,16 @@ func TestGrouping(t *testing.T) {
 		t.Errorf("the resolved message still has buttons:\n%s", msg.JSON())
 	}
 
-	// 6. Two groups, and three messages however many alerts and changes:
-	// one for each group, and one more when the alert that joined the
-	// acknowledged group made its escalation start again. Asking again is
-	// said in a new message, because an edit notifies nobody; the message
-	// it replaced points to it.
-	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
-		t.Errorf("%d messages were posted, want 3", n)
+	// 6. Two groups, two messages, however many alerts and changes: the
+	// alert that joined the acknowledged group paged nobody.
+	if n := len(b.slack.Calls("chat.postMessage")); n != 2 {
+		t.Errorf("%d messages were posted, want 2", n)
 	}
-	b.find("the pointer that the first message became", contains("Beacon sent this alert again"))
+	var pages, restarted int
+	if err := b.db.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM notifications WHERE reason = 'escalation_step'),
+		(SELECT count(*) FROM alert_events WHERE type = 'escalated')`).Scan(&pages, &restarted); err != nil || pages != 2 || restarted != 2 {
+		t.Errorf("%d pages and %d escalation steps, %v; want one of each per group", pages, restarted, err)
+	}
 	var open, resolved int
 	if err := b.db.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE status = 'open'), count(*) FILTER (WHERE status = 'resolved') FROM alert_groups`).Scan(&open, &resolved); err != nil || open != 1 || resolved != 1 {
 		t.Errorf("%d open and %d resolved groups, %v; want 1 and 1", open, resolved, err)
@@ -857,8 +859,8 @@ func TestGrouping(t *testing.T) {
 	// 7. The same problem again is a new group with a new message.
 	fire("DiskFull", "db1")
 	b.find("the new group in Slack", diskFull("*Firing*", "*DiskFull on db1*"))
-	if n := len(b.slack.Calls("chat.postMessage")); n != 4 {
-		t.Errorf("%d messages were posted, want 4", n)
+	if n := len(b.slack.Calls("chat.postMessage")); n != 3 {
+		t.Errorf("%d messages were posted, want 3", n)
 	}
 }
 

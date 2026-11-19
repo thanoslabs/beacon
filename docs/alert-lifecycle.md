@@ -46,6 +46,7 @@ Sources repeat themselves: Alertmanager and Grafana send a firing alert again on
 
 - **One open alert per source and fingerprint, whatever arrives at once.** Deliveries of the same alert take turns, so of several that arrive together one opens the alert and the others refresh it; none fails. A unique index in the database refuses a second open alert outright, so the rule holds even against a fault in Beacon.
 - **A resolved alert that fires again is a new alert**, with its own timeline. The resolved one is never reopened.
+- **A new alert in a group that someone has acknowledged is `firing`**, like any new alert: its state says that nobody has acted on it. It does not page anyone. A group is paged once, and after it has been taken its messages are only edited; see [[escalation#How a group is escalated]].
 - **The time of the resolution** is the one the source gives, when it gives one and it is not in the future. The event on the timeline carries the time Beacon learned of it.
 - **The same fingerprint from two sources** is two alerts. Point the members of an Alertmanager cluster at one source.
 - **A resolution that never arrives** leaves the alert open. Beacon does not guess that a silent source means a solved problem. Resolve such an alert by hand.

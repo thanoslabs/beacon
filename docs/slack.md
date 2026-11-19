@@ -130,7 +130,7 @@ For a group of several alerts it shows instead:
 
 Alerts that a silence keeps quiet are left out of the message for as long as the silence covers them; see [[silences]].
 
-**When Beacon asks again, it says the alert again.** An edit to a message notifies nobody in Slack. So when a step of an escalation policy reaches a channel or a person that already has the group's message, because the policy repeats or because the alert fires again after it had been taken ([[escalation]]), Beacon posts a new message and keeps that one up to date from then on. The old message is turned into a one-line pointer, "Beacon sent this alert again", without buttons.
+**When Beacon asks again, it says the alert again.** An edit to a message notifies nobody in Slack. So when a step of an escalation policy reaches a channel or a person that already has the group's message, because the policy repeats or because a snooze ran out ([[escalation]]), Beacon posts a new message and keeps that one up to date from then on. The old message is turned into a one-line pointer, "Beacon sent this alert again", without buttons.
 
 Text from an alert is escaped, so an alert cannot add links or mentions such as `@channel` to the message.
 

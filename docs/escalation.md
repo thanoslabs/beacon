@@ -35,13 +35,15 @@ With this policy the person on call for `platform-primary` is paged first. If fi
 | The group's first notification is due ([[notifications#Groups]]) | The first step runs: its targets are notified |
 | A step's `timeout` has passed and an alert of the group is still firing | The next step runs. After the last step, the first runs again, `repeat` more times in all. |
 | No alert of the group is firing any more | Escalation stops, at that moment. Nobody else is told. |
-| An alert fires in a group whose escalation had stopped | Escalation starts again from the first step |
+| A new alert joins a group whose escalation had stopped | Nobody is paged. The messages that exist are updated. |
+| A snooze runs out in a group whose escalation had stopped | Escalation starts again from the first step |
 | Every step has run, `repeat` + 1 times, and an alert is still firing | Escalation ends. The timeline gets an `escalation_exhausted` event, and the log a warning. |
 
 - **Escalation is about the group**, like every notification. A group of fifty alerts is escalated once.
 - **"Still firing" means firing.** An alert that has been acknowledged or snoozed has been taken by someone, and a resolved one is over. Escalation goes on as long as at least one alert of the group is `firing`: acknowledging one alert of two does not stop it, acknowledging the group does.
 - **Acknowledging, snoozing and resolving stop it**, whoever does it and from wherever: a person in Slack, the source that resolves the alert. The escalation's timer is cleared in the same database transaction as the change.
-- **It starts again when nobody has the alert any more.** When a snooze runs out, or when a new alert joins a group whose alerts had all been taken, an alert is firing that nobody has acknowledged. The policy runs again from its first step, straight away.
+- **One page per alert group.** Once a group has been taken, which is when none of its alerts is firing any more, it never pages again because of new alerts. An alert that joins it later is firing, and every message about the group is edited to show it, but an edit notifies nobody and no step runs. The same holds for a group whose policy ran out. Whoever acknowledged the group has taken the problem, and more alerts of the same group are more of that problem; alerts that are a different problem belong in a different group, which `group_by` decides ([[configuration#Grouping]]). A policy that pages again after a stated time is planned and will be opt-in.
+- **A snooze that runs out starts the policy again**, from its first step, straight away. That is the one way an alert group pages a second time: whoever snoozed it asked to be reminded.
 - **A step that reaches a destination a second time says the alert again.** In Slack that is a new message, because editing the one that is there notifies nobody; the old message is turned into a pointer to the new one. See [[slack#The message]].
 
 ## Targets

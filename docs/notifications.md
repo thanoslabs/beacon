@@ -39,7 +39,7 @@ Notifications are about a group of alerts, not about each alert; [[configuration
 | A source delivers an alert that is already open again | Never. Repeats are not news. |
 
 - **A group that resolves during its wait tells nobody.** A problem that came and went within `group_wait` produces no notification at all. The alerts and their timelines are stored.
-- **An alert that joins an acknowledged group fires.** It is new, and nobody has taken it; the message shows the group as firing again, with one alert firing and the others acknowledged.
+- **An alert that joins an acknowledged group fires, and pages nobody.** It is new, so it is `firing`, and the message is edited to show the group as firing again, with one alert firing and the others acknowledged. That edit is silent. A group is paged once: see [[escalation#How a group is escalated]].
 - **Acting on a message acts on the group.** *Acknowledge* acknowledges every alert of the group that can be acknowledged, and so on. Fifty alerts acknowledged at once are one update.
 - **Silenced alerts are left out.** When a group falls due, Beacon looks at the silences in force ([[silences]]). A first notification needs an open alert that is not silenced, and an update needs news about an alert that is not hidden by a silence. A group with open alerts under a silence falls due again when the silence that ends first ends, and at once when that silence is expired.
 - **The timers are rows in Postgres**, not timers in a process: `alert_groups.notify_at` holds when the next notification of a group is due. Every replica looks for due groups once a second, and a group is handed to exactly one of them. A restart loses nothing: whatever became due while no process ran is sent when one starts.

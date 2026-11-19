@@ -70,6 +70,8 @@ Each requirement is marked **MVP** (needed for the first usable release) or **La
 |---|---|
 | Multi-step policies with timeouts | MVP |
 | Repeat until acknowledged | MVP |
+| One page per alert group: a group that has been acknowledged never pages again because of new alerts | MVP |
+| Opt-in re-page policy: page again when a group is still unresolved after a stated time, also after it was acknowledged ([#100](https://github.com/thanoslabs/beacon/issues/100)) | Later |
 | Round-robin steps | Later |
 | Conditional steps by severity or time of day | Later |
 
@@ -86,6 +88,7 @@ Each requirement is marked **MVP** (needed for the first usable release) or **La
 | Voice calls | Later |
 | Teams and Telegram | Later |
 | Mobile app with push notifications | Later |
+| Recurring summary of alert activity, so alerts that stay firing are not forgotten ([#101](https://github.com/thanoslabs/beacon/issues/101)) | Later |
 | Rich per-user notification rules | Later |
 
 ## Alert lifecycle
@@ -194,4 +197,5 @@ Beacon exposes a Prometheus `/metrics` endpoint. It covers both how Beacon is ru
 | Authentication | OAuth 2.0 and OpenID Connect first, with roles and team membership mapped from the provider's roles and groups | Access follows the organisation's existing identity provider |
 | Configuration format | YAML | It is what the Prometheus audience already uses |
 | Frontend | A separate single-page app that uses the REST API | The API is exercised by a real client from the start |
+| Paging again | One page per alert group. New alerts that join an acknowledged group, or one whose policy ran out, update its messages and page nobody. A snooze that runs out pages again. Paging again after a stated time is a later, opt-in policy (#100) | Whoever acknowledged a group has taken the problem; being paged for every further alert of it is how people learn to ignore pages |
 | A schedule with nobody on call | A gap in coverage is allowed and is logged as a warning, not an error | Some teams do not want cover at all times, and a rotation whose members have not signed in yet is not a fault |
