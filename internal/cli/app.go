@@ -334,6 +334,10 @@ func (p *provisioner) reportSchedules(ctx context.Context, cfg config.Config, ap
 		p.logger.InfoContext(ctx, "schedule definition changed: the rotation in force runs until the change takes over, "+when,
 			slog.String("schedule", c.Schedule), slog.Time("takes_over_at", c.At))
 	}
+	// Nobody on call is a state some teams choose, so it is a warning.
+	for _, name := range applied.Uncovered {
+		p.logger.WarnContext(ctx, schedule.GapInCoverage, slog.String("schedule", name))
+	}
 	// Reset first, so that a schedule that left the configuration leaves
 	// the metric too.
 	p.rotationSkipped.Reset()

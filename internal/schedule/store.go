@@ -65,6 +65,9 @@ type Applied struct {
 	Changed []Change
 	// Skipped lists the rotation members that no user has the address of.
 	Skipped []Skipped
+	// Uncovered names the schedules of the configuration whose rotation has
+	// nobody on call now: a gap in coverage.
+	Uncovered []string
 }
 
 // Change is a definition that is waiting to take over.
@@ -169,6 +172,9 @@ func (s *Store) Apply(ctx context.Context, schedules []Provisioned) (Applied, er
 				if _, ok := users[m]; !ok {
 					out.Skipped = append(out.Skipped, Skipped{Schedule: p.Schedule.Name, Email: m})
 				}
+			}
+			if !slices.ContainsFunc(def.Members, func(m string) bool { return users[m] != "" }) {
+				out.Uncovered = append(out.Uncovered, p.Schedule.Name)
 			}
 			started, err := s.start(ctx, tx, p.ID, def, users, now)
 			if err != nil {
@@ -481,30 +487,40 @@ func (s *Store) Run(ctx context.Context, logger *slog.Logger, interval time.Dura
 		case <-ticker.C:
 		}
 		done, err := s.Advance(ctx)
-		for _, h := range done {
-			if h.Override {
-				msg := "schedule override began"
-				if !h.ShiftBegan {
-					msg = "schedule override ended"
-				}
-				logger.InfoContext(ctx, msg, slog.String("schedule", h.Schedule), slog.String("user", h.From+h.To), slog.Time("at", h.At))
-				continue
-			}
-			if h.TookOver {
-				logger.InfoContext(ctx, "changed schedule definition took over", slog.String("schedule", h.Schedule), slog.Time("at", h.At))
-			}
-			if !h.ShiftBegan {
-				continue
-			}
-			logger.InfoContext(ctx, "on-call shift began", slog.String("schedule", h.Schedule),
-				slog.String("from", h.From), slog.String("to", h.To), slog.Time("at", h.At), slog.Time("next_handoff", h.Next))
-			if h.To == "" {
-				logger.ErrorContext(ctx, "nobody is on call: no member of the rotation is a user; members take their place once they have signed in",
-					slog.String("schedule", h.Schedule))
-			}
-		}
+		report(ctx, logger, done)
 		if err != nil && ctx.Err() == nil {
 			logger.ErrorContext(ctx, "advance schedules", slog.Any("error", err))
+		}
+	}
+}
+
+// GapInCoverage is what the log says when a schedule has nobody on call. It
+// is a warning and not an error: a rotation whose members have not signed in
+// yet, or a team that does not want cover at all times, is a legitimate
+// state, and it is the reader who knows which of the two they are looking at.
+const GapInCoverage = "gap in coverage: the schedule has nobody on call, because no member of its rotation is a user; a member takes their place once they have signed in, and an override covers the gap until then"
+
+// report logs what Advance did.
+func report(ctx context.Context, logger *slog.Logger, done []Handoff) {
+	for _, h := range done {
+		if h.Override {
+			msg := "schedule override began"
+			if !h.ShiftBegan {
+				msg = "schedule override ended"
+			}
+			logger.InfoContext(ctx, msg, slog.String("schedule", h.Schedule), slog.String("user", h.From+h.To), slog.Time("at", h.At))
+			continue
+		}
+		if h.TookOver {
+			logger.InfoContext(ctx, "changed schedule definition took over", slog.String("schedule", h.Schedule), slog.Time("at", h.At))
+		}
+		if !h.ShiftBegan {
+			continue
+		}
+		logger.InfoContext(ctx, "on-call shift began", slog.String("schedule", h.Schedule),
+			slog.String("from", h.From), slog.String("to", h.To), slog.Time("at", h.At), slog.Time("next_handoff", h.Next))
+		if h.To == "" {
+			logger.WarnContext(ctx, GapInCoverage, slog.String("schedule", h.Schedule))
 		}
 	}
 }
