@@ -24,6 +24,8 @@ escalation_policies:
         timeout: 15m
 ```
 
+[`examples/on-call`](https://github.com/thanoslabs/beacon/tree/main/examples/on-call) is a complete configuration with a rotation and a policy like this one.
+
 With this policy the person on call for `platform-primary` is paged first. If five minutes pass and an alert of the group is still firing, the whole team and the channel are told. Ten minutes later Ada is. Fifteen minutes after that the policy starts again from its first step, and it does so twice (`repeat: 2`) before it gives up.
 
 ## How a group is escalated
@@ -40,6 +42,7 @@ With this policy the person on call for `platform-primary` is paged first. If fi
 - **"Still firing" means firing.** An alert that has been acknowledged or snoozed has been taken by someone, and a resolved one is over. Escalation goes on as long as at least one alert of the group is `firing`: acknowledging one alert of two does not stop it, acknowledging the group does.
 - **Acknowledging, snoozing and resolving stop it**, whoever does it and from wherever: a person in Slack, the source that resolves the alert. The escalation's timer is cleared in the same database transaction as the change.
 - **It starts again when nobody has the alert any more.** When a snooze runs out, or when a new alert joins a group whose alerts had all been taken, an alert is firing that nobody has acknowledged. The policy runs again from its first step, straight away.
+- **A step that reaches a destination a second time says the alert again.** In Slack that is a new message, because editing the one that is there notifies nobody; the old message is turned into a pointer to the new one. See [[slack#The message]].
 
 ## Targets
 
