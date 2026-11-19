@@ -52,7 +52,10 @@ type Notification struct {
 	// Destination is where the integration should deliver: a channel, an
 	// address or a URL.
 	Destination string
-	Reason      Reason
+	// UserID is the user the message is for, when it is for one person and
+	// not for a shared destination.
+	UserID string
+	Reason Reason
 	// Attempts counts delivery attempts, including the one in progress.
 	Attempts  int
 	CreatedAt time.Time

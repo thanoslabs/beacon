@@ -7,7 +7,7 @@ date: 2026-11-17
 Beacon's provisioned objects are defined in YAML files that live in version control: sources, integrations, teams, schedules, escalation policies and routing. So is how people sign in. This page is the reference for those files. Why they look the way they do is in [[configuration-and-data-model]].
 
 > [!warning] Loaded and checked, not all acted on yet
-> Beacon reads and validates every kind described here. What it does with them is still growing: every type of source, routing, grouping, Slack integrations and schedule rotations work today. The other integration types and escalation beyond the first step of a policy arrive with later releases. Each section says what is in use.
+> Beacon reads and validates every kind described here. What it does with them is still growing: every type of source, routing, grouping, Slack integrations, schedules and escalation work today. The other integration types arrive with later releases, so people are reached through Slack only. Each section says what is in use.
 
 ## Files
 
@@ -131,19 +131,20 @@ A schedule is one rotation: its members take turns being on call, in the order o
 | `repeat` | no | How many more times all steps run after the first pass (default `0`, at most `100`) |
 | `steps` | yes | Ordered list, at least one |
 | `steps[].notify` | yes | Targets, at least one |
-| `steps[].timeout` | yes | How long to wait for an acknowledgement before the next step |
+| `steps[].timeout` | yes | How long to wait for a response before the next step |
 
-> [!warning] Only the first step, and only channels
-> Escalation is not implemented yet. Of the policy that routing gives an alert group, Beacon acts on the `{channel, integration}` targets of the **first step**, once. Schedule, team and user targets, later steps, timeouts and `repeat` are read and checked and do nothing; `beacon serve` logs a warning for each policy that has any. A group whose policy has no channel in its first step notifies nobody, and its timeline says so.
+[[escalation]] describes how a policy runs: when the next step follows, what stops it, and what happens when someone cannot be reached.
 
 A target has exactly one of these forms:
 
 | Target | Who is notified |
 |---|---|
-| `{schedule: <name>}` | Whoever is on call for the schedule |
+| `{schedule: <name>}` | Whoever is on call for the schedule when the step runs, taking overrides into account |
 | `{team: <name>}` | Every member of the team |
 | `{user: <email>}` | One user |
 | `{channel: <channel>, integration: <name>}` | A shared channel, for example a Slack channel |
+
+A person is reached by a direct message in Slack, through every Slack integration in the configuration, or through the integrations that an optional `via: [<integration>, ...]` on the target names. A person whom no integration can reach is skipped, and the step's event on the timeline says why.
 
 The first three accept `via`, a list of integration names that narrows how the person is reached.
 

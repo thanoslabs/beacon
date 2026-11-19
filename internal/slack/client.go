@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -59,10 +60,11 @@ func (e *APIError) Error() string {
 
 // hints explain the error codes an operator is most likely to meet.
 var hints = map[string]string{
-	"not_in_channel":    "invite the app to the channel, or add the chat:write.public scope for public channels",
-	"channel_not_found": "check the channel; a private channel must be given by its ID and the app must be invited to it",
-	"invalid_auth":      "the bot token is not valid",
-	"missing_scope":     "the app needs the chat:write scope",
+	"not_in_channel":        "invite the app to the channel, or add the chat:write.public scope for public channels",
+	"channel_not_found":     "check the channel; a private channel must be given by its ID and the app must be invited to it",
+	"invalid_auth":          "the bot token is not valid",
+	"missing_scope":         "the app needs the chat:write scope, and users:read.email to find people by email address",
+	"messages_tab_disabled": "the app cannot send direct messages: turn on the Messages tab under App Home in the app's settings",
 }
 
 // permanent lists the error codes that sending the same request again cannot
@@ -81,6 +83,7 @@ var permanent = map[string]bool{
 	"restricted_action": true, "restricted_action_non_threadable_channel": true,
 	"restricted_action_read_only_channel": true, "restricted_action_thread_locked": true,
 	"restricted_action_thread_only_channel": true, "team_access_not_granted": true, "team_not_found": true,
+	"messages_tab_disabled": true, "user_not_found": true,
 	"token_expired": true, "token_revoked": true, "too_many_attachments": true, "two_factor_setup_required": true,
 }
 
@@ -94,6 +97,12 @@ type response struct {
 	Error   string `json:"error"`
 	Channel string `json:"channel"`
 	TS      string `json:"ts"`
+	// User is the user that users.lookupByEmail found.
+	User struct {
+		ID      string `json:"id"`
+		Deleted bool   `json:"deleted"`
+		IsBot   bool   `json:"is_bot"`
+	} `json:"user"`
 }
 
 // call invokes a Web API method with a JSON body. Its errors say whether a
@@ -108,11 +117,22 @@ func (c *Client) call(ctx context.Context, method string, body any) (response, e
 		return response{}, notify.Permanent(fmt.Errorf("slack %s: %w", method, err))
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	return c.do(req, method)
+}
+
+// do sends a request for a Web API method with the bot token and reads the
+// answer.
+func (c *Client) do(req *http.Request, method string) (response, error) {
 	req.Header.Set("Authorization", "Bearer "+c.token.Reveal())
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		// The error names the URL, never a header.
+		// The error names the method, never a header, and not the URL
+		// either: a lookup carries an email address in it.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return response{}, fmt.Errorf("slack %s: %w", method, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck // nothing to do if closing a read body fails
@@ -171,4 +191,30 @@ type request struct {
 	Channel string `json:"channel"`
 	TS      string `json:"ts,omitempty"`
 	message
+}
+
+// LookupByEmail returns the ID of the workspace member with the email
+// address, through users.lookupByEmail, which needs the users:read.email
+// scope. found is false when the workspace has no such member; Slack answers
+// the same for a member who has been deactivated. A bot is nobody's account.
+//
+// The method takes its arguments in the query, not as JSON.
+func (c *Client) LookupByEmail(ctx context.Context, email string) (userID string, found bool, err error) {
+	const method = "users.lookupByEmail"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/"+method+"?"+url.Values{"email": {email}}.Encode(), nil)
+	if err != nil {
+		return "", false, fmt.Errorf("slack %s: the request could not be built", method)
+	}
+	out, err := c.do(req, method)
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Code == "users_not_found" {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if out.User.ID == "" || out.User.Deleted || out.User.IsBot {
+		return "", false, nil
+	}
+	return out.User.ID, true, nil
 }
