@@ -63,7 +63,9 @@ type Server struct {
 
 	token string
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// users maps the email address of each member to their user ID.
+	users    map[string]string
 	channels map[string]string
 	messages map[string]*Message
 	order    []string
@@ -81,6 +83,7 @@ func New(t testing.TB, token string) *Server {
 	t.Helper()
 	s := &Server{
 		token:    token,
+		users:    map[string]string{},
 		channels: map[string]string{"alerts": "C0ALERTS", "C0ALERTS": "C0ALERTS"},
 		messages: map[string]*Message{},
 		failures: map[string][]Failure{},
@@ -97,6 +100,26 @@ func (s *Server) AddChannel(name, id string) {
 	defer s.mu.Unlock()
 	s.channels[name], s.channels[id] = id, id
 }
+
+// AddUser gives the workspace a member with an email address and a user ID,
+// such as "U0ADA". The member can be found by the address and be sent direct
+// messages.
+func (s *Server) AddUser(email, id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.users[strings.ToLower(email)] = id
+}
+
+// RemoveUser takes a member out of the workspace, as deactivating them does.
+func (s *Server) RemoveUser(email string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.users, strings.ToLower(email))
+}
+
+// DM returns the ID of the direct message conversation between the app and
+// a member: where a message posted to the member's user ID lands.
+func DM(userID string) string { return "D" + strings.TrimPrefix(userID, "U") }
 
 // Fail makes the next calls to method fail, one failure per call, in order.
 func (s *Server) Fail(method string, failures ...Failure) {
@@ -143,6 +166,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)
+	// users.lookupByEmail is documented with its arguments in the query or
+	// in a form, not as JSON.
+	if method == "users.lookupByEmail" {
+		body = map[string]any{"email": lookupEmail(r, raw)}
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -168,6 +196,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case method == "users.lookupByEmail" && r.Header.Get("Authorization") == "Bearer "+s.token:
+		reply(w, s.lookupByEmail(r, body))
 	case r.Method != http.MethodPost:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	case r.Header.Get("Authorization") != "Bearer "+s.token:
@@ -185,9 +215,57 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// lookupEmail reads the email argument of users.lookupByEmail from where
+// Slack documents it: the query, or a form body. A JSON body is not read.
+func lookupEmail(r *http.Request, raw []byte) string {
+	if email := r.URL.Query().Get("email"); email != "" {
+		return email
+	}
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
+		if form, err := url.ParseQuery(string(raw)); err == nil {
+			return form.Get("email")
+		}
+	}
+	return ""
+}
+
+func (s *Server) lookupByEmail(r *http.Request, body map[string]any) map[string]any {
+	email, _ := body["email"].(string)
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		return map[string]any{"ok": false, "error": "invalid_post_type"}
+	}
+	if email == "" {
+		return map[string]any{"ok": false, "error": "invalid_arguments"}
+	}
+	id, ok := s.users[strings.ToLower(email)]
+	if !ok {
+		return map[string]any{"ok": false, "error": "users_not_found"}
+	}
+	return map[string]any{"ok": true, "user": map[string]any{
+		"id": id, "team_id": "T0FAKE", "deleted": false, "is_bot": false, "profile": map[string]any{"email": email},
+	}}
+}
+
+// member reports whether id is the user ID of a member.
+func (s *Server) member(id string) bool {
+	for _, known := range s.users {
+		if known == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) postMessage(body map[string]any) map[string]any {
 	name, _ := body["channel"].(string)
 	channel, ok := s.channels[name]
+	if !ok && s.member(name) {
+		// A user ID as the channel opens the direct message conversation
+		// between the app and the member, and the answer names that
+		// conversation.
+		channel, ok = DM(name), true
+		s.channels[channel] = channel
+	}
 	if !ok {
 		return map[string]any{"ok": false, "error": "channel_not_found"}
 	}

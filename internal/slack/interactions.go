@@ -47,8 +47,11 @@ type Interactions struct {
 	alerts Alerts
 	// secrets is replaced as a whole when the configuration is reloaded.
 	secrets atomic.Pointer[map[string]config.Secret]
-	now     func() time.Time
-	http    *http.Client
+	// identities tells which Beacon user a Slack account belongs to. It
+	// holds nil until SetIdentities is called, and then nobody is known.
+	identities atomic.Pointer[Identities]
+	now        func() time.Time
+	http       *http.Client
 }
 
 // NewInteractions returns a handler. secrets maps the name of each Slack
@@ -68,6 +71,44 @@ func NewInteractions(logger *slog.Logger, alerts Alerts, secrets map[string]conf
 // while requests are being handled.
 func (h *Interactions) SetSecrets(secrets map[string]config.Secret) {
 	h.secrets.Store(&secrets)
+}
+
+// Identities tells which Beacon user a chat account belongs to.
+type Identities interface {
+	// UserFor returns the user to whom the account externalID of the
+	// integration with this name belongs, and what to call them. found is
+	// false when the account is linked to nobody.
+	UserFor(ctx context.Context, integration, externalID string) (userID, name string, found bool, err error)
+}
+
+// SetIdentities makes the handler attribute what people do in Slack to the
+// Beacon users their accounts are linked to. Call it before the handler is
+// used.
+func (h *Interactions) SetIdentities(i Identities) { h.identities.Store(&i) }
+
+// actor returns who pressed a button: the Beacon user that the Slack
+// account is linked to, or else the Slack account alone. An account that is
+// linked to nobody may still act. Slack decides who can see a message and
+// press its buttons; Beacon records who it was.
+func (h *Interactions) actor(ctx context.Context, integration, slackUser, slackName string) alert.Actor {
+	chat := alert.ChatUser(Provider, slackUser, slackName)
+	identities := h.identities.Load()
+	if identities == nil || *identities == nil {
+		return chat
+	}
+	userID, name, found, err := (*identities).UserFor(ctx, integration, slackUser)
+	switch {
+	case err != nil:
+		// The press is answered within three seconds whatever happens to
+		// the lookup; the event keeps the Slack account.
+		h.logger.ErrorContext(ctx, "look up the user of a slack account", slog.String("slack_user", slackUser), slog.Any("error", err))
+		return chat
+	case !found:
+		h.logger.InfoContext(ctx, "slack action by an account that is not linked to a Beacon user; the timeline records the Slack account",
+			slog.String("integration", integration), slog.String("slack_user", slackUser))
+		return chat
+	}
+	return alert.LinkedChatUser(userID, Provider, slackUser, name)
 }
 
 // SetClock replaces the clock, so tests can move time.
@@ -125,7 +166,7 @@ func (h *Interactions) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, pressed := range in.Actions {
 		for _, b := range buttons {
 			if pressed.ActionID == b.id {
-				h.apply(ctx, w, in, b.action, pressed.Value)
+				h.apply(ctx, w, r.PathValue("name"), in, b.action, pressed.Value)
 				return
 			}
 		}
@@ -134,7 +175,7 @@ func (h *Interactions) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // apply takes the action on the group and, when it could not be taken, tells
 // the person who pressed the button why.
-func (h *Interactions) apply(ctx context.Context, w http.ResponseWriter, in interaction, action alert.Action, groupID string) {
+func (h *Interactions) apply(ctx context.Context, w http.ResponseWriter, integration string, in interaction, action alert.Action, groupID string) {
 	name := in.User.Username
 	if name == "" {
 		name = in.User.Name
@@ -147,7 +188,7 @@ func (h *Interactions) apply(ctx context.Context, w http.ResponseWriter, in inte
 		if action == alert.ActionSnooze {
 			opts.SnoozeUntil = h.now().Add(SnoozeDuration)
 		}
-		_, err = h.alerts.ApplyToGroup(ctx, groupID, action, alert.ChatUser(Provider, in.User.ID, name), opts)
+		_, err = h.alerts.ApplyToGroup(ctx, groupID, action, h.actor(ctx, integration, in.User.ID, name), opts)
 	}
 
 	var refused *alert.TransitionError

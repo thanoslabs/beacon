@@ -1,0 +1,80 @@
+# An on-call setup: a weekly rotation, and an escalation policy that pages
+# whoever is on call first, then the whole team and a Slack channel, until
+# someone responds. docs/schedules.md and docs/escalation.md explain how the
+# two work; docs/slack.md and docs/access.md explain the Slack app and the
+# identity provider.
+#
+#   beacon validate --config examples/on-call
+#
+# People are named by email address. A person becomes a user when they first
+# sign in, and is paged in a direct message in Slack once Beacon has found
+# the Slack account with the same address.
+
+sources:
+  - name: default
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}
+
+integrations:
+  - name: slack
+    type: slack
+    slack:
+      bot_token: {env: BEACON_SLACK_BOT_TOKEN}
+      signing_secret: {env: BEACON_SLACK_SIGNING_SECRET}
+
+teams:
+  - name: platform
+    display_name: Platform
+    # Everyone in this identity provider group belongs to the team.
+    groups:
+      - platform-engineers
+
+schedules:
+  - name: platform-primary
+    team: platform
+    time_zone: Europe/London
+    rotation:
+      # A week each, in this order, handing over on Monday morning.
+      members:
+        - ada@example.com
+        - grace@example.com
+        - linus@example.com
+      shift_length: 1w
+      handoff:
+        day: monday
+        time: "09:00"
+
+escalation_policies:
+  - name: platform
+    # After the last step, start again once more; then give up.
+    repeat: 1
+    steps:
+      # The person on call, or whoever covers for them by an override.
+      - notify:
+          - schedule: platform-primary
+        timeout: 5m
+      # Five minutes without a response: the whole team, and the channel.
+      - notify:
+          - team: platform
+          - channel: C0123456789
+            integration: slack
+        timeout: 10m
+
+routing:
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  default:
+    team: platform
+    escalation_policy: platform
+
+auth:
+  public_url: https://beacon.example.com
+  oidc:
+    issuer: https://idp.example.com
+    client_id: beacon
+    client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+    scopes: [openid, profile, email, groups]
+  roles:
+    admin: [beacon-admins]
+    member: [platform-engineers]

@@ -88,11 +88,14 @@ func TestSecretsAreNeverPrinted(t *testing.T) {
 		{"database unreachable", []string{"serve", "--config", good, "--database-connect-timeout", "1s", "--listen-address", "127.0.0.1:0"}},
 		{"database URL in a flag", []string{"serve", "--config", good, "--database-url", secretSettings["BEACON_DATABASE_URL"], "--database-connect-timeout", "1s", "--listen-address", "127.0.0.1:0"}},
 		{"validate with secrets", []string{"validate", "--config", bad, "--check-secrets"}},
+		{"preview help", []string{"preview", "-h"}},
+		{"preview, database unreachable", []string{"preview", "--config", good, "--database-connect-timeout", "1s"}},
+		{"preview, invalid configuration", []string{"preview", "--config", bad}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			code, stdout, stderr := runCLIEnv(t, environ, tt.args...)
-			if tt.name != "help" && code == exitOK {
+			if !strings.HasSuffix(tt.name, "help") && code == exitOK {
 				t.Errorf("exit code = 0, want a failure")
 			}
 			assertNoSecrets(t, "output", stdout+stderr, secretMarkers...)

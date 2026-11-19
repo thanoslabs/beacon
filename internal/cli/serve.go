@@ -16,10 +16,12 @@ import (
 
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/auth"
+	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/logging"
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres"
+	"github.com/thanoslabs/beacon/internal/schedule"
 	"github.com/thanoslabs/beacon/internal/server"
 	"github.com/thanoslabs/beacon/internal/silence"
 	"github.com/thanoslabs/beacon/internal/slack"
@@ -33,6 +35,11 @@ const snoozeExpiryInterval = 5 * time.Second
 // sessionCleanupInterval is how often expired sessions are deleted. They are
 // refused from the moment they expire; this only keeps the table small.
 const sessionCleanupInterval = 5 * time.Minute
+
+// scheduleInterval is how often the server looks for handoffs that have
+// fallen due. A handoff is recorded at the moment it was due, however late
+// it is carried out.
+const scheduleInterval = 5 * time.Second
 
 func runServe(ctx context.Context, e env, args []string) error {
 	var (
@@ -127,7 +134,14 @@ func runServe(ctx context.Context, e env, args []string) error {
 	// the groups that were waiting for its end.
 	silences := silence.NewStore(pool)
 	silences.OnExpire(alerts.WakeGroupsWaitingFor)
+	silences.OnExpire(pipeline.WakeEscalationsWaitingFor)
 	pipeline.SetSilences(silences)
+
+	schedules := schedule.NewStore(pool)
+	identities := identity.NewStore(pool)
+	linker := identity.NewLinker(identities, logger)
+	// The escalation engine asks these two who to notify and where.
+	pipeline.SetPeople(people{schedules: schedules, identities: identities})
 
 	registry := server.NewRegistry()
 	srvCfg.Authenticator = signIn
@@ -143,10 +157,22 @@ func runServe(ctx context.Context, e env, args []string) error {
 		pipeline:     pipeline,
 		auth:         signIn,
 		silences:     silence.NewHandler(logger, silences),
+		schedules:    schedules,
+		scheduleAPI:  schedule.NewHandler(logger, schedules),
+		identities:   identities,
+		identityAPI:  identity.NewHandler(logger, identities),
+		linker:       linker,
 	}
 	prov.registerMetrics(registry)
 	prov.ingest.RegisterMetrics(registry)
-	prov.auth.AfterSignIn(prov.refreshSkipped)
+	linker.RegisterMetrics(registry)
+	prov.interactions.SetIdentities(prov)
+	// A sign-in may have made a user: count the skipped members again, and
+	// look for the user's chat accounts without waiting.
+	prov.auth.AfterSignIn(func(ctx context.Context) {
+		prov.refreshSkipped(ctx)
+		linker.Kick()
+	})
 	for _, route := range prov.routes() {
 		srv.Handle(route)
 	}
@@ -165,7 +191,10 @@ func runServe(ctx context.Context, e env, args []string) error {
 	var background sync.WaitGroup
 	background.Go(func() { pipeline.Run(ctx) })
 	background.Go(func() { pipeline.RunGroups(ctx, notify.DefaultGroupPollInterval) })
+	background.Go(func() { pipeline.RunEscalations(ctx, notify.DefaultEscalationPollInterval) })
 	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
+	background.Go(func() { schedules.Run(ctx, logger, scheduleInterval) })
+	background.Go(func() { linker.Run(ctx, identity.DefaultInterval) })
 	background.Go(func() { sessions.RunCleanup(ctx, logger, sessionCleanupInterval) })
 	background.Go(func() {
 		for {
