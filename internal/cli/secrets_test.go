@@ -85,6 +85,7 @@ func TestSecretsAreNeverPrinted(t *testing.T) {
 		{"bad flag value", []string{"serve", "--shutdown-timeout", "soon"}},
 		{"invalid configuration", []string{"serve", "--config", bad}},
 		{"invalid Slack API URL", []string{"serve", "--config", good, "--slack-api-url", "not a url"}},
+		{"invalid Discord API URL", []string{"serve", "--config", good, "--discord-api-url", "not a url"}},
 		{"database unreachable", []string{"serve", "--config", good, "--database-connect-timeout", "1s", "--listen-address", "127.0.0.1:0"}},
 		{"database URL in a flag", []string{"serve", "--config", good, "--database-url", secretSettings["BEACON_DATABASE_URL"], "--database-connect-timeout", "1s", "--listen-address", "127.0.0.1:0"}},
 		{"validate with secrets", []string{"validate", "--config", bad, "--check-secrets"}},

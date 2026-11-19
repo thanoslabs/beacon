@@ -19,6 +19,10 @@ services:
       # integration, such as examples/slack. See docs/slack.md.
       BEACON_SLACK_BOT_TOKEN: ${BEACON_SLACK_BOT_TOKEN:-}
       BEACON_SLACK_SIGNING_SECRET: ${BEACON_SLACK_SIGNING_SECRET:-}
+      # Bot token of the Discord application, read only by a configuration
+      # that has a Discord integration, such as examples/discord. See
+      # docs/discord.md.
+      BEACON_DISCORD_BOT_TOKEN: ${BEACON_DISCORD_BOT_TOKEN:-}
     volumes:
       # The configuration: a directory of YAML files. See docs/configuration.md.
       - ${BEACON_CONFIG_DIR:-./examples/quickstart}:/etc/beacon:ro

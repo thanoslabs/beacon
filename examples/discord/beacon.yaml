@@ -1,0 +1,44 @@
+# One webhook source, and every alert group posted to one Discord channel.
+# docs/discord.md explains how to create the Discord application and where
+# the values come from. Copy this directory, put your application ID, public
+# key and channel ID in place of the ones below, and point Beacon at the
+# copy:
+#
+#   BEACON_CONFIG_DIR=./my-config docker compose up --build
+#
+# The bot token is read from the environment: BEACON_DISCORD_BOT_TOKEN.
+
+sources:
+  - name: default
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}
+
+integrations:
+  - name: discord
+    type: discord
+    discord:
+      bot_token: {env: BEACON_DISCORD_BOT_TOKEN}
+      # Both are on the application's General Information page. Neither is a
+      # secret.
+      application_id: "1234567890123456789"
+      public_key: 5f1c0c8e7a9b4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e
+
+# An alert group is posted to the channels named in the first step of its
+# escalation policy. A Discord channel is named by its numeric ID, in quotes.
+escalation_policies:
+  - name: default
+    steps:
+      - notify:
+          - channel: "1098765432109876543"
+            integration: discord
+        timeout: 5m
+
+# Alerts with the same alertname share one message. It is posted ten seconds
+# after the first of them arrives, and updated at most once a minute as
+# alerts join or resolve. Without these lines the waits are 30s and 5m.
+routing:
+  group_by: [alertname]
+  group_wait: 10s
+  group_interval: 1m
+  default:
+    escalation_policy: default

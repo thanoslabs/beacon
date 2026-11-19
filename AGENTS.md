@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules run their rotations with overrides, and escalation policies page the person on call, teams and channels step by step until someone responds. People are reached through Slack only; Discord, email, outbound webhooks and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules run their rotations with overrides, and escalation policies page the person on call, teams and channels step by step until someone responds. Alert groups are also posted to Discord channels. People are reached through Slack only so far; acting from Discord, email, outbound webhooks and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -54,7 +54,9 @@ Tooling:
 │   │   └── oidctest/         # Test helper: sign in through the Dex of compose.yaml
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
 │   ├── config/               # Typed provisioned objects, the YAML loader and the Secret type
-│   ├── e2e/                  # End-to-end tests: the real binary, Postgres and a fake Slack
+│   ├── discord/              # Discord channel: HTTP API client and message rendering
+│   │   └── discordtest/      # Fake Discord for tests
+│   ├── e2e/                  # End-to-end tests: the real binary, Postgres, a fake Slack and a fake Discord
 │   ├── identity/             # Which Slack or Discord account belongs to which user: lookup by email, link codes
 │   ├── ingest/               # Receivers for Alertmanager, Grafana and the generic webhook: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
@@ -227,10 +229,10 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 - `internal/notify` owns the `notifications` and `notification_attempts` tables. `docs/notifications.md` describes the delivery rules; keep it true.
 - Queue a notification with `Pipeline.Enqueue` inside the transaction of the change that causes it, never after the commit and never by sending directly.
-- A new notification service is a type that implements `notify.Channel`, registered with `Pipeline.Register`. The pipeline must not learn anything specific to a service. A channel returns `notify.Permanent` for failures that retrying cannot fix and `notify.RetryAfter` when the service says how long to wait; anything else is retried with backoff. Channel errors are stored and shown on the timeline, so they must never contain a credential.
+- A new notification service is a type that implements `notify.Channel`, registered with `Pipeline.Register`. The pipeline must not learn anything specific to a service. What every channel says about a group (the state it is shown in, its title, the actions its alerts allow, who was paged) is worked out once, in `internal/notify/describe.go`; a channel only writes it out and escapes it for its service. A channel returns `notify.Permanent` for failures that retrying cannot fix and `notify.RetryAfter` when the service says how long to wait; anything else is retried with backoff. Channel errors are stored and shown on the timeline, so they must never contain a credential.
 - Delivery is at least once. A channel should make a repeated `Send` harmless where the service allows it.
 - Notifications are about groups, and `internal/notify/groups.go` decides when one is queued: what sources report is batched by the group's timer (`Pipeline.NotifyDueGroups`, run every second by `RunGroups`), and what people do is told at once by the observer `Pipeline.Observe`. Updates go to every destination that was told about the group before, and a destination with a notification still waiting gets no second one, because a message is built when it is delivered.
-- A notification for one person carries their `UserID`, and its destination is where the integration reaches them, resolved when it is queued.
+- A notification for one person carries their `UserID`, in the page and in every update that follows it (`enqueueUpdate`), and its destination is where the integration reaches them, resolved when it is queued. A channel for which a person and a shared destination differ, as in Discord, tells them apart by that.
 - Tests of timing move the clock (`SetClock` on the store and the pipeline) and call `NotifyDueGroups` themselves. Do not sleep and do not wait for the ticker.
 
 ### Escalation
@@ -256,9 +258,18 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - The buttons a message offers are derived from the state machine (`alert.Next`), so they cannot drift from what is allowed.
 - `docs/slack.md` is the setup guide. Update it when scopes or settings change.
 
+### Discord
+
+- `internal/discord` is the Discord channel. It calls three routes of Discord's HTTP API, version 10, with the standard library: Create Message, Edit Message and Create DM. There is no Discord SDK and no gateway connection.
+- Beacon has no Discord credentials for testing. Test against `discordtest`, the fake Discord, which checks requests against the documented shapes and limits. When you change what is sent, read Discord's current documentation rather than trusting memory (its source is the repository `discord/discord-api-docs`), teach the fake the same rule, and say in the PR that real delivery is unverified.
+- A destination is a channel ID, or, when the notification carries a `UserID`, the ID of the person's Discord account: `Channel.open` then opens the direct message channel first. A reference is `channelID:messageID`.
+- **No message may notify by a mention.** `allowed_mentions` is always `{"parse": []}`, people who were paged are named inside the embed, and everything that comes from an alert passes through `escape` (and `oneLine` where a line break would start markup) and is clipped to Discord's limits. An edit sends every part of the message, because Discord keeps what an edit leaves out.
+- A 4xx answer other than 429 is permanent: Discord counts refused requests against the sender's address. The client remembers the rate limits Discord reports (`Client.remember`) and holds a request back with `notify.RetryAfter` rather than send one it knows will be refused. That memory is an optimisation of one process, not state.
+- `docs/discord.md` is the setup guide. Update it when permissions or settings change.
+
 ### End-to-end tests
 
-- `internal/e2e` builds the binary, runs it as a process against a real Postgres and the fake Slack, and uses it only from outside: the webhook as a source would, the interactions endpoint as Slack would. It reads the database to check what was stored and never writes to it. The tests run with `go test ./...`, so CI runs them against the Postgres from `compose.yaml`.
+- `internal/e2e` builds the binary, runs it as a process against a real Postgres, the fake Slack and the fake Discord, and uses it only from outside: the webhook as a source would, the interactions endpoint as Slack would. It reads the database to check what was stored and never writes to it. The tests run with `go test ./...`, so CI runs them against the Postgres from `compose.yaml`.
 - The test configuration sets `group_wait: 0s` and `group_interval: 1s`, so a notification follows a delivery within about two seconds. The tests wait for the message they expect, never for a time, and must not count notifications: how many updates a group gets depends on what the timer batched.
 - `TestFirstPath` is the path the product exists for: webhook in, Slack message out, acknowledgement from Slack, resolve from the source. The acknowledgement needs a Beacon user, so the test signs one in through Dex first (`startSignedIn`); `TestSlackWithoutSignIn` is the same path in an install with no identity provider, where the alert can be resolved from Slack and not acknowledged. `TestFirstPathWithEscalation` is the same path with people in it: the person on call is paged, the second step tells the team and a channel, and an acknowledgement stops the escalation. A change that breaks either is not ready. Extend these tests when a feature changes that path, for example when routing decides where the message goes.
 - Prefer a package test for a single behaviour; add an end-to-end test for a path that crosses packages.

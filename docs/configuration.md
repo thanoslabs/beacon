@@ -65,7 +65,7 @@ An integration is a connection to a notification service.
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | Identity |
-| `type` | yes | `slack`, `discord`, `email` or `webhook`. Only `slack` delivers today; see [[slack]]. |
+| `type` | yes | `slack`, `discord`, `email` or `webhook`. `slack` and `discord` deliver today; see [[slack]] and [[discord]]. |
 | `slack`, `discord`, `email` or `webhook` | yes | The settings. Exactly the block that matches `type`. |
 
 | Type | Settings |

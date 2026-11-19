@@ -53,15 +53,15 @@ With this policy the person on call for `platform-primary` is paged first. If fi
 | `{schedule: <name>}` | Whoever is on call for the schedule at that moment, taking overrides into account ([[schedules#Who is on call]]) |
 | `{team: <name>}` | Every member of the team: the ones listed in the files and the ones who belong through an identity provider group ([[access]]) |
 | `{user: <email>}` | The user with that email address |
-| `{channel: <channel>, integration: <name>}` | A shared destination, such as a Slack channel |
+| `{channel: <channel>, integration: <name>}` | A shared destination: a Slack channel, or a Discord channel by its numeric ID |
 
 People are resolved when the step runs, not when the alert arrives: a step that runs after a handoff pages the person who is on call by then.
 
 ### How a person is reached
 
-A person is notified through an integration that can reach them directly. **Today that is a direct message in Slack**, to the Slack account that Beacon has linked to the user by their email address ([[slack#People]]). Email and Discord will be added as those integrations are.
+A person is notified through an integration that can reach them directly. **Today that is a direct message in Slack or in Discord**: to the Slack account that Beacon has linked to the user by their email address ([[slack#People]]), and to the Discord account that the person has linked themselves ([[discord#People]]). Email will be added as that integration is.
 
-- Without `via`, a person is reached through every Slack integration in the configuration.
+- Without `via`, a person is reached through every Slack and Discord integration in the configuration.
 - `via: [<integration>, ...]` on a schedule, team or user target narrows that to the integrations it names.
 - The message is the group's message, with the same buttons as in a channel, and it is updated in place like one.
 
@@ -71,14 +71,14 @@ A target that cannot be notified is skipped. The step goes on with the others, e
 
 | Reason | Meaning |
 |---|---|
-| `the person has no linked account for this integration` | Beacon found no Slack account with the user's email address. See [[slack#People]]; the metric `beacon_users_without_identity` counts such users. |
+| `the person has no linked account for this integration` | Beacon found no Slack account with the user's email address, or the person has not linked their Discord account. See [[slack#People]] and [[discord#People]]; the metric `beacon_users_without_identity` counts such users. |
 | `the schedule has nobody on call: a gap in coverage` | No member of the rotation is a user, and no override is in force. A gap is a legitimate state: it is logged as a warning, like every skip, and never as an error. |
 | `the team has no members who are users` | |
 | `no user has this email address` | The person has never signed in |
 | `the integration does not deliver notifications` | The target names an integration of a type that Beacon cannot send through yet, such as email |
-| `no integration in the configuration can reach a person directly` | There is no Slack integration |
+| `no integration in the configuration can reach a person directly` | There is no Slack and no Discord integration |
 
-**A person who has no linked account stays visible.** They are skipped for delivery, because there is nowhere to deliver to, but they were meant to be paged, and Beacon says so wherever it names who was paged: by their name followed by the service they are not connected to, as in `Grace Hopper (Slack not connected)`. The step's event holds that text as `shown_as`, with `not_connected`, and the group's message in Slack lists the person that way next to the people it mentions ([[slack#The message]]).
+**A person who has no linked account stays visible.** They are skipped for delivery, because there is nowhere to deliver to, but they were meant to be paged, and Beacon says so wherever it names who was paged: by their name followed by the service they are not connected to, as in `Grace Hopper (Slack not connected)`. The step's event holds that text as `shown_as`, with `not_connected`, and the group's messages in Slack and in Discord list the person that way next to the people they mention ([[slack#The message]], [[discord#The message]]).
 
 A step in which everyone was skipped still counts: its timeout runs, and the next step follows. `beacon serve` logs a warning at start and at every reload for a policy none of whose targets can be reached at all.
 

@@ -17,6 +17,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/access"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/config"
+	"github.com/thanoslabs/beacon/internal/discord"
 	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/notify"
@@ -36,8 +37,10 @@ type provisioner struct {
 	// path is where the configuration is read from; empty means none.
 	path   string
 	getenv func(string) string
-	// slackAPIURL is a process setting, not part of an integration.
-	slackAPIURL string
+	// slackAPIURL and discordAPIURL are process settings, not part of an
+	// integration.
+	slackAPIURL   string
+	discordAPIURL string
 
 	ingest       *ingest.Handler
 	interactions *slack.Interactions
@@ -388,39 +391,36 @@ func (p *provisioner) applyRouting(ctx context.Context, cfg config.Config, route
 func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config, rows map[provision.Kind]map[string]string) {
 	integrations, policies := rows[provision.Integrations], rows[provision.EscalationPolicies]
 	schedules, teams := rows[provision.Schedules], rows[provision.Teams]
-	ids := make(map[string]string, len(cfg.Integrations))
 	channels := make(map[string]notify.Channel, len(cfg.Integrations))
 	signingSecrets := make(map[string]config.Secret, len(cfg.Integrations))
 	clients := make(map[string]*slack.Client, len(cfg.Integrations))
 	// The chat services in which people have accounts. Slack can be asked
 	// for an account by email address; in Discord people link theirs.
 	var chat []identity.Integration
-	for _, i := range cfg.Integrations {
-		if i.Type == config.IntegrationTypeDiscord {
-			chat = append(chat, identity.Integration{ID: integrations[i.Name], Name: i.Name, Provider: identity.ProviderDiscord})
-		}
-		if i.Type != config.IntegrationTypeSlack {
-			p.logger.WarnContext(ctx, "this type of integration does not deliver yet, so nothing is sent through it",
-				slog.String("integration", i.Name), slog.String("type", i.Type))
-			continue
-		}
-		ids[i.Name] = integrations[i.Name]
-		client := slack.NewClient(p.slackAPIURL, i.Slack.BotToken)
-		channels[integrations[i.Name]] = slack.NewChannel(client)
-		signingSecrets[i.Name] = i.Slack.SigningSecret
-		clients[i.Name] = client
-		chat = append(chat, identity.Integration{ID: integrations[i.Name], Name: i.Name, Provider: identity.ProviderSlack, Lookup: client})
-		p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
-			slog.String("interactions_path", strings.Replace(slack.InteractionsPath, "{name}", i.Name, 1)))
-	}
-
 	// A person is reached through every integration that can reach one
-	// directly, unless the target narrows that with via. Today that is a
-	// direct message in Slack.
+	// directly, unless the target narrows that with via: a direct message
+	// in Slack or in Discord.
 	var direct []notify.Via
 	for _, i := range cfg.Integrations {
-		if _, delivers := ids[i.Name]; delivers && i.Type == config.IntegrationTypeSlack {
-			direct = append(direct, notify.Via{IntegrationID: ids[i.Name], Name: i.Name, Provider: i.Type})
+		id := integrations[i.Name]
+		switch i.Type {
+		case config.IntegrationTypeSlack:
+			client := slack.NewClient(p.slackAPIURL, i.Slack.BotToken)
+			channels[id] = slack.NewChannel(client)
+			signingSecrets[i.Name] = i.Slack.SigningSecret
+			clients[i.Name] = client
+			chat = append(chat, identity.Integration{ID: id, Name: i.Name, Provider: identity.ProviderSlack, Lookup: client})
+			direct = append(direct, notify.Via{IntegrationID: id, Name: i.Name, Provider: i.Type})
+			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
+				slog.String("interactions_path", strings.Replace(slack.InteractionsPath, "{name}", i.Name, 1)))
+		case config.IntegrationTypeDiscord:
+			channels[id] = discord.NewChannel(discord.NewClient(p.discordAPIURL, i.Discord.BotToken))
+			chat = append(chat, identity.Integration{ID: id, Name: i.Name, Provider: identity.ProviderDiscord})
+			direct = append(direct, notify.Via{IntegrationID: id, Name: i.Name, Provider: i.Type})
+			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type))
+		default:
+			p.logger.WarnContext(ctx, "this type of integration does not deliver yet, so nothing is sent through it",
+				slog.String("integration", i.Name), slog.String("type", i.Type))
 		}
 	}
 	// via returns the integration with a name as a step uses it. One that
@@ -470,7 +470,7 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 		byID[policies[policy.Name]] = out
 		p.logger.InfoContext(ctx, "escalation policy configured", slog.String("policy", policy.Name), slog.Int("steps", len(out.Steps)), slog.Int("repeat", out.Repeat))
 		if !notifies[policy.Name] {
-			p.logger.WarnContext(ctx, "this escalation policy can notify nobody: none of its targets is reached through an integration that delivers; today that is a Slack integration, for channels and for people",
+			p.logger.WarnContext(ctx, "this escalation policy can notify nobody: none of its targets is reached through an integration that delivers; today that is a Slack or a Discord integration, for channels and for people",
 				slog.String("policy", policy.Name))
 		}
 	}

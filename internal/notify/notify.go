@@ -113,9 +113,9 @@ func RetryAfter(err error, d time.Duration) error {
 	return &deliveryError{err: err, retryAfter: d}
 }
 
-// classify returns whether err is permanent and the wait the channel asked
-// for, if any.
-func classify(err error) (permanent bool, retryAfter time.Duration) {
+// Classify returns what a channel said about a failure: whether err is
+// permanent, and the wait the channel asked for, if any.
+func Classify(err error) (permanent bool, retryAfter time.Duration) {
 	var de *deliveryError
 	if errors.As(err, &de) {
 		return de.permanent, de.retryAfter

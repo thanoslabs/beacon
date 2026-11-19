@@ -36,7 +36,9 @@ var (
 	headerNameRE = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_|~-]+$`)
 	publicKeyRE  = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 	snowflakeRE  = regexp.MustCompile(`^[0-9]{1,20}$`)
-	weekdays     = map[string]bool{"monday": true, "tuesday": true, "wednesday": true, "thursday": true, "friday": true, "saturday": true, "sunday": true}
+	// discordChannelRE matches the ID of a Discord channel.
+	discordChannelRE = regexp.MustCompile(`^[0-9]{15,22}$`)
+	weekdays         = map[string]bool{"monday": true, "tuesday": true, "wednesday": true, "thursday": true, "friday": true, "saturday": true, "sunday": true}
 )
 
 // Read loads the configuration at path and validates it. The error is an
@@ -233,10 +235,14 @@ func (c Config) validate(v *validator) {
 	}
 
 	integrations := map[string]Origin{}
+	// types maps each integration to its type, which decides what the
+	// channel of a target must look like.
+	types := map[string]string{}
 	for _, in := range c.Integrations {
 		o := v.object(in.Origin, kindIntegration, in.Name)
 		o.name(in.Name, integrations)
 		in.validate(o)
+		types[in.Name] = in.Type
 	}
 
 	teams := map[string]Origin{}
@@ -283,7 +289,7 @@ func (c Config) validate(v *validator) {
 				o.errorf(at+".notify", "at least one target is required")
 			}
 			for j, t := range step.Notify {
-				t.validate(o, fmt.Sprintf("%s.notify[%d]", at, j), schedules, teams, integrations)
+				t.validate(o, fmt.Sprintf("%s.notify[%d]", at, j), schedules, teams, integrations, types)
 			}
 		}
 	}
@@ -520,7 +526,7 @@ func (r Rotation) validate(o object) {
 	}
 }
 
-func (t Target) validate(o object, at string, schedules, teams, integrations map[string]Origin) {
+func (t Target) validate(o object, at string, schedules, teams, integrations map[string]Origin, types map[string]string) {
 	forms := 0
 	for _, set := range []bool{t.Schedule != "", t.Team != "", t.User != "", t.Channel != "" || t.Integration != ""} {
 		if set {
@@ -551,6 +557,10 @@ func (t Target) validate(o object, at string, schedules, teams, integrations map
 		}
 		if len(t.Via) > 0 {
 			o.errorf(at+".via", "applies to schedule, team and user targets, not to a channel")
+		}
+		// What a channel is depends on the service.
+		if t.Channel != "" && types[t.Integration] == IntegrationTypeDiscord && !discordChannelRE.MatchString(t.Channel) {
+			o.errorf(at+".channel", "must be the numeric ID of the Discord channel, in quotes; Discord does not take a channel by name")
 		}
 		return
 	}

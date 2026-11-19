@@ -182,6 +182,13 @@ func TestServeRejectsABadSlackAPIURL(t *testing.T) {
 	}
 }
 
+func TestServeRejectsABadDiscordAPIURL(t *testing.T) {
+	code, _, stderr := runCLIEnv(t, nil, "serve", "--database-url", "postgres://localhost/beacon", "--discord-api-url", "discord.com/api")
+	if code != exitError || !strings.Contains(stderr, "--discord-api-url must be an http or https URL") {
+		t.Errorf("exit %d, stderr = %q", code, stderr)
+	}
+}
+
 // TestServeWarnsAboutWhatIsNotImplemented starts with an integration type
 // that is valid in the files but has no behaviour yet. It is stored, and the
 // log says that it does nothing.

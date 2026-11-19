@@ -39,6 +39,8 @@ escalation_policies:
           - schedule: primary
             team: platform
           - {}
+          - channel: "#alerts"
+            integration: discord
       - notify: []
         timeout: 0s
   - name: empty

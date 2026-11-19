@@ -288,7 +288,7 @@ func (p *Pipeline) record(ctx context.Context, n Notification, ref string, sendE
 		sentAt = &now
 	} else {
 		errText = truncate(sendErr.Error(), maxErrorLength)
-		permanent, retryAfter := classify(sendErr)
+		permanent, retryAfter := Classify(sendErr)
 		switch {
 		case permanent:
 			outcome, status = OutcomePermanentError, "failed"

@@ -21,3 +21,4 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[silences]]: keep Beacon quiet about matching alerts for a period, through the API
 - [[notifications]]: how notifications are queued, retried and recorded
 - [[slack]]: set up the Slack app and send alerts to a channel
+- [[discord]]: set up the Discord application and send alerts to a channel
