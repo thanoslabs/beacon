@@ -497,7 +497,9 @@ func resolve(ctx context.Context, tx pgx.Tx, people People, target StepTarget) (
 	switch target.Kind {
 	case TargetSchedule:
 		persons, err = people.OnCall(ctx, tx, target.ID)
-		none = "nobody is on call for the schedule"
+		// A gap in coverage is a state a team may have chosen. The step
+		// says so and goes on.
+		none = "the schedule has nobody on call: a gap in coverage"
 	case TargetTeam:
 		persons, err = people.TeamMembers(ctx, tx, target.ID)
 		none = "the team has no members who are users"

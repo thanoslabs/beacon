@@ -600,7 +600,7 @@ func TestPeopleTargets(t *testing.T) {
 	}
 	if got, want := list("skipped"), strings.Join([]string{
 		"team platform | linus@example.com | chat | the person has no linked account for this integration",
-		"schedule empty | nobody is on call for the schedule",
+		"schedule empty | the schedule has nobody on call: a gap in coverage",
 		"team nobody | the team has no members who are users",
 		"user stranger@example.com | no user has this email address",
 		"user ken@example.com | ken@example.com | email | the integration does not deliver notifications",
@@ -608,6 +608,13 @@ func TestPeopleTargets(t *testing.T) {
 		"channel oncall@example.com | email | the integration does not deliver notifications",
 	}, "\n"); got != want {
 		t.Errorf("skipped:\n%s\nwant:\n%s", got, want)
+	}
+	// A schedule with nobody on call is a warning, never an error.
+	if want := `"level":"WARN","msg":"escalation target not notified","group_id":"` + g + `","policy":"people","step":1,"target":"schedule empty","user":"","integration":"","reason":"the schedule has nobody on call: a gap in coverage"`; !strings.Contains(logs.String(), want) {
+		t.Errorf("the logs do not contain %s:\n%s", want, logs)
+	}
+	if strings.Contains(logs.String(), `"level":"ERROR"`) {
+		t.Errorf("a step with people who cannot be reached logged an error:\n%s", logs)
 	}
 	// The gap is in the log, with who and why.
 	if want := `"level":"WARN","msg":"escalation target not notified","group_id":"` + g + `","policy":"people","step":1,"target":"team platform","user":"linus@example.com","integration":"chat","reason":"the person has no linked account for this integration"`; !strings.Contains(logs.String(), want) {

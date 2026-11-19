@@ -383,6 +383,10 @@ func TestMembersWhoAreNotUsers(t *testing.T) {
 	if len(applied.Skipped) != 3 || applied.Skipped[0] != (schedule.Skipped{Schedule: "primary", Email: ada}) {
 		t.Fatalf("Skipped = %+v, want all three", applied.Skipped)
 	}
+	// With nobody who can take a shift, the schedule has a gap in coverage.
+	if len(applied.Uncovered) != 1 || applied.Uncovered[0] != "primary" {
+		t.Errorf("Uncovered = %v, want the schedule", applied.Uncovered)
+	}
 	if p := f.position("primary"); p.Email != "" || p.UserID != "" {
 		t.Fatalf("position = %+v, want nobody", p)
 	}
@@ -410,8 +414,8 @@ func TestMembersWhoAreNotUsers(t *testing.T) {
 		"linus Jan 4 09:00..Jan 5 09:00",
 		"ada Jan 5 09:00..",
 	})
-	if applied := f.apply(rota("primary", "UTC", ada, grace, linus)); len(applied.Skipped) != 1 || applied.Skipped[0].Email != grace {
-		t.Errorf("Skipped = %+v, want Grace", applied.Skipped)
+	if applied := f.apply(rota("primary", "UTC", ada, grace, linus)); len(applied.Skipped) != 1 || applied.Skipped[0].Email != grace || len(applied.Uncovered) != 0 {
+		t.Errorf("Skipped = %+v and Uncovered = %v, want Grace and no gap", applied.Skipped, applied.Uncovered)
 	}
 }
 
