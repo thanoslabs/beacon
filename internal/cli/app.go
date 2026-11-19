@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/thanoslabs/beacon/internal/access"
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/config"
 	"github.com/thanoslabs/beacon/internal/discord"
@@ -58,14 +59,18 @@ type provisioner struct {
 	pipeline         *notify.Pipeline
 	// people is the directory the escalation engine asks. It is told which
 	// integrations reach a person by email address.
-	people      *people
-	auth        *auth.Handler
-	silences    *silence.Handler
-	schedules   *schedule.Store
-	scheduleAPI *schedule.Handler
-	identities  *identity.Store
-	identityAPI *identity.Handler
-	linker      *identity.Linker
+	people   *people
+	auth     *auth.Handler
+	silences *silence.Handler
+	// alertsAPI serves the alerts and their groups.
+	alertsAPI *api.Alerts
+	// provisionedAPI shows what the configuration defines, and the users.
+	provisionedAPI *api.Provisioned
+	schedules      *schedule.Store
+	scheduleAPI    *schedule.Handler
+	identities     *identity.Store
+	identityAPI    *identity.Handler
+	linker         *identity.Linker
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -102,7 +107,13 @@ func (p *provisioner) routes() []access.Route {
 		{Pattern: "POST " + slack.InteractionsPath, Level: access.Public, Handler: http.HandlerFunc(p.handleInteractions)},
 		{Pattern: "POST " + ReloadPath, Level: access.Admin, Handler: http.HandlerFunc(p.handleReload)},
 	}
+	// The description of the API is the same for everyone.
+	routes = append(routes, api.OpenAPIRoutes()...)
 	routes = append(routes, p.auth.Routes()...)
+	// Members see alerts and respond to them.
+	routes = append(routes, p.alertsAPI.Routes()...)
+	// Members read what the configuration defines; nobody changes it here.
+	routes = append(routes, p.provisionedAPI.Routes()...)
 	// Silences are runtime state that members create and end.
 	routes = append(routes, p.silences.Routes()...)
 	// So are the overrides of schedules.
@@ -249,6 +260,7 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 			slog.String("team", s.Team), slog.String("email", s.Email))
 	}
 	p.teams.Store(&cfg.Teams)
+	p.provisionedAPI.SetConfig(cfg)
 	p.countSkipped(cfg.Teams, rows.Skipped)
 
 	p.reportSchedules(ctx, cfg, rotations)

@@ -391,6 +391,8 @@ The **bootstrap admin** has a row in `users` with the email address `bootstrap-a
 
 ### Alerts
 
+The alerts API lists alerts newest first and a page at a time ([[api#Lists]]), which two indexes on (`started_at`, `id`) serve: one over every alert, and one over the alerts that are not resolved.
+
 **`alerts`**
 
 | Column | Type | Notes |

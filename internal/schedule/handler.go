@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/thanoslabs/beacon/internal/access"
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/config"
 )
 
@@ -238,10 +239,15 @@ func (h *Handler) listOverrides(w http.ResponseWriter, r *http.Request) {
 		h.internal(w, r, "list overrides", err)
 		return
 	}
-	if overrides == nil {
-		overrides = []Override{}
+	page, next, field, problem, ok := api.Slice(overrides, r.URL.Query())
+	if !ok {
+		h.fail(w, r, http.StatusBadRequest, field, problem)
+		return
 	}
-	h.write(w, r, http.StatusOK, map[string][]Override{"overrides": overrides})
+	h.write(w, r, http.StatusOK, struct {
+		Overrides  []Override `json:"overrides"`
+		NextCursor string     `json:"next_cursor,omitempty"`
+	}{page, next})
 }
 
 // overrideRequest is the body of a request for a new override.
