@@ -202,6 +202,23 @@ func (s *Store) Group(ctx context.Context, groupID string) (Group, error) {
 	return g, err
 }
 
+// GroupWithAlerts returns a group and its alerts, oldest first, read
+// through tx: what the transaction sees, including what it has changed.
+func (s *Store) GroupWithAlerts(ctx context.Context, tx pgx.Tx, groupID string) (Group, []Alert, error) {
+	g, err := scanGroup(tx.QueryRow(ctx, `SELECT `+groupColumns+` FROM alert_groups WHERE id = $1`, groupID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Group{}, nil, ErrNotFound
+	}
+	if err != nil {
+		return Group{}, nil, fmt.Errorf("read alert group: %w", err)
+	}
+	alerts, err := collectAlerts(tx.Query(ctx, `SELECT `+alertColumns+` FROM alerts WHERE group_id = $1 ORDER BY started_at, id`, groupID))
+	if err != nil {
+		return Group{}, nil, fmt.Errorf("read the alerts of group %s: %w", groupID, err)
+	}
+	return g, alerts, nil
+}
+
 // retryDueGroupAfter is how long a group whose notification could not be
 // queued waits before it is tried again. Without the wait it would be first
 // in line every time, and hold up every other group.

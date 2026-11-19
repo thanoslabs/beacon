@@ -3,6 +3,7 @@ package schedule_test
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -90,7 +91,14 @@ func (f *fixture) apply(schedules ...config.Schedule) schedule.Applied {
 
 func (f *fixture) applyWith(store *schedule.Store, schedules ...config.Schedule) schedule.Applied {
 	f.t.Helper()
-	f.cfg = config.Config{Teams: []config.Team{{Name: "platform"}}, Schedules: schedules}
+	// The teams that the schedules name, and two that are always there.
+	teams := []config.Team{{Name: "platform"}, {Name: "idle"}}
+	for _, sched := range schedules {
+		if !slices.ContainsFunc(teams, func(t config.Team) bool { return t.Name == sched.Team }) {
+			teams = append(teams, config.Team{Name: sched.Team})
+		}
+	}
+	f.cfg = config.Config{Teams: teams, Schedules: schedules}
 	res, err := provision.Reconcile(context.Background(), f.pool, f.cfg)
 	if err != nil {
 		f.t.Fatalf("Reconcile: %v", err)

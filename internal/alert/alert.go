@@ -171,6 +171,13 @@ func ChatUser(provider, externalID, name string) Actor {
 	return Actor{Type: ActorUser, Provider: provider, ExternalID: externalID, Name: name}
 }
 
+// LinkedChatUser is the actor for a person acting from a chat service whose
+// account there is linked to a Beacon user. The event names both: the user,
+// and the account they acted from.
+func LinkedChatUser(userID, provider, externalID, name string) Actor {
+	return Actor{Type: ActorUser, ID: userID, Provider: provider, ExternalID: externalID, Name: name}
+}
+
 // EventType names what happened in a timeline event.
 type EventType string
 

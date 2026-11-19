@@ -17,6 +17,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/access"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/config"
+	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/provision"
@@ -44,6 +45,10 @@ type provisioner struct {
 	auth         *auth.Handler
 	silences     *silence.Handler
 	schedules    *schedule.Store
+	scheduleAPI  *schedule.Handler
+	identities   *identity.Store
+	identityAPI  *identity.Handler
+	linker       *identity.Linker
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -81,7 +86,11 @@ func (p *provisioner) routes() []access.Route {
 	}
 	routes = append(routes, p.auth.Routes()...)
 	// Silences are runtime state that members create and end.
-	return append(routes, p.silences.Routes()...)
+	routes = append(routes, p.silences.Routes()...)
+	// So are the overrides of schedules.
+	routes = append(routes, p.scheduleAPI.Routes()...)
+	// A person sees their own chat accounts.
+	return append(routes, p.identityAPI.Routes()...)
 }
 
 // handleReload reloads the configuration for an admin. It does what SIGHUP
@@ -214,7 +223,7 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 	p.reportSchedules(ctx, cfg, rotations)
 	p.applySources(ctx, cfg, rows.IDs[provision.Sources])
 	p.applyRouting(ctx, cfg, router)
-	p.applyNotifications(ctx, cfg, rows.IDs[provision.Integrations], rows.IDs[provision.EscalationPolicies])
+	p.applyNotifications(ctx, cfg, rows.IDs)
 	p.auth.Configure(ctx, cfg.Auth, cfg.Teams)
 	p.successful.Set(1)
 	p.lastOK.SetToCurrentTime()
@@ -369,66 +378,108 @@ func (p *provisioner) applyRouting(ctx context.Context, cfg config.Config, route
 }
 
 // applyNotifications gives the pipeline a channel for each configured
-// integration and the escalation policies, and tells the interactions
-// endpoint the signing secrets. integrations and policies map each object to
-// its row.
-func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config, integrations, policies map[string]string) {
+// integration and the escalation policies, with their targets resolved to
+// rows, and tells the interactions endpoint the signing secrets. rows maps
+// each object to its row, by kind.
+func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config, rows map[provision.Kind]map[string]string) {
+	integrations, policies := rows[provision.Integrations], rows[provision.EscalationPolicies]
+	schedules, teams := rows[provision.Schedules], rows[provision.Teams]
 	ids := make(map[string]string, len(cfg.Integrations))
 	channels := make(map[string]notify.Channel, len(cfg.Integrations))
 	signingSecrets := make(map[string]config.Secret, len(cfg.Integrations))
+	// The chat services in which people have accounts. Slack can be asked
+	// for an account by email address; in Discord people link theirs.
+	var chat []identity.Integration
 	for _, i := range cfg.Integrations {
+		if i.Type == config.IntegrationTypeDiscord {
+			chat = append(chat, identity.Integration{ID: integrations[i.Name], Name: i.Name, Provider: identity.ProviderDiscord})
+		}
 		if i.Type != config.IntegrationTypeSlack {
 			p.logger.WarnContext(ctx, "this type of integration does not deliver yet, so nothing is sent through it",
 				slog.String("integration", i.Name), slog.String("type", i.Type))
 			continue
 		}
 		ids[i.Name] = integrations[i.Name]
-		channels[integrations[i.Name]] = slack.NewChannel(slack.NewClient(p.slackAPIURL, i.Slack.BotToken))
+		client := slack.NewClient(p.slackAPIURL, i.Slack.BotToken)
+		channels[integrations[i.Name]] = slack.NewChannel(client)
 		signingSecrets[i.Name] = i.Slack.SigningSecret
+		chat = append(chat, identity.Integration{ID: integrations[i.Name], Name: i.Name, Provider: identity.ProviderSlack, Lookup: client})
 		p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
 			slog.String("interactions_path", strings.Replace(slack.InteractionsPath, "{name}", i.Name, 1)))
 	}
 
-	// Of an escalation policy, only the channel targets of the first step
-	// are acted on until the escalation engine exists. What is left out is
-	// said here, once per policy, so that nobody waits for a page that
-	// cannot come.
+	// A person is reached through every integration that can reach one
+	// directly, unless the target narrows that with via. Today that is a
+	// direct message in Slack.
+	var direct []notify.Via
+	for _, i := range cfg.Integrations {
+		if _, delivers := ids[i.Name]; delivers && i.Type == config.IntegrationTypeSlack {
+			direct = append(direct, notify.Via{IntegrationID: ids[i.Name], Name: i.Name})
+		}
+	}
+	// via returns the integration with a name as a step uses it. One that
+	// does not deliver yet is kept: the step then records that it skipped
+	// it, which is better than leaving it out without a trace.
+	via := func(name string) notify.Via { return notify.Via{IntegrationID: integrations[name], Name: name} }
+
 	byID := make(map[string]notify.Policy, len(cfg.EscalationPolicies))
 	notifies := map[string]bool{}
 	for _, policy := range cfg.EscalationPolicies {
-		out := notify.Policy{Name: policy.Name}
-		people := 0
-		for _, t := range policy.Steps[0].Notify {
-			switch id, delivers := ids[t.Integration]; {
-			case t.Channel == "":
-				people++
-			case delivers:
-				out.FirstStep = append(out.FirstStep, notify.Target{IntegrationID: id, Destination: t.Channel})
+		out := notify.Policy{Name: policy.Name, Repeat: policy.Repeat}
+		for _, step := range policy.Steps {
+			next := notify.Step{Timeout: time.Duration(step.Timeout)}
+			for _, t := range step.Notify {
+				var target notify.StepTarget
+				switch {
+				case t.Channel != "":
+					target = notify.ChannelTarget(integrations[t.Integration], t.Integration, t.Channel)
+				case t.Schedule != "":
+					target = notify.StepTarget{Kind: notify.TargetSchedule, Name: t.Schedule, ID: schedules[t.Schedule], Via: direct}
+				case t.Team != "":
+					target = notify.StepTarget{Kind: notify.TargetTeam, Name: t.Team, ID: teams[t.Team], Via: direct}
+				default:
+					target = notify.StepTarget{Kind: notify.TargetUser, Name: config.NormalizeEmail(t.User), Via: direct}
+				}
+				if len(t.Via) > 0 {
+					target.Via = nil
+					for _, name := range t.Via {
+						target.Via = append(target.Via, via(name))
+					}
+				}
+				for _, v := range target.Via {
+					if _, delivers := channels[v.IntegrationID]; delivers {
+						notifies[policy.Name] = true
+					}
+				}
+				next.Targets = append(next.Targets, target)
 			}
+			out.Steps = append(out.Steps, next)
 		}
 		byID[policies[policy.Name]] = out
-		notifies[policy.Name] = len(out.FirstStep) > 0
-		p.logger.InfoContext(ctx, "escalation policy configured", slog.String("policy", policy.Name), slog.Int("first_step_channels", len(out.FirstStep)))
-		if people > 0 || len(policy.Steps) > 1 || policy.Repeat > 0 {
-			p.logger.WarnContext(ctx, "escalation is not implemented yet: only the channel targets of a policy's first step are notified, once; its schedule, team and user targets, its later steps and its repeats do nothing",
-				slog.String("policy", policy.Name), slog.Int("first_step_people_targets_skipped", people), slog.Int("later_steps_skipped", len(policy.Steps)-1), slog.Int("repeats_skipped", policy.Repeat))
+		p.logger.InfoContext(ctx, "escalation policy configured", slog.String("policy", policy.Name), slog.Int("steps", len(out.Steps)), slog.Int("repeat", out.Repeat))
+		if !notifies[policy.Name] {
+			p.logger.WarnContext(ctx, "this escalation policy can notify nobody: none of its targets is reached through an integration that delivers; today that is a Slack integration, for channels and for people",
+				slog.String("policy", policy.Name))
 		}
 	}
 	if cfg.Routing == nil {
 		p.logger.WarnContext(ctx, "alerts are stored but nobody is notified: the configuration has no routing block, so alerts have no escalation policy")
-	} else {
-		if name := cfg.Routing.Default.EscalationPolicy; !notifies[name] {
-			p.logger.WarnContext(ctx, "alerts are stored but nobody is notified when no routing rule matches: the first step of the default escalation policy names no channel of a Slack integration",
-				slog.String("policy", name))
-		}
-		for _, rule := range cfg.Routing.Rules {
-			if !notifies[rule.EscalationPolicy] {
-				p.logger.WarnContext(ctx, "alerts that match this routing rule are stored but nobody is notified: the first step of its escalation policy names no channel of a Slack integration",
-					slog.String("rule", rule.Name), slog.String("policy", rule.EscalationPolicy))
-			}
-		}
 	}
 	p.pipeline.SetChannels(channels)
 	p.pipeline.SetPolicies(byID)
 	p.interactions.SetSecrets(signingSecrets)
+	p.linker.SetIntegrations(chat)
+	// The new integrations are asked about their users at once.
+	p.linker.Kick()
+}
+
+// UserFor tells the Slack handler which Beacon user an account of the
+// integration with this name belongs to.
+func (p *provisioner) UserFor(ctx context.Context, integration, externalID string) (userID, name string, found bool, err error) {
+	in, ok := p.linker.Integrations()[integration]
+	if !ok {
+		return "", "", false, nil
+	}
+	u, found, err := p.identities.UserFor(ctx, p.pool, in.ID, externalID)
+	return u.ID, u.Name, found, err
 }
