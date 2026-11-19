@@ -128,6 +128,12 @@ For a group of several alerts it shows instead:
 - a list of the alerts, those that fire first, each with its `summary` and the labels that tell it apart. Ten are listed and the rest are counted;
 - what last happened, as above.
 
+Under that, once the group's escalation policy has paged people, a line says who: **Paged:** followed by everyone the policy has paged so far ([[escalation]]).
+
+- A person whose Slack account is linked is mentioned, so the name is the one your workspace knows and leads to them. Slack notifies a mentioned person when a message is first posted and not when it is edited.
+- A person who was to be paged and has no linked account ([People](#people)) is named in plain text, followed by **(Slack not connected)**, for example `Grace Hopper (Slack not connected)`. They were not notified. Whoever reads the message can see that and tell them.
+- A group that has only told channels has no such line.
+
 Alerts that a silence keeps quiet are left out of the message for as long as the silence covers them; see [[silences]].
 
 **When Beacon asks again, it says the alert again.** An edit to a message notifies nobody in Slack. So when a step of an escalation policy reaches a channel or a person that already has the group's message, because the policy repeats or because a snooze ran out ([[escalation]]), Beacon posts a new message and keeps that one up to date from then on. The old message is turned into a one-line pointer, "Beacon sent this alert again", without buttons.

@@ -418,13 +418,19 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	var direct []notify.Via
 	for _, i := range cfg.Integrations {
 		if _, delivers := ids[i.Name]; delivers && i.Type == config.IntegrationTypeSlack {
-			direct = append(direct, notify.Via{IntegrationID: ids[i.Name], Name: i.Name})
+			direct = append(direct, notify.Via{IntegrationID: ids[i.Name], Name: i.Name, Provider: i.Type})
 		}
 	}
 	// via returns the integration with a name as a step uses it. One that
 	// does not deliver yet is kept: the step then records that it skipped
 	// it, which is better than leaving it out without a trace.
-	via := func(name string) notify.Via { return notify.Via{IntegrationID: integrations[name], Name: name} }
+	types := map[string]string{}
+	for _, i := range cfg.Integrations {
+		types[i.Name] = i.Type
+	}
+	via := func(name string) notify.Via {
+		return notify.Via{IntegrationID: integrations[name], Name: name, Provider: types[name]}
+	}
 
 	byID := make(map[string]notify.Policy, len(cfg.EscalationPolicies))
 	notifies := map[string]bool{}

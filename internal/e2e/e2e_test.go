@@ -1966,7 +1966,8 @@ func TestFirstPathWithEscalation(t *testing.T) {
 	// 2. Nobody responds. Three seconds later the second step tells the
 	// team, which is Ada and Grace, and the channel.
 	fromGrace := b.find("the second step to the other team member", inChannel(slacktest.DM("U0GRACE"), "*Firing*", "Disk is full on db1"))
-	b.find("the second step to the channel", inChannel("C0ALERTS", "*Firing*", "Disk is full on db1"))
+	// The message in the channel says who was paged, as mentions.
+	b.find("the second step to the channel", inChannel("C0ALERTS", "*Firing*", "Disk is full on db1", "Paged: ", `\u003c@U0ADA\u003e`, `\u003c@U0GRACE\u003e`))
 	// Ada is asked again in a new message; the first became a pointer to it.
 	b.waitFor("Ada to be asked again", func() bool {
 		var firing, pointers int
@@ -2032,6 +2033,62 @@ func TestFirstPathWithEscalation(t *testing.T) {
 		if strings.Contains(logs, secret) {
 			t.Errorf("the logs contain the credential %q", secret)
 		}
+	}
+}
+
+// TestUnlinkedPeopleStayVisible pages a team of which one member has no
+// Slack account. She cannot be notified, and is still named wherever Beacon
+// says who was paged: in the channel's message as plain text with "(Slack
+// not connected)", next to a real mention of her colleague, and on the
+// timeline.
+func TestUnlinkedPeopleStayVisible(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	b := launch(t, dbURL, writeConfig(t, escalationConfiguration(t)))
+	b.waitUntilServing()
+	// Ada is in the workspace. Grace is not.
+	b.slack.AddUser(oidctest.Ada, "U0ADA")
+	for _, who := range []string{oidctest.Ada, oidctest.Grace} {
+		if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), who, oidctest.Password); code != http.StatusOK {
+			t.Fatalf("sign-in of %s = %d %s", who, code, body)
+		}
+		if who == oidctest.Ada {
+			b.waitFor("Ada to be on call", func() bool { who, _ := b.onCall("primary"); return who == oidctest.Ada })
+		}
+	}
+	b.waitFor("Ada's Slack account to be linked", func() bool {
+		var n int
+		err := b.db.QueryRow(context.Background(), `SELECT count(*) FROM user_identities`).Scan(&n)
+		return err == nil && n == 1
+	})
+	var grace string
+	if err := b.db.QueryRow(context.Background(), `SELECT COALESCE(NULLIF(display_name, ''), email) FROM users WHERE email = $1`, oidctest.Grace).Scan(&grace); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, res := b.webhook(diskFull); code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	// The second step tells the team and the channel.
+	msg := b.find("the channel's message", inChannel("C0ALERTS", "Disk is full on db1", "Paged: "))
+	// The blocks are compared as JSON, in which the angle brackets of a
+	// mention are escaped.
+	if want := `Paged: \u003c@U0ADA\u003e, ` + grace + " (Slack not connected)"; !strings.Contains(msg.JSON(), want) {
+		t.Errorf("the channel's message does not contain %q:\n%s", want, msg.JSON())
+	}
+	// Grace is not mentioned and got no message.
+	if strings.Contains(msg.JSON(), "U0GRACE") {
+		t.Errorf("the message mentions an account that is not linked:\n%s", msg.JSON())
+	}
+	for _, m := range b.slack.Messages() {
+		if m.Channel != "C0ALERTS" && m.Channel != slacktest.DM("U0ADA") {
+			t.Errorf("a message went to %s", m.Channel)
+		}
+	}
+	var shown, reason string
+	err := b.db.QueryRow(context.Background(), `SELECT s->>'shown_as', s->>'reason' FROM alert_events e, jsonb_array_elements(e.data->'skipped') s
+		WHERE e.type = 'escalated' AND s->>'user' = $1`, oidctest.Grace).Scan(&shown, &reason)
+	if err != nil || shown != grace+" (Slack not connected)" || reason != "the person has no linked account for this integration" {
+		t.Errorf("on the timeline Grace is shown as %q, skipped because %q, %v", shown, reason, err)
 	}
 }
 

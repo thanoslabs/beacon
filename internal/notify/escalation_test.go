@@ -207,7 +207,7 @@ func TestEscalationRunsEveryStepAndRepeats(t *testing.T) {
 		}
 	}
 	data, _ := json.Marshal(second.Data)
-	if want := `{"notified":[{"destination":"#team","integration":"chat","target":"channel #team"}],"pass":1,"passes":2,"policy":"default","skipped":[],"step":2,"steps":3,"timeout":"10m"}`; string(data) != want {
+	if want := `{"notified":[{"destination":"#team","integration":"chat","integration_id":"` + f.integrationID + `","target":"channel #team"}],"pass":1,"passes":2,"policy":"default","skipped":[],"step":2,"steps":3,"timeout":"10m"}`; string(data) != want {
 		t.Errorf("escalated event:\n got %s\nwant %s", data, want)
 	}
 	if !second.OccurredAt.Equal(time.Date(2026, 3, 1, 12, 5, 30, 0, time.UTC)) {
@@ -601,7 +601,8 @@ func TestPeopleTargets(t *testing.T) {
 		return notify.Person{UserID: id, Email: address}
 	}
 	grace, linus, ken := user("grace@example.com"), user("linus@example.com"), user("ken@example.com")
-	chat := []notify.Via{{IntegrationID: f.integrationID, Name: "chat"}}
+	grace.Name, linus.Name = "Grace Hopper", "Linus T"
+	chat := []notify.Via{{IntegrationID: f.integrationID, Name: "chat", Provider: "slack"}}
 	p.SetPeople(&directory{
 		onCall:  map[string][]notify.Person{"schedule-primary": {grace}},
 		members: map[string][]notify.Person{"team-platform": {grace, linus, ken}},
@@ -651,7 +652,7 @@ func TestPeopleTargets(t *testing.T) {
 		for _, item := range data[key].([]any) {
 			m := item.(map[string]any)
 			parts := []string{m["target"].(string)}
-			for _, k := range []string{"user", "integration", "destination", "reason"} {
+			for _, k := range []string{"user", "name", "integration", "destination", "reason", "shown_as"} {
 				if v, ok := m[k].(string); ok && v != "" {
 					parts = append(parts, v)
 				}
@@ -661,18 +662,20 @@ func TestPeopleTargets(t *testing.T) {
 		return strings.Join(out, "\n")
 	}
 	if got, want := list("notified"), strings.Join([]string{
-		"schedule primary | grace@example.com | chat | U0GRACE",
-		"team platform | ken@example.com | chat | U0KEN",
+		"schedule primary | grace@example.com | Grace Hopper | chat | U0GRACE",
+		"team platform | ken@example.com | ken@example.com | chat | U0KEN",
 		"channel #alerts | chat | #alerts",
 	}, "\n"); got != want {
 		t.Errorf("notified:\n%s\nwant:\n%s", got, want)
 	}
 	if got, want := list("skipped"), strings.Join([]string{
-		"team platform | linus@example.com | chat | the person has no linked account for this integration",
+		// Linus was not notified, and is still named as someone who was
+		// meant to be.
+		"team platform | linus@example.com | Linus T | chat | the person has no linked account for this integration | Linus T (Slack not connected)",
 		"schedule empty | the schedule has nobody on call: a gap in coverage",
 		"team nobody | the team has no members who are users",
 		"user stranger@example.com | no user has this email address",
-		"user ken@example.com | ken@example.com | email | the integration does not deliver notifications",
+		"user ken@example.com | ken@example.com | ken@example.com | email | the integration does not deliver notifications",
 		"user ken@example.com | no integration in the configuration can reach a person directly",
 		"channel oncall@example.com | email | the integration does not deliver notifications",
 	}, "\n"); got != want {

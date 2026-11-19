@@ -255,3 +255,96 @@ func TestEscalationStepIsSaidAgain(t *testing.T) {
 		t.Errorf("a step that Slack refused: %v, with %d more edits", err, len(fake.Calls("chat.update"))-updates)
 	}
 }
+
+// escalated is a step on the timeline, as the engine writes it and the
+// database returns it.
+func escalated(notified, skipped []map[string]any) alert.Event {
+	list := func(in []map[string]any) []any {
+		out := make([]any, 0, len(in))
+		for _, m := range in {
+			out = append(out, m)
+		}
+		return out
+	}
+	return alert.Event{Type: notify.EventEscalated, Actor: alert.System(), Data: map[string]any{"notified": list(notified), "skipped": list(skipped)}}
+}
+
+// TestMessageNamesWhoWasPaged: the group's message says whom the policy has
+// paged so far. Someone with a linked Slack account is mentioned. Someone
+// who was to be paged and has none is named in plain text with "(Slack not
+// connected)", never as a mention.
+func TestMessageNamesWhoWasPaged(t *testing.T) {
+	fake := slacktest.New(t, botToken)
+	ch := newChannel(fake.URL)
+	const here, elsewhere = "integration-here", "integration-elsewhere"
+	paged := func(events ...alert.Event) string {
+		t.Helper()
+		m := message(alert.StatusFiring, "#alerts", "")
+		m.Notification.IntegrationID = here
+		m.Events = events
+		if _, err := ch.Send(context.Background(), m); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		msgs := fake.Messages()
+		for _, b := range msgs[len(msgs)-1].Blocks {
+			elements, _ := b["elements"].([]any)
+			for _, e := range elements {
+				if text, _ := e.(map[string]any)["text"].(string); strings.Contains(text, "Paged:") {
+					return text
+				}
+			}
+		}
+		return ""
+	}
+
+	// A group that only told channels names nobody.
+	if got := paged(escalated([]map[string]any{{"target": "channel #alerts", "integration_id": here, "destination": "#alerts"}}, nil)); got != "" {
+		t.Errorf("a step without people: %q", got)
+	}
+	if got := paged(); got != "" {
+		t.Errorf("no step at all: %q", got)
+	}
+
+	first := escalated(
+		[]map[string]any{{"target": "schedule primary", "user": "ada@example.com", "name": "Ada Lovelace", "integration_id": here, "destination": "U0ADA"}},
+		nil)
+	second := escalated(
+		[]map[string]any{
+			// Ada again, by the team: named once.
+			{"target": "team platform", "user": "ada@example.com", "name": "Ada Lovelace", "integration_id": here, "destination": "U0ADA"},
+			// Paged through another workspace: no mention here.
+			{"target": "team platform", "user": "ken@example.com", "name": "Ken T", "integration_id": elsewhere, "destination": "U0KEN"},
+			{"target": "channel #alerts", "integration_id": here, "destination": "#alerts"},
+		},
+		[]map[string]any{
+			{"target": "team platform", "user": "grace@example.com", "name": "Grace <!channel> Hopper", "integration_id": here,
+				"reason": "the person has no linked account for this integration", "not_connected": "Slack", "shown_as": "Grace Hopper (Slack not connected)"},
+			// Skipped for another reason: not a person to name.
+			{"target": "schedule empty", "reason": "the schedule has nobody on call: a gap in coverage"},
+			// Not connected in two services.
+			{"target": "user linus@example.com", "user": "linus@example.com", "name": "Linus", "not_connected": "Slack"},
+			{"target": "user linus@example.com", "user": "linus@example.com", "name": "Linus", "not_connected": "Discord"},
+			// A destination that is not a Slack user ID is never made a mention.
+		})
+	want := ":pager: Paged: <@U0ADA>, Ken T, Grace &lt;!channel&gt; Hopper (Slack not connected), Linus (Slack, Discord not connected)"
+	if got := paged(first, second); got != want {
+		t.Errorf("paged line:\n got %s\nwant %s", got, want)
+	}
+	// After the first step alone.
+	if got := paged(first); got != ":pager: Paged: <@U0ADA>" {
+		t.Errorf("after the first step: %q", got)
+	}
+	// Something that is not a user ID in the destination stays text.
+	odd := escalated([]map[string]any{{"user": "x@example.com", "name": "X", "integration_id": here, "destination": "!channel"}}, nil)
+	if got := paged(odd); got != ":pager: Paged: X" {
+		t.Errorf("a destination that is not a user ID: %q", got)
+	}
+	// Many people fit in one line.
+	var many []map[string]any
+	for i := range 30 {
+		many = append(many, map[string]any{"user": strings.Repeat("u", i+1) + "@example.com", "name": strings.Repeat("N", 300), "not_connected": "Slack"})
+	}
+	if got := paged(escalated(nil, many)); !strings.HasSuffix(got, ", and 10 more") || len(got) > 3000 {
+		t.Errorf("thirty people: %d characters, ending %q", len(got), got[max(len(got)-20, 0):])
+	}
+}
