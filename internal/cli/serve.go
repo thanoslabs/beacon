@@ -134,11 +134,14 @@ func runServe(ctx context.Context, e env, args []string) error {
 	// the groups that were waiting for its end.
 	silences := silence.NewStore(pool)
 	silences.OnExpire(alerts.WakeGroupsWaitingFor)
+	silences.OnExpire(pipeline.WakeEscalationsWaitingFor)
 	pipeline.SetSilences(silences)
 
 	schedules := schedule.NewStore(pool)
 	identities := identity.NewStore(pool)
 	linker := identity.NewLinker(identities, logger)
+	// The escalation engine asks these two who to notify and where.
+	pipeline.SetPeople(people{schedules: schedules, identities: identities})
 
 	registry := server.NewRegistry()
 	srvCfg.Authenticator = signIn
@@ -188,6 +191,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 	var background sync.WaitGroup
 	background.Go(func() { pipeline.Run(ctx) })
 	background.Go(func() { pipeline.RunGroups(ctx, notify.DefaultGroupPollInterval) })
+	background.Go(func() { pipeline.RunEscalations(ctx, notify.DefaultEscalationPollInterval) })
 	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
 	background.Go(func() { schedules.Run(ctx, logger, scheduleInterval) })
 	background.Go(func() { linker.Run(ctx, identity.DefaultInterval) })

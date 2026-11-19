@@ -197,7 +197,9 @@ func newPipelineFixture(t *testing.T) *pipelineFixture {
 	})
 	p.Register(integration, newChannel(f.fake.URL))
 	f.policy = provisiontest.Row(t, pool, provision.EscalationPolicies, "default")
-	p.SetPolicies(map[string]notify.Policy{f.policy: {Name: "default", FirstStep: []notify.Target{{IntegrationID: integration, Destination: "#alerts"}}}})
+	p.SetPolicies(map[string]notify.Policy{f.policy: {Name: "default", Steps: []notify.Step{{
+		Targets: []notify.StepTarget{notify.ChannelTarget(integration, "slack", "#alerts")}, Timeout: 1000 * time.Hour,
+	}}}})
 	f.alerts.Observe(p.Observe)
 
 	runCtx, cancel := context.WithCancel(ctx)
