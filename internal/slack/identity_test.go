@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/config"
@@ -99,11 +101,10 @@ func (brokenDirectory) UserFor(context.Context, string, string) (string, string,
 	return "", "", false, errors.New("the database is away")
 }
 
-// TestActionsAreAttributedToTheLinkedUser presses buttons as two Slack
-// accounts: one that is linked to a Beacon user and one that is not. The
-// first is recorded as that user, who also becomes the one who acknowledged
-// the alert; the second acts all the same, and is recorded as the Slack
-// account.
+// TestActionsAreAttributedToTheLinkedUser presses a button as a Slack
+// account that is linked to a Beacon user. The press is recorded as that
+// user, who also becomes the one who acknowledged the alert, under the name
+// they have in Beacon.
 func TestActionsAreAttributedToTheLinkedUser(t *testing.T) {
 	f := newActionsFixture(t)
 	var ada string
@@ -142,30 +143,173 @@ func TestActionsAreAttributedToTheLinkedUser(t *testing.T) {
 	if updated := f.fake.Messages()[0].JSON(); !strings.Contains(updated, "Acknowledged by Ada Lovelace") {
 		t.Errorf("the message does not name the Beacon user: %s", updated)
 	}
+}
 
-	// Bob is linked to nobody.
-	if code := f.fake.Click(t, f.url, signingSecret, f.fake.Messages()[0], "beacon_resolve", bob); code != http.StatusOK {
-		t.Fatalf("click = %d, want 200", code)
+// events lists the events of an alert's group that carry the given Slack
+// account.
+func (f *actionsFixture) eventsBy(t *testing.T, alertID, slackUser string) []alert.Event {
+	t.Helper()
+	events, err := f.alerts.Timeline(context.Background(), alertID)
+	if err != nil {
+		t.Fatalf("Timeline: %v", err)
 	}
-	if got, want := last(alert.EventResolved), (alert.Actor{Type: alert.ActorUser, Provider: "slack", ExternalID: "U0BOB", Name: "bob"}); got != want {
-		t.Errorf("actor = %+v, want %+v", got, want)
+	var out []alert.Event
+	for _, e := range events {
+		if e.Actor.ExternalID == slackUser {
+			out = append(out, e)
+		}
 	}
-	if !strings.Contains(f.logs.String(), `"msg":"slack action by an account that is not linked to a Beacon user; the timeline records the Slack account","integration":"slack","slack_user":"U0BOB"`) {
+	return out
+}
+
+// TestUnlinkedAccountMayOnlyResolve presses every button as Carol, whose
+// Slack account belongs to no Beacon user. Acknowledging and snoozing are
+// refused: nothing changes, nothing is recorded, and Carol alone is told
+// why and how to get connected. Resolving works, and names her as her
+// workspace does, with the note that she is not connected.
+func TestUnlinkedAccountMayOnlyResolve(t *testing.T) {
+	f := newActionsFixture(t)
+	f.fake.SetProfile(carol.ID, slacktest.Profile{DisplayName: "Carol <C>", RealName: "Carol Shaw", Handle: "carol"})
+	f.interactions.SetSignInURL("https://beacon.example.com")
+	a, msg := f.posted(t)
+
+	for _, button := range []string{"beacon_acknowledge", "beacon_snooze"} {
+		before := len(f.fake.Responses())
+		if code := f.fake.Click(t, f.url, signingSecret, msg, button, carol); code != http.StatusOK {
+			t.Fatalf("%s = %d, want 200 so that Slack shows no error", button, code)
+		}
+		if got := f.status(t, a.ID); got.Status != alert.StatusFiring || got.AcknowledgedAt != nil || got.SnoozedUntil != nil {
+			t.Fatalf("after %s by an unlinked account the alert is %s", button, got.Status)
+		}
+		responses := f.fake.Responses()
+		if len(responses) != before+1 {
+			t.Fatalf("%s: %d replies, want one", button, len(responses)-before)
+		}
+		r := responses[len(responses)-1]
+		text, _ := r["text"].(string)
+		verb := strings.TrimPrefix(button, "beacon_")
+		for _, want := range []string{
+			"Nothing changed: only Beacon users can " + verb + " an alert, and your Slack account is not connected to one.",
+			"Sign in to Beacon at https://beacon.example.com with the same email address as your Slack account",
+			"You can still resolve the alert from here.",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s: the reply does not contain %q: %s", button, want, text)
+			}
+		}
+		// To Carol alone, and the message stays as it is.
+		if r["response_type"] != "ephemeral" || r["replace_original"] != false {
+			t.Errorf("%s: reply = %v, want one that only she sees", button, r)
+		}
+	}
+	if events := f.eventsBy(t, a.ID, carol.ID); len(events) != 0 {
+		t.Errorf("the refused presses are on the timeline: %+v", events)
+	}
+	if n := len(f.fake.Calls("users.info")); n != 0 {
+		t.Errorf("Slack was asked %d times about someone whose press was refused", n)
+	}
+	if msgs := f.fake.Messages(); len(msgs) != 1 || msgs[0].Updates != 0 {
+		t.Errorf("the message changed after refused presses: %+v", msgs)
+	}
+	if !strings.Contains(f.logs.String(), `"msg":"slack action refused: the account is not linked to a Beacon user","action":"acknowledge"`) {
+		t.Errorf("the refusal is not in the log:\n%s", f.logs)
+	}
+
+	// Without a place to sign in, the reply says to ask.
+	f.interactions.SetSignInURL("")
+	f.fake.Click(t, f.url, signingSecret, msg, "beacon_acknowledge", carol)
+	all := f.fake.Responses()
+	if text, _ := all[len(all)-1]["text"].(string); !strings.Contains(text, "ask whoever runs Beacon for its address") {
+		t.Errorf("reply without a sign-in address: %s", text)
+	}
+
+	// She resolves it.
+	if code := f.fake.Click(t, f.url, signingSecret, msg, "beacon_resolve", carol); code != http.StatusOK {
+		t.Fatalf("resolve = %d", code)
+	}
+	if got := f.status(t, a.ID); got.Status != alert.StatusResolved {
+		t.Fatalf("after the resolve the alert is %s", got.Status)
+	}
+	events := f.eventsBy(t, a.ID, carol.ID)
+	want := alert.Actor{Type: alert.ActorUser, Provider: "slack", ExternalID: carol.ID, Name: "Carol <C> (Slack not connected)"}
+	if len(events) != 1 || events[0].Type != alert.EventResolved || events[0].Actor != want {
+		t.Fatalf("events by Carol = %+v, want one resolve by %+v", events, want)
+	}
+	if calls := f.fake.Calls("users.info"); len(calls) != 1 || calls[0].Body["user"] != carol.ID {
+		t.Errorf("users.info calls = %+v, want one for Carol", calls)
+	}
+	f.attempts(t)
+	if updated := f.fake.Messages()[0].JSON(); !strings.Contains(updated, `Resolved by Carol \u0026lt;C\u0026gt; (Slack not connected)`) {
+		t.Errorf("the message does not name her as the workspace does: %s", updated)
+	}
+	if !strings.Contains(f.logs.String(), `"msg":"slack action by an account that is not linked to a Beacon user; the timeline records the Slack account","action":"resolve"`) {
 		t.Errorf("the logs do not mention the account that is not linked:\n%s", f.logs)
 	}
 }
 
-// TestActionWorksWhenTheLookupFails must not lose a button press because
-// identities cannot be read.
-func TestActionWorksWhenTheLookupFails(t *testing.T) {
+// TestResolveDoesNotWaitForAName: when Slack cannot say what an unlinked
+// account is called, the resolve happens all the same, under the handle
+// that came with the press, or the identifier when there is none.
+func TestResolveDoesNotWaitForAName(t *testing.T) {
+	for name, tc := range map[string]struct {
+		fail slacktest.Failure
+		who  slacktest.User
+		want string
+	}{
+		"the app lacks the scope":   {slacktest.Failure{Error: "missing_scope"}, carol, "carol (Slack not connected)"},
+		"Slack is unavailable":      {slacktest.Failure{Status: http.StatusServiceUnavailable}, carol, "carol (Slack not connected)"},
+		"rate limited":              {slacktest.Failure{Status: http.StatusTooManyRequests, RetryAfter: "30"}, carol, "carol (Slack not connected)"},
+		"no handle either":          {slacktest.Failure{Error: "user_not_found"}, slacktest.User{ID: "U0NOBODY"}, "U0NOBODY (Slack not connected)"},
+		"a profile with no names":   {slacktest.Failure{}, slacktest.User{ID: "U0BLANK", Username: "blank"}, "blank (Slack not connected)"},
+		"only a real name":          {slacktest.Failure{}, slacktest.User{ID: "U0REAL", Username: "handle"}, "Real Name (Slack not connected)"},
+		"the lookup of users fails": {slacktest.Failure{}, carol, "carol (Slack not connected)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newActionsFixture(t)
+			f.fake.SetProfile("U0BLANK", slacktest.Profile{})
+			f.fake.SetProfile("U0REAL", slacktest.Profile{RealName: "Real Name"})
+			if tc.fail != (slacktest.Failure{}) {
+				f.fake.Fail("users.info", tc.fail)
+			}
+			if name == "the lookup of users fails" {
+				f.interactions.SetIdentities(brokenDirectory{})
+			}
+			a, msg := f.posted(t)
+			if code := f.fake.Click(t, f.url, signingSecret, msg, "beacon_resolve", tc.who); code != http.StatusOK {
+				t.Fatalf("resolve = %d", code)
+			}
+			if got := f.status(t, a.ID); got.Status != alert.StatusResolved {
+				t.Fatalf("the alert is %s, want resolved", got.Status)
+			}
+			if events := f.eventsBy(t, a.ID, tc.who.ID); len(events) != 1 || events[0].Actor.Name != tc.want || events[0].Actor.ID != "" {
+				t.Errorf("events = %+v, want one resolve by %q", events, tc.want)
+			}
+			if strings.Contains(f.logs.String(), botToken) {
+				t.Error("the logs contain the bot token")
+			}
+		})
+	}
+}
+
+// TestNothingIsAcknowledgedWhenTheLookupFails: when Beacon cannot tell
+// whether an account is linked, it does not guess. Acknowledging and
+// snoozing are refused with a note to try again, also for someone who is
+// linked, and nothing changes.
+func TestNothingIsAcknowledgedWhenTheLookupFails(t *testing.T) {
 	f := newActionsFixture(t)
 	f.interactions.SetIdentities(brokenDirectory{})
 	a, msg := f.posted(t)
-	if code := f.fake.Click(t, f.url, signingSecret, msg, "beacon_acknowledge", alice); code != http.StatusOK {
-		t.Fatalf("click = %d, want 200", code)
-	}
-	if got := f.status(t, a.ID); got.Status != alert.StatusAcknowledged {
-		t.Errorf("status = %s, want acknowledged", got.Status)
+	for _, button := range []string{"beacon_acknowledge", "beacon_snooze"} {
+		if code := f.fake.Click(t, f.url, signingSecret, msg, button, alice); code != http.StatusOK {
+			t.Fatalf("click = %d, want 200", code)
+		}
+		if got := f.status(t, a.ID); got.Status != alert.StatusFiring {
+			t.Errorf("after %s the alert is %s, want firing", button, got.Status)
+		}
+		all := f.fake.Responses()
+		if text, _ := all[len(all)-1]["text"].(string); text != "Nothing changed: Beacon could not check who you are just now. Please try again." {
+			t.Errorf("%s: reply = %q", button, text)
+		}
 	}
 	if !strings.Contains(f.logs.String(), `"level":"ERROR","msg":"look up the user of a slack account"`) {
 		t.Errorf("the failed lookup was not logged:\n%s", f.logs)
@@ -253,5 +397,127 @@ func TestEscalationStepIsSaidAgain(t *testing.T) {
 	updates := len(fake.Calls("chat.update"))
 	if _, err := ch.Send(ctx, again); err == nil || len(fake.Calls("chat.update")) != updates {
 		t.Errorf("a step that Slack refused: %v, with %d more edits", err, len(fake.Calls("chat.update"))-updates)
+	}
+}
+
+// escalated is a step on the timeline, as the engine writes it and the
+// database returns it.
+func escalated(notified, skipped []map[string]any) alert.Event {
+	list := func(in []map[string]any) []any {
+		out := make([]any, 0, len(in))
+		for _, m := range in {
+			out = append(out, m)
+		}
+		return out
+	}
+	return alert.Event{Type: notify.EventEscalated, Actor: alert.System(), Data: map[string]any{"notified": list(notified), "skipped": list(skipped)}}
+}
+
+// TestMessageNamesWhoWasPaged: the group's message says whom the policy has
+// paged so far. Someone with a linked Slack account is mentioned. Someone
+// who was to be paged and has none is named in plain text with "(Slack not
+// connected)", never as a mention.
+func TestMessageNamesWhoWasPaged(t *testing.T) {
+	fake := slacktest.New(t, botToken)
+	ch := newChannel(fake.URL)
+	const here, elsewhere = "integration-here", "integration-elsewhere"
+	paged := func(events ...alert.Event) string {
+		t.Helper()
+		m := message(alert.StatusFiring, "#alerts", "")
+		m.Notification.IntegrationID = here
+		m.Events = events
+		if _, err := ch.Send(context.Background(), m); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		msgs := fake.Messages()
+		for _, b := range msgs[len(msgs)-1].Blocks {
+			elements, _ := b["elements"].([]any)
+			for _, e := range elements {
+				if text, _ := e.(map[string]any)["text"].(string); strings.Contains(text, "Paged:") {
+					return text
+				}
+			}
+		}
+		return ""
+	}
+
+	// A group that only told channels names nobody.
+	if got := paged(escalated([]map[string]any{{"target": "channel #alerts", "integration_id": here, "destination": "#alerts"}}, nil)); got != "" {
+		t.Errorf("a step without people: %q", got)
+	}
+	if got := paged(); got != "" {
+		t.Errorf("no step at all: %q", got)
+	}
+
+	first := escalated(
+		[]map[string]any{{"target": "schedule primary", "user": "ada@example.com", "name": "Ada Lovelace", "integration_id": here, "destination": "U0ADA"}},
+		nil)
+	second := escalated(
+		[]map[string]any{
+			// Ada again, by the team: named once.
+			{"target": "team platform", "user": "ada@example.com", "name": "Ada Lovelace", "integration_id": here, "destination": "U0ADA"},
+			// Paged through another workspace: no mention here.
+			{"target": "team platform", "user": "ken@example.com", "name": "Ken T", "integration_id": elsewhere, "destination": "U0KEN"},
+			{"target": "channel #alerts", "integration_id": here, "destination": "#alerts"},
+		},
+		[]map[string]any{
+			{"target": "team platform", "user": "grace@example.com", "name": "Grace <!channel> Hopper", "integration_id": here,
+				"reason": "the person has no linked account for this integration", "not_connected": "Slack", "shown_as": "Grace Hopper (Slack not connected)"},
+			// Skipped for another reason: not a person to name.
+			{"target": "schedule empty", "reason": "the schedule has nobody on call: a gap in coverage"},
+			// Not connected in two services.
+			{"target": "user linus@example.com", "user": "linus@example.com", "name": "Linus", "not_connected": "Slack"},
+			{"target": "user linus@example.com", "user": "linus@example.com", "name": "Linus", "not_connected": "Discord"},
+			// A destination that is not a Slack user ID is never made a mention.
+		})
+	want := ":pager: Paged: <@U0ADA>, Ken T, Grace &lt;!channel&gt; Hopper (Slack not connected), Linus (Slack, Discord not connected)"
+	if got := paged(first, second); got != want {
+		t.Errorf("paged line:\n got %s\nwant %s", got, want)
+	}
+	// After the first step alone.
+	if got := paged(first); got != ":pager: Paged: <@U0ADA>" {
+		t.Errorf("after the first step: %q", got)
+	}
+	// Something that is not a user ID in the destination stays text.
+	odd := escalated([]map[string]any{{"user": "x@example.com", "name": "X", "integration_id": here, "destination": "!channel"}}, nil)
+	if got := paged(odd); got != ":pager: Paged: X" {
+		t.Errorf("a destination that is not a user ID: %q", got)
+	}
+	// Many people fit in one line.
+	var many []map[string]any
+	for i := range 30 {
+		many = append(many, map[string]any{"user": strings.Repeat("u", i+1) + "@example.com", "name": strings.Repeat("N", 300), "not_connected": "Slack"})
+	}
+	if got := paged(escalated(nil, many)); !strings.HasSuffix(got, ", and 10 more") || len(got) > 3000 {
+		t.Errorf("thirty people: %d characters, ending %q", len(got), got[max(len(got)-20, 0):])
+	}
+}
+
+// TestResolveIsNotHeldUpBySlack: Slack accepts the question about the name
+// and never answers. The resolve happens within the time Slack gives a
+// button press, under the handle that came with it.
+func TestResolveIsNotHeldUpBySlack(t *testing.T) {
+	f := newActionsFixture(t)
+	release := make(chan struct{})
+	stuck := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+	defer stuck.Close()
+	defer close(release)
+	f.interactions.SetClients(map[string]*slack.Client{"slack": slack.NewClient(stuck.URL, config.NewSecret(config.SecretRef{}, botToken))})
+	a, msg := f.posted(t)
+
+	began := time.Now()
+	if code := f.fake.Click(t, f.url, signingSecret, msg, "beacon_resolve", carol); code != http.StatusOK {
+		t.Fatalf("resolve = %d", code)
+	}
+	// The question is given a second and a half. Slack waits three for the
+	// press, and the client by itself would wait ten.
+	if took := time.Since(began); took > 5*time.Second {
+		t.Errorf("the resolve took %s while Slack did not answer", took)
+	}
+	if got := f.status(t, a.ID); got.Status != alert.StatusResolved {
+		t.Fatalf("the alert is %s, want resolved", got.Status)
+	}
+	if events := f.eventsBy(t, a.ID, carol.ID); len(events) != 1 || events[0].Actor.Name != "carol (Slack not connected)" {
+		t.Errorf("events = %+v, want one resolve under her handle", events)
 	}
 }

@@ -78,6 +78,8 @@ A target that cannot be notified is skipped. The step goes on with the others, e
 | `the integration does not deliver notifications` | The target names an integration of a type that Beacon cannot send through yet, such as email |
 | `no integration in the configuration can reach a person directly` | There is no Slack integration |
 
+**A person who has no linked account stays visible.** They are skipped for delivery, because there is nowhere to deliver to, but they were meant to be paged, and Beacon says so wherever it names who was paged: by their name followed by the service they are not connected to, as in `Grace Hopper (Slack not connected)`. The step's event holds that text as `shown_as`, with `not_connected`, and the group's message in Slack lists the person that way next to the people it mentions ([[slack#The message]]).
+
 A step in which everyone was skipped still counts: its timeout runs, and the next step follows. `beacon serve` logs a warning at start and at every reload for a policy none of whose targets can be reached at all.
 
 ## Silences
@@ -106,11 +108,12 @@ The position of a group in its policy is a row in the database: the policy, the 
 {
   "policy": "platform-default", "step": 2, "steps": 3, "pass": 1, "passes": 3, "timeout": "10m",
   "notified": [
-    {"target": "team platform", "user": "grace@example.com", "integration": "slack", "destination": "U0123ABCDEF"},
-    {"target": "channel #platform-alerts", "integration": "slack", "destination": "#platform-alerts"}
+    {"target": "team platform", "user": "grace@example.com", "name": "Grace Hopper", "integration": "slack", "integration_id": "…", "destination": "U0123ABCDEF"},
+    {"target": "channel #platform-alerts", "integration": "slack", "integration_id": "…", "destination": "#platform-alerts"}
   ],
   "skipped": [
-    {"target": "team platform", "user": "linus@example.com", "integration": "slack", "reason": "the person has no linked account for this integration"}
+    {"target": "team platform", "user": "linus@example.com", "name": "Linus Torvalds", "integration": "slack", "integration_id": "…",
+     "reason": "the person has no linked account for this integration", "not_connected": "Slack", "shown_as": "Linus Torvalds (Slack not connected)"}
   ]
 }
 ```
