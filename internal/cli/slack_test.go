@@ -60,6 +60,37 @@ func TestServeNotifiesSlack(t *testing.T) {
 	if code := fake.Click(t, interactions, "not-the-signing-secret", msg, "beacon_acknowledge", user); code != http.StatusUnauthorized {
 		t.Errorf("click signed with the wrong secret = %d, want 401", code)
 	}
+	// This configuration has no identity provider, so there are no users
+	// and nobody's Slack account is linked. Acknowledging is refused, with
+	// a note to the person who pressed, and the log said at the start that
+	// it would be.
+	if code := fake.Click(t, interactions, signingSecret, msg, "beacon_acknowledge", user); code != http.StatusOK {
+		t.Fatalf("click = %d, want 200", code)
+	}
+	if notes := fake.Responses(); len(notes) != 1 || !strings.Contains(notes[0]["text"].(string), "only Beacon users can acknowledge an alert") ||
+		!strings.Contains(notes[0]["text"].(string), "ask whoever runs Beacon for its address") {
+		t.Fatalf("answer to an acknowledgement by an account that is not linked = %v", notes)
+	}
+	if fake.Messages()[0].Updates != 0 {
+		t.Errorf("the message changed after a refused press")
+	}
+	if !strings.Contains(srv.logs.String(), `"level":"WARN","msg":"nobody can acknowledge or snooze from Slack`) {
+		t.Errorf("the logs do not warn that nobody can acknowledge from Slack")
+	}
+
+	// Alice becomes a Beacon user whose Slack account is linked, as signing
+	// in and the lookup by email address would make her.
+	pool, err := postgres.Open(context.Background(), postgres.Config{URL: dbURL})
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer pool.Close()
+	_, err = pool.Exec(context.Background(), `WITH u AS (INSERT INTO users (email, display_name) VALUES ('alice@example.com', 'alice') RETURNING id)
+		INSERT INTO user_identities (user_id, integration_id, provider, external_id, origin, created_at)
+		SELECT u.id, i.id, 'slack', 'U0ALICE', 'email', now() FROM u, integrations i WHERE i.name = 'slack'`)
+	if err != nil {
+		t.Fatalf("link Alice: %v", err)
+	}
 	if code := fake.Click(t, interactions, signingSecret, msg, "beacon_acknowledge", user); code != http.StatusOK {
 		t.Fatalf("click = %d, want 200", code)
 	}
@@ -77,11 +108,6 @@ func TestServeNotifiesSlack(t *testing.T) {
 		t.Errorf("messages after the resolve = %+v", msgs)
 	}
 
-	pool, err := postgres.Open(context.Background(), postgres.Config{URL: dbURL})
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-	defer pool.Close()
 	var spec string
 	var sent, events int
 	// Slack has the last update a moment before Beacon has recorded that it

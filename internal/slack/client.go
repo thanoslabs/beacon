@@ -63,7 +63,7 @@ var hints = map[string]string{
 	"not_in_channel":        "invite the app to the channel, or add the chat:write.public scope for public channels",
 	"channel_not_found":     "check the channel; a private channel must be given by its ID and the app must be invited to it",
 	"invalid_auth":          "the bot token is not valid",
-	"missing_scope":         "the app needs the chat:write scope, and users:read.email to find people by email address",
+	"missing_scope":         "the app needs the chat:write scope, users:read.email to find people by email address, and users:read to name people who are not linked",
 	"messages_tab_disabled": "the app cannot send direct messages: turn on the Messages tab under App Home in the app's settings",
 }
 
@@ -99,9 +99,15 @@ type response struct {
 	TS      string `json:"ts"`
 	// User is the user that users.lookupByEmail found.
 	User struct {
-		ID      string `json:"id"`
-		Deleted bool   `json:"deleted"`
-		IsBot   bool   `json:"is_bot"`
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		RealName string `json:"real_name"`
+		Deleted  bool   `json:"deleted"`
+		IsBot    bool   `json:"is_bot"`
+		Profile  struct {
+			DisplayName string `json:"display_name"`
+			RealName    string `json:"real_name"`
+		} `json:"profile"`
 	} `json:"user"`
 }
 
@@ -217,4 +223,28 @@ func (c *Client) LookupByEmail(ctx context.Context, email string) (userID string
 		return "", false, nil
 	}
 	return out.User.ID, true, nil
+}
+
+// DisplayName returns what a member of the workspace is called there,
+// through users.info, which needs the users:read scope: the display name
+// they chose, or else their real name, or else their handle. Slack
+// guarantees none of the three, so the result may be empty.
+//
+// Like users.lookupByEmail, the method takes its argument in the query.
+func (c *Client) DisplayName(ctx context.Context, userID string) (string, error) {
+	const method = "users.info"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/"+method+"?"+url.Values{"user": {userID}}.Encode(), nil)
+	if err != nil {
+		return "", fmt.Errorf("slack %s: the request could not be built", method)
+	}
+	out, err := c.do(req, method)
+	if err != nil {
+		return "", err
+	}
+	for _, name := range []string{out.User.Profile.DisplayName, out.User.Profile.RealName, out.User.RealName, out.User.Name} {
+		if name = strings.TrimSpace(name); name != "" {
+			return name, nil
+		}
+	}
+	return "", nil
 }

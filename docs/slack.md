@@ -31,6 +31,7 @@ You need permission to add apps to your workspace.
        bot:
          - chat:write
          - chat:write.public
+         - users:read
          - users:read.email
    settings:
      interactivity:
@@ -54,9 +55,10 @@ Slack renames the pages and buttons of its settings from time to time, so the na
 |---|---|
 | `chat:write` | Post messages to channels and, as direct messages, to people; and edit the messages Beacon posted |
 | `chat:write.public` | Post to public channels without being invited first. Leave it out if you prefer to invite the app to each channel. |
-| `users:read.email` | Find the Slack account of a Beacon user by their email address; see [People](#people). Without it nobody is linked: actions in Slack are recorded with the Slack account only. |
+| `users:read` | Ask what a member is called, to name someone who resolves an alert and is not a Beacon user. Without it, their Slack handle is shown. |
+| `users:read.email` | Find the Slack account of a Beacon user by their email address; see [People](#people). Without it nobody is linked, and then **nobody can acknowledge or snooze from Slack**. |
 
-Beacon asks for nothing else: it does not read messages or channels, and of users it asks one question, which account has a given email address.
+Beacon asks for nothing else: it does not read messages or channels, and of users it asks two questions, which account has a given email address and what a given account is called.
 
 ## Configure Beacon
 
@@ -92,7 +94,10 @@ routing:
 The name of the integration is part of the address that Slack sends button presses to: `/api/v1/integrations/<name>/interactions`.
 
 > [!note] Which alerts go where
-> An alert group is posted to the channels named in the **first step** of its escalation policy. With the configuration above there is one policy, the default, so every group goes to that channel. Routing rules send alerts to other policies, and so to other channels: see [[configuration#How an alert is routed]]. Later steps, timeouts and people are not acted on yet.
+> An alert group is posted to the channels named in the **first step** of its escalation policy. With the configuration above there is one policy, the default, so every group goes to that channel. Routing rules send alerts to other policies, and so to other channels: see [[configuration#How an alert is routed]]. A policy can also page people and go on to further steps: see [[escalation]].
+
+> [!warning] This configuration cannot acknowledge
+> It has no `auth` block, so nobody can sign in and Beacon has no users. **Acknowledging and snoozing from Slack need a Beacon user whose Slack account is linked**, so with this configuration the alert arrives in Slack and can be resolved there, and the *Acknowledge* and *Snooze* buttons answer with a note. To acknowledge from Slack, add sign-in through your identity provider ([[access]]) and have each person sign in to Beacon once, with the same email address as in Slack. See [Who can act](#who-can-act).
 
 Related alerts share one message: by default, alerts with the same `alertname`. The message of a new group is posted after `group_wait`, 30 seconds unless the `routing` block says otherwise; see [[configuration#Grouping]].
 
@@ -154,8 +159,19 @@ A press acts on the whole group: every alert of the group whose state allows the
 
 If the alert has changed in the meantime, for example because someone else acknowledged it a moment earlier, nothing happens and Slack shows a note that only you can see, such as "Nothing changed: this alert is already acknowledged."
 
-> [!note] Who can act
-> Anyone who can see the message in Slack can press its buttons, whether or not they are a user of Beacon. Slack decides who sees a channel; Beacon records who acted. See [People](#people).
+### Who can act
+
+| The person who presses | Acknowledge | Snooze | Resolve |
+|---|---|---|---|
+| has a Slack account linked to a Beacon user ([People](#people)) | yes | yes | yes |
+| is anyone else who can see the message | no | no | yes |
+
+- **Acknowledging and snoozing need a Beacon user.** They say "I have this", and that only means something from a person Beacon knows: the acknowledgement is recorded as theirs, and it stops the escalation.
+- **Anyone who can see the message may resolve.** Resolving states a fact about the alert, and the person who fixed the problem may be a colleague who has never signed in to Beacon.
+- **A refused press changes nothing** and is answered with a note that only that person sees: *Nothing changed: only Beacon users can acknowledge an alert, and your Slack account is not connected to one. Sign in to Beacon at https://beacon.example.com with the same email address as your Slack account, and Beacon connects the two within a minute. You can still resolve the alert from here.*
+- **To be able to acknowledge**, a person needs three things: Beacon must have sign-in through an identity provider configured ([[access]]); they must have signed in to Beacon once; and their email address there must be the one of their Slack account. Beacon then links the two by itself. The bootstrap admin is not a person with an address and cannot acknowledge from Slack.
+- **Someone who is not a Beacon user and resolves** is named as your workspace names them, with a note: the message reads *Resolved by Gus Guest (Slack not connected)*, and the timeline records that name with their Slack account. Beacon asks Slack for the name (`users.info`); if that fails or takes too long, the resolve happens all the same under their Slack handle.
+- If Beacon cannot check whether an account is linked, because its database does not answer, it does not guess: acknowledging and snoozing answer *Beacon could not check who you are just now*, and resolving works.
 
 ### Request URL
 
@@ -178,7 +194,7 @@ Beacon links each of its users to their account in your workspace, so that it kn
 - **By email address.** For every user who has signed in to Beacon ([[access]]), Beacon asks Slack which member has that email address (`users.lookupByEmail`), and stores the answer. It asks shortly after the person's first sign-in, and when a Slack integration is added.
 - **Someone Slack does not know** is logged as a warning, `no account in the chat service has this user's email address`, and counted in the metric `beacon_users_without_identity{integration="..."}`. Beacon asks again every hour, and at once when the person's address in Beacon changes. A member whom Slack has deactivated is not found either.
 - **The addresses must be the same** in the identity provider and in Slack. Nothing else is tried: a name or a similar address is not a match.
-- **An action in Slack is attributed to the linked user.** When someone whose account is linked presses a button, the timeline records the Beacon user together with the Slack account, the alert names them as the person who acknowledged it, and the message shows their name in Beacon. When the account is not linked, the action is still taken, and the timeline records the Slack account alone.
+- **An action in Slack is attributed to the linked user.** When someone whose account is linked presses a button, the timeline records the Beacon user together with the Slack account, the alert names them as the person who acknowledged it, and the message shows their name in Beacon. An account that is not linked can resolve an alert and nothing else; see [Who can act](#who-can-act).
 - A person sees their linked accounts at `GET /api/v1/me/identities`.
 - **A person is paged in a direct message.** When a step of an escalation policy names a schedule, a team or a user ([[escalation#Targets]]), each person gets the group's message from the app, in the app's *Messages* tab, with the same buttons as in a channel. The manifest above turns that tab on (`messages_tab_enabled`); without it Slack refuses with `messages_tab_disabled`. A person whose account is not linked cannot be paged: the step skips them, and its event on the timeline says so.
 

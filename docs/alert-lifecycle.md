@@ -88,6 +88,6 @@ Each event has the time it happened and an actor:
 | Actor | Who |
 |---|---|
 | `source` | The source that sent the alert or its resolution |
-| `user` | A person. When they acted from a chat service, the event holds the chat service and their identifier in it, and the Beacon user when the account is linked to one ([[access#Chat accounts]]). An account that is not linked may still act; its events name the chat account alone. |
+| `user` | A person. When they acted from a chat service, the event holds the chat service and their identifier in it, and the Beacon user when the account is linked to one ([[access#Chat accounts]]). An account that is not linked may resolve an alert and may not acknowledge or snooze it ([[slack#Who can act]]); its events name the chat account alone, under the name its workspace has for it followed by "(Slack not connected)". |
 | `api_token` | A client using an API token |
 | `system` | Beacon itself, for example when a snooze ends |
