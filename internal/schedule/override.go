@@ -344,10 +344,6 @@ func (s *Store) recordOverrides(ctx context.Context) ([]Handoff, error) {
 		if err != nil {
 			return fmt.Errorf("read the overrides that began: %w", err)
 		}
-		type begun struct {
-			id, scheduleID, userID string
-			starts, ends           time.Time
-		}
 		due, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (begun, error) {
 			var b begun
 			return b, r.Scan(&b.id, &b.scheduleID, &b.userID, &b.starts, &b.ends)
@@ -356,24 +352,55 @@ func (s *Store) recordOverrides(ctx context.Context) ([]Handoff, error) {
 			return fmt.Errorf("read the overrides that began: %w", err)
 		}
 		for _, b := range due {
-			var ends *time.Time
-			if !b.ends.After(now) {
-				ends = &b.ends
-			}
-			if err := recordOverride(ctx, tx, b.id, b.scheduleID, b.userID, b.starts, ends); err != nil {
+			h, recorded, err := recordBegun(ctx, tx, b, now)
+			if err != nil {
 				return err
 			}
-			h := Handoff{Override: true, At: b.starts, Next: b.ends, ShiftBegan: true}
-			err := tx.QueryRow(ctx, `SELECT (SELECT name FROM schedules WHERE id = $1), (SELECT email FROM users WHERE id = $2)`, b.scheduleID, b.userID).Scan(&h.Schedule, &h.To)
-			if err != nil {
-				return fmt.Errorf("describe override %s: %w", b.id, err)
+			if recorded {
+				done = append(done, h)
 			}
-			done = append(done, h)
 		}
 		done = append(done, ended...)
 		return nil
 	})
 	return done, err
+}
+
+// begun is an override whose start has come.
+type begun struct {
+	id, scheduleID, userID string
+	starts, ends           time.Time
+}
+
+// recordBegun writes the shift of an override whose row the transaction
+// holds, unless it has one. recorded is false when it had.
+//
+// That question is asked here, in a statement of its own, although the read
+// that found the override asked it too. A replica can take an override the
+// moment another replica has committed its shift and let go of the row; the
+// read that found the row began before that commit and did not see the
+// shift. With the row held, a new statement does.
+func recordBegun(ctx context.Context, tx pgx.Tx, b begun, now time.Time) (h Handoff, recorded bool, err error) {
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM shifts WHERE override_id = $1)`, b.id).Scan(&exists); err != nil {
+		return Handoff{}, false, fmt.Errorf("look for the shift of override %s: %w", b.id, err)
+	}
+	if exists {
+		return Handoff{}, false, nil
+	}
+	var ends *time.Time
+	if !b.ends.After(now) {
+		ends = &b.ends
+	}
+	if err := recordOverride(ctx, tx, b.id, b.scheduleID, b.userID, b.starts, ends); err != nil {
+		return Handoff{}, false, err
+	}
+	h = Handoff{Override: true, At: b.starts, Next: b.ends, ShiftBegan: true}
+	err = tx.QueryRow(ctx, `SELECT (SELECT name FROM schedules WHERE id = $1), (SELECT email FROM users WHERE id = $2)`, b.scheduleID, b.userID).Scan(&h.Schedule, &h.To)
+	if err != nil {
+		return Handoff{}, false, fmt.Errorf("describe override %s: %w", b.id, err)
+	}
+	return h, true, nil
 }
 
 // notUUID reports whether Postgres refused an identifier that is not a UUID.
