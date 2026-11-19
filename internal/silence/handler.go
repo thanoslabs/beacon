@@ -1,6 +1,7 @@
 package silence
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"github.com/thanoslabs/beacon/internal/access"
+	"github.com/thanoslabs/beacon/internal/alert"
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/config"
 )
 
@@ -23,7 +26,30 @@ const maxRequestBytes = 64 << 10
 type Handler struct {
 	logger *slog.Logger
 	store  *Store
+	// alerts lists alerts for the preview of a silence. It holds nil until
+	// SetAlerts is called, and then a preview finds nothing.
+	alerts Alerts
 }
+
+// Alerts is what the preview needs from the alert store.
+type Alerts interface {
+	List(ctx context.Context, f alert.Filter) ([]alert.View, error)
+}
+
+// SetAlerts gives the handler the alerts that a preview looks through. Call
+// it before the handler is used.
+func (h *Handler) SetAlerts(alerts Alerts) { h.alerts = alerts }
+
+// PreviewPath is the route that says which open alerts a silence would
+// match, without creating it.
+const PreviewPath = Path + "/preview"
+
+// The bounds of a preview: how many open alerts it looks through, and how
+// many of the matching ones it answers.
+const (
+	maxPreviewScanned = 5000
+	maxPreviewListed  = 50
+)
 
 // NewHandler returns a handler that keeps silences in store.
 func NewHandler(logger *slog.Logger, store *Store) *Handler {
@@ -38,6 +64,7 @@ func (h *Handler) Routes() []access.Route {
 	return []access.Route{
 		{Pattern: "GET " + Path, Level: access.Member, Handler: http.HandlerFunc(h.list)},
 		{Pattern: "POST " + Path, Level: access.Member, Handler: http.HandlerFunc(h.create)},
+		{Pattern: "POST " + PreviewPath, Level: access.Member, Handler: http.HandlerFunc(h.preview)},
 		{Pattern: "GET " + Path + "/{id}", Level: access.Member, Handler: http.HandlerFunc(h.get)},
 		{Pattern: "DELETE " + Path + "/{id}", Level: access.Member, Handler: http.HandlerFunc(h.expire)},
 	}
@@ -58,10 +85,73 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		h.internal(w, r, "list silences", err)
 		return
 	}
-	if silences == nil {
-		silences = []Silence{}
+	page, next, field, problem, ok := api.Slice(silences, r.URL.Query())
+	if !ok {
+		h.fail(w, r, http.StatusBadRequest, field, problem)
+		return
 	}
-	h.write(w, r, http.StatusOK, map[string][]Silence{"silences": silences})
+	h.write(w, r, http.StatusOK, struct {
+		Silences   []Silence `json:"silences"`
+		NextCursor string    `json:"next_cursor,omitempty"`
+	}{page, next})
+}
+
+// preview answers which open alerts a silence with these matchers would
+// match now, so that whoever creates one sees what it will quieten. Nothing
+// is stored.
+func (h *Handler) preview(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Matchers []Matcher `json:"matchers"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		h.fail(w, r, http.StatusBadRequest, "", `the body must be JSON such as {"matchers": [{"label": "alertname", "operator": "=", "value": "DiskFull"}]}`)
+		return
+	}
+	// The same checks as for a silence that is created.
+	matchers, err := compile(req.Matchers)
+	var bad *Error
+	if errors.As(err, &bad) {
+		h.fail(w, r, http.StatusBadRequest, bad.Field, bad.Msg)
+		return
+	}
+	candidate := Silence{Matchers: matchers}
+	body := struct {
+		Alerts []api.AlertBody `json:"alerts"`
+		// Total counts the open alerts that match, of which Alerts holds
+		// the newest. Complete is false when there are more open alerts
+		// than a preview looks through.
+		Total    int  `json:"total"`
+		Complete bool `json:"complete"`
+	}{Alerts: []api.AlertBody{}, Complete: true}
+	filter := alert.Filter{Statuses: []alert.Status{alert.StatusFiring, alert.StatusAcknowledged, alert.StatusSnoozed}, Limit: 500}
+	for scanned := 0; h.alerts != nil; {
+		views, err := h.alerts.List(r.Context(), filter)
+		if err != nil {
+			h.internal(w, r, "preview silence", err)
+			return
+		}
+		for _, v := range views {
+			if candidate.Silences(v.Labels) {
+				body.Total++
+				if len(body.Alerts) < maxPreviewListed {
+					body.Alerts = append(body.Alerts, api.AlertOf(v))
+				}
+			}
+		}
+		scanned += len(views)
+		if len(views) < filter.Limit {
+			break
+		}
+		if scanned >= maxPreviewScanned {
+			body.Complete = false
+			break
+		}
+		last := views[len(views)-1]
+		filter.After = &alert.Position{StartedAt: last.StartedAt, ID: last.ID}
+	}
+	h.write(w, r, http.StatusOK, body)
 }
 
 // createRequest is the body of a request for a new silence.

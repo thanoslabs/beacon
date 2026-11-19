@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,8 +16,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/thanoslabs/beacon/internal/access"
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/config"
+	"github.com/thanoslabs/beacon/internal/discord"
+	"github.com/thanoslabs/beacon/internal/email"
 	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/notify"
@@ -25,6 +29,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/schedule"
 	"github.com/thanoslabs/beacon/internal/silence"
 	"github.com/thanoslabs/beacon/internal/slack"
+	"github.com/thanoslabs/beacon/internal/webhook"
 )
 
 // provisioner applies a configuration to the running server: it reconciles
@@ -36,19 +41,36 @@ type provisioner struct {
 	// path is where the configuration is read from; empty means none.
 	path   string
 	getenv func(string) string
-	// slackAPIURL is a process setting, not part of an integration.
-	slackAPIURL string
+	// slackAPIURL and discordAPIURL are process settings, not part of an
+	// integration.
+	slackAPIURL   string
+	discordAPIURL string
 
 	ingest       *ingest.Handler
 	interactions *slack.Interactions
-	pipeline     *notify.Pipeline
-	auth         *auth.Handler
-	silences     *silence.Handler
-	schedules    *schedule.Store
-	scheduleAPI  *schedule.Handler
-	identities   *identity.Store
-	identityAPI  *identity.Handler
-	linker       *identity.Linker
+	// discordInteractions handles what Discord sends to the same route, and
+	// discordCommands keeps the link command of each Discord application
+	// registered.
+	discordInteractions *discord.Interactions
+	discordCommands     *discord.Commands
+	// integrationTypes maps each integration of the active configuration to
+	// its type, which decides whose interactions a request is checked as.
+	integrationTypes atomic.Pointer[map[string]string]
+	pipeline         *notify.Pipeline
+	// people is the directory the escalation engine asks. It is told which
+	// integrations reach a person by email address.
+	people   *people
+	auth     *auth.Handler
+	silences *silence.Handler
+	// alertsAPI serves the alerts and their groups.
+	alertsAPI *api.Alerts
+	// provisionedAPI shows what the configuration defines, and the users.
+	provisionedAPI *api.Provisioned
+	schedules      *schedule.Store
+	scheduleAPI    *schedule.Handler
+	identities     *identity.Store
+	identityAPI    *identity.Handler
+	linker         *identity.Linker
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -80,17 +102,37 @@ func (p *provisioner) routes() []access.Route {
 	routes := []access.Route{
 		// The source's token is checked by the handler.
 		{Pattern: "POST " + ingest.Path, Level: access.Public, Handler: p.ingest},
-		// Slack's signature over the body is checked by the handler.
-		{Pattern: "POST " + slack.InteractionsPath, Level: access.Public, Handler: p.interactions},
+		// Slack's signature over the body, or Discord's, is checked by the
+		// handler.
+		{Pattern: "POST " + slack.InteractionsPath, Level: access.Public, Handler: http.HandlerFunc(p.handleInteractions)},
 		{Pattern: "POST " + ReloadPath, Level: access.Admin, Handler: http.HandlerFunc(p.handleReload)},
 	}
+	// The description of the API is the same for everyone.
+	routes = append(routes, api.OpenAPIRoutes()...)
 	routes = append(routes, p.auth.Routes()...)
+	// Members see alerts and respond to them.
+	routes = append(routes, p.alertsAPI.Routes()...)
+	// Members read what the configuration defines; nobody changes it here.
+	routes = append(routes, p.provisionedAPI.Routes()...)
 	// Silences are runtime state that members create and end.
 	routes = append(routes, p.silences.Routes()...)
 	// So are the overrides of schedules.
 	routes = append(routes, p.scheduleAPI.Routes()...)
 	// A person sees their own chat accounts.
 	return append(routes, p.identityAPI.Routes()...)
+}
+
+// handleInteractions hands what a chat service sends about the integration
+// named in the path to the handler of that service. Each handler verifies
+// the service's signature before it reads anything. A name that is no
+// integration goes to Slack's handler, which knows no secret for it and
+// refuses.
+func (p *provisioner) handleInteractions(w http.ResponseWriter, r *http.Request) {
+	if types := p.integrationTypes.Load(); types != nil && (*types)[r.PathValue("name")] == config.IntegrationTypeDiscord {
+		p.discordInteractions.ServeHTTP(w, r)
+		return
+	}
+	p.interactions.ServeHTTP(w, r)
 }
 
 // handleReload reloads the configuration for an admin. It does what SIGHUP
@@ -218,6 +260,7 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 			slog.String("team", s.Team), slog.String("email", s.Email))
 	}
 	p.teams.Store(&cfg.Teams)
+	p.provisionedAPI.SetConfig(cfg)
 	p.countSkipped(cfg.Teams, rows.Skipped)
 
 	p.reportSchedules(ctx, cfg, rotations)
@@ -388,44 +431,68 @@ func (p *provisioner) applyRouting(ctx context.Context, cfg config.Config, route
 func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config, rows map[provision.Kind]map[string]string) {
 	integrations, policies := rows[provision.Integrations], rows[provision.EscalationPolicies]
 	schedules, teams := rows[provision.Schedules], rows[provision.Teams]
-	ids := make(map[string]string, len(cfg.Integrations))
 	channels := make(map[string]notify.Channel, len(cfg.Integrations))
 	signingSecrets := make(map[string]config.Secret, len(cfg.Integrations))
 	clients := make(map[string]*slack.Client, len(cfg.Integrations))
 	// The chat services in which people have accounts. Slack can be asked
 	// for an account by email address; in Discord people link theirs.
 	var chat []identity.Integration
-	for _, i := range cfg.Integrations {
-		if i.Type == config.IntegrationTypeDiscord {
-			chat = append(chat, identity.Integration{ID: integrations[i.Name], Name: i.Name, Provider: identity.ProviderDiscord})
-		}
-		if i.Type != config.IntegrationTypeSlack {
-			p.logger.WarnContext(ctx, "this type of integration does not deliver yet, so nothing is sent through it",
-				slog.String("integration", i.Name), slog.String("type", i.Type))
-			continue
-		}
-		ids[i.Name] = integrations[i.Name]
-		client := slack.NewClient(p.slackAPIURL, i.Slack.BotToken)
-		channels[integrations[i.Name]] = slack.NewChannel(client)
-		signingSecrets[i.Name] = i.Slack.SigningSecret
-		clients[i.Name] = client
-		chat = append(chat, identity.Integration{ID: integrations[i.Name], Name: i.Name, Provider: identity.ProviderSlack, Lookup: client})
-		p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
-			slog.String("interactions_path", strings.Replace(slack.InteractionsPath, "{name}", i.Name, 1)))
-	}
-
 	// A person is reached through every integration that can reach one
-	// directly, unless the target narrows that with via. Today that is a
-	// direct message in Slack.
+	// directly, unless the target narrows that with via: a direct message
+	// in Slack or in Discord.
 	var direct []notify.Via
+	publicKeys := map[string]string{}
+	var applications []discord.Application
+	// The address at which people reach Beacon, for the links in messages
+	// that cannot carry buttons.
+	publicURL := ""
+	if cfg.Auth != nil {
+		publicURL = cfg.Auth.PublicURL
+	}
+	// The integrations that reach a person at their email address.
+	addressed := map[string]bool{}
 	for _, i := range cfg.Integrations {
-		if _, delivers := ids[i.Name]; delivers && i.Type == config.IntegrationTypeSlack {
-			direct = append(direct, notify.Via{IntegrationID: ids[i.Name], Name: i.Name, Provider: i.Type})
+		id := integrations[i.Name]
+		switch i.Type {
+		case config.IntegrationTypeSlack:
+			client := slack.NewClient(p.slackAPIURL, i.Slack.BotToken)
+			channels[id] = slack.NewChannel(client)
+			signingSecrets[i.Name] = i.Slack.SigningSecret
+			clients[i.Name] = client
+			chat = append(chat, identity.Integration{ID: id, Name: i.Name, Provider: identity.ProviderSlack, Lookup: client})
+			direct = append(direct, notify.Via{IntegrationID: id, Name: i.Name, Provider: i.Type})
+			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
+				slog.String("interactions_path", strings.Replace(slack.InteractionsPath, "{name}", i.Name, 1)))
+		case config.IntegrationTypeDiscord:
+			client := discord.NewClient(p.discordAPIURL, i.Discord.BotToken)
+			channels[id] = discord.NewChannel(client)
+			publicKeys[i.Name] = i.Discord.PublicKey
+			applications = append(applications, discord.Application{Integration: i.Name, ID: i.Discord.ApplicationID, Client: client})
+			chat = append(chat, identity.Integration{ID: id, Name: i.Name, Provider: identity.ProviderDiscord, LinkCommand: "/" + discord.LinkCommand + " code:"})
+			direct = append(direct, notify.Via{IntegrationID: id, Name: i.Name, Provider: i.Type})
+			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
+				slog.String("interactions_path", strings.Replace(discord.InteractionsPath, "{name}", i.Name, 1)))
+		case config.IntegrationTypeEmail:
+			channels[id] = email.NewChannel(*i.Email, publicURL)
+			addressed[id] = true
+			direct = append(direct, notify.Via{IntegrationID: id, Name: i.Name, Provider: i.Type})
+			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
+				slog.String("smtp_server", i.Email.Host), slog.String("tls", i.Email.TLS))
+			if publicURL == "" {
+				p.logger.WarnContext(ctx, "emails will carry no link to the alert in Beacon: Beacon does not know its own address; set auth.public_url",
+					slog.String("integration", i.Name))
+			}
+		case config.IntegrationTypeWebhook:
+			channels[id] = webhook.NewChannel(*i.Webhook, publicURL)
+			// The address may hold a token, so only its host is logged.
+			host := ""
+			if u, err := url.Parse(i.Webhook.URL); err == nil {
+				host = u.Host
+			}
+			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type), slog.String("host", host))
 		}
 	}
-	// via returns the integration with a name as a step uses it. One that
-	// does not deliver yet is kept: the step then records that it skipped
-	// it, which is better than leaving it out without a trace.
+	// via returns the integration with a name as a step uses it.
 	types := map[string]string{}
 	for _, i := range cfg.Integrations {
 		types[i.Name] = i.Type
@@ -443,8 +510,14 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 			for _, t := range step.Notify {
 				var target notify.StepTarget
 				switch {
-				case t.Channel != "":
-					target = notify.ChannelTarget(integrations[t.Integration], t.Integration, t.Channel)
+				case t.Integration != "":
+					// An outbound webhook has one address and no channels:
+					// its destination is the integration itself.
+					destination := t.Channel
+					if destination == "" {
+						destination = t.Integration
+					}
+					target = notify.ChannelTarget(integrations[t.Integration], t.Integration, destination)
 				case t.Schedule != "":
 					target = notify.StepTarget{Kind: notify.TargetSchedule, Name: t.Schedule, ID: schedules[t.Schedule], Via: direct}
 				case t.Team != "":
@@ -470,12 +543,15 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 		byID[policies[policy.Name]] = out
 		p.logger.InfoContext(ctx, "escalation policy configured", slog.String("policy", policy.Name), slog.Int("steps", len(out.Steps)), slog.Int("repeat", out.Repeat))
 		if !notifies[policy.Name] {
-			p.logger.WarnContext(ctx, "this escalation policy can notify nobody: none of its targets is reached through an integration that delivers; today that is a Slack integration, for channels and for people",
+			p.logger.WarnContext(ctx, "this escalation policy can notify nobody: its targets are people, and no integration in the configuration reaches a person; add a Slack, Discord or email integration",
 				slog.String("policy", policy.Name))
 		}
 	}
 	if cfg.Routing == nil {
 		p.logger.WarnContext(ctx, "alerts are stored but nobody is notified: the configuration has no routing block, so alerts have no escalation policy")
+	}
+	if p.people != nil {
+		p.people.SetAddressed(addressed)
 	}
 	p.pipeline.SetChannels(channels)
 	p.pipeline.SetPolicies(byID)
@@ -492,13 +568,34 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	if len(clients) > 0 && signIn == "" {
 		p.logger.WarnContext(ctx, "nobody can acknowledge or snooze from Slack: that needs a Slack account linked to a Beacon user, and without an identity provider (auth.oidc) there are no users to link; alerts can still be resolved from Slack")
 	}
+	// The same goes for Discord, where people link their accounts
+	// themselves, once they are users.
+	p.integrationTypes.Store(&types)
+	p.discordInteractions.SetPublicKeys(publicKeys)
+	p.discordInteractions.SetSignInURL(signIn)
+	p.discordCommands.SetApplications(applications)
+	if len(applications) > 0 && signIn == "" {
+		p.logger.WarnContext(ctx, "nobody can acknowledge or snooze from Discord: that needs a Discord account linked to a Beacon user, and without an identity provider (auth.oidc) there are no users to link; alerts can still be resolved from Discord")
+	}
 	p.linker.SetIntegrations(chat)
 	// The new integrations are asked about their users at once.
 	p.linker.Kick()
 }
 
-// UserFor tells the Slack handler which Beacon user an account of the
-// integration with this name belongs to.
+// CompleteLink links the account of a chat service to the user who was
+// given the code for the integration with this name, for the handler of
+// that service, which has verified where the request comes from.
+func (p *provisioner) CompleteLink(ctx context.Context, integration, externalID, code string) (name string, err error) {
+	in, ok := p.linker.Integrations()[integration]
+	if !ok || in.Lookup != nil {
+		return "", identity.ErrBadCode
+	}
+	u, err := p.identities.CompleteLink(ctx, in.ID, in.Provider, externalID, code)
+	return u.Name, err
+}
+
+// UserFor tells the handler of a chat service which Beacon user an account
+// of the integration with this name belongs to.
 func (p *provisioner) UserFor(ctx context.Context, integration, externalID string) (userID, name string, found bool, err error) {
 	in, ok := p.linker.Integrations()[integration]
 	if !ok {

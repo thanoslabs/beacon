@@ -1,0 +1,42 @@
+# One webhook source, and every alert group posted as JSON to one address.
+# docs/outbound-webhook.md is the contract for the requests and says how the
+# receiver verifies them. Copy this directory, put your address in place of
+# the one below, and point Beacon at the copy:
+#
+#   BEACON_CONFIG_DIR=./my-config docker compose up --build
+#
+# The signing secret is read from the environment:
+# BEACON_WEBHOOK_SIGNING_SECRET. Make one with `openssl rand -hex 32`, and
+# give the same value to the receiver.
+
+sources:
+  - name: default
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}
+
+integrations:
+  - name: tickets
+    type: webhook
+    webhook:
+      url: https://tickets.example.com/hooks/beacon
+      signing_secret: {env: BEACON_WEBHOOK_SIGNING_SECRET}
+      # Sent with every request. A credential is a secret reference:
+      #   Authorization: {env: BEACON_TICKETS_AUTHORIZATION}
+      headers:
+        X-Team: platform
+
+# An outbound webhook is named alone, without a channel: its address is in
+# the integration.
+escalation_policies:
+  - name: default
+    steps:
+      - notify:
+          - integration: tickets
+        timeout: 5m
+
+routing:
+  group_by: [alertname]
+  group_wait: 10s
+  group_interval: 5m
+  default:
+    escalation_policy: default

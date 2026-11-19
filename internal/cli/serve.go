@@ -15,7 +15,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/thanoslabs/beacon/internal/alert"
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/auth"
+	"github.com/thanoslabs/beacon/internal/discord"
 	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/logging"
@@ -53,7 +55,9 @@ func runServe(ctx context.Context, e env, args []string) error {
 		// slackAPIURL is a process setting, not part of an integration: it
 		// exists so that tests can point Beacon at a fake Slack.
 		slackAPIURL string
-		envErrs     []error
+		// discordAPIURL is the same for Discord.
+		discordAPIURL string
+		envErrs       []error
 	)
 	fs := newFlagSet(e, "serve", "Run the Beacon server")
 	stringSetting(fs, e, &srvCfg.Addr, "listen-address", "BEACON_LISTEN_ADDRESS", server.DefaultAddr,
@@ -70,6 +74,8 @@ func runServe(ctx context.Context, e env, args []string) error {
 		"how many notifications this process delivers at a time", &envErrs)
 	stringSetting(fs, e, &slackAPIURL, "slack-api-url", "BEACON_SLACK_API_URL", slack.DefaultAPIURL,
 		"base URL of the Slack Web API; change it only to test against a fake Slack")
+	stringSetting(fs, e, &discordAPIURL, "discord-api-url", "BEACON_DISCORD_API_URL", discord.DefaultAPIURL,
+		"base URL of the Discord HTTP API; change it only to test against a fake Discord")
 	databaseSettings(fs, e, &dbCfg, &envErrs)
 	configSetting(fs, e, &cfgPath)
 	if err := parseFlags(fs, args, envErrs...); err != nil {
@@ -81,6 +87,9 @@ func runServe(ctx context.Context, e env, args []string) error {
 	}
 	if _, err := url.ParseRequestURI(slackAPIURL); err != nil || !strings.HasPrefix(slackAPIURL, "http") {
 		return fmt.Errorf("--slack-api-url must be an http or https URL, got %q", slackAPIURL)
+	}
+	if _, err := url.ParseRequestURI(discordAPIURL); err != nil || !strings.HasPrefix(discordAPIURL, "http") {
+		return fmt.Errorf("--discord-api-url must be an http or https URL, got %q", discordAPIURL)
 	}
 	if srvCfg.ShutdownTimeout <= 0 {
 		return fmt.Errorf("--shutdown-timeout must be positive, got %s", srvCfg.ShutdownTimeout)
@@ -141,7 +150,8 @@ func runServe(ctx context.Context, e env, args []string) error {
 	identities := identity.NewStore(pool)
 	linker := identity.NewLinker(identities, logger)
 	// The escalation engine asks these two who to notify and where.
-	pipeline.SetPeople(people{schedules: schedules, identities: identities})
+	directory := &people{schedules: schedules, identities: identities}
+	pipeline.SetPeople(directory)
 
 	registry := server.NewRegistry()
 	srvCfg.Authenticator = signIn
@@ -151,22 +161,29 @@ func runServe(ctx context.Context, e env, args []string) error {
 	}
 	alerts.Observe(pipeline.Observe)
 	prov := &provisioner{
-		logger: logger, pool: pool, path: cfgPath, getenv: e.getenv, slackAPIURL: slackAPIURL,
-		ingest:       ingest.New(logger, alerts, nil),
-		interactions: slack.NewInteractions(logger, alerts, nil),
-		pipeline:     pipeline,
-		auth:         signIn,
-		silences:     silence.NewHandler(logger, silences),
-		schedules:    schedules,
-		scheduleAPI:  schedule.NewHandler(logger, schedules),
-		identities:   identities,
-		identityAPI:  identity.NewHandler(logger, identities),
-		linker:       linker,
+		logger: logger, pool: pool, path: cfgPath, getenv: e.getenv, slackAPIURL: slackAPIURL, discordAPIURL: discordAPIURL,
+		ingest:              ingest.New(logger, alerts, nil),
+		interactions:        slack.NewInteractions(logger, alerts, nil),
+		discordInteractions: discord.NewInteractions(logger, alerts),
+		discordCommands:     discord.NewCommands(logger),
+		pipeline:            pipeline,
+		people:              directory,
+		auth:                signIn,
+		silences:            silence.NewHandler(logger, silences),
+		alertsAPI:           api.NewAlerts(logger, alerts),
+		provisionedAPI:      api.NewProvisioned(logger, pool),
+		schedules:           schedules,
+		scheduleAPI:         schedule.NewHandler(logger, schedules),
+		identities:          identities,
+		identityAPI:         identity.NewHandler(logger, identities, linker.Integrations),
+		linker:              linker,
 	}
+	prov.silences.SetAlerts(alerts)
 	prov.registerMetrics(registry)
 	prov.ingest.RegisterMetrics(registry)
 	linker.RegisterMetrics(registry)
 	prov.interactions.SetIdentities(prov)
+	prov.discordInteractions.SetIdentities(prov)
 	// A sign-in may have made a user: count the skipped members again, and
 	// look for the user's chat accounts without waiting.
 	prov.auth.AfterSignIn(func(ctx context.Context) {
@@ -195,6 +212,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 	background.Go(func() { alerts.RunSnoozeExpiry(ctx, logger, snoozeExpiryInterval) })
 	background.Go(func() { schedules.Run(ctx, logger, scheduleInterval) })
 	background.Go(func() { linker.Run(ctx, identity.DefaultInterval) })
+	background.Go(func() { prov.discordCommands.Run(ctx, discord.DefaultCommandInterval) })
 	background.Go(func() { sessions.RunCleanup(ctx, logger, sessionCleanupInterval) })
 	background.Go(func() {
 		for {

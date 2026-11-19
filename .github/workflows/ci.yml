@@ -52,15 +52,18 @@ jobs:
         run: golangci-lint run ./...
 
       # Database tests run against the Postgres version pinned in compose.yaml,
-      # and sign-in tests against the Dex pinned there, a real OpenID Connect
-      # identity provider.
-      - name: Start Postgres and Dex
-        run: docker compose up --detach --wait postgres dex
+      # sign-in tests against the Dex pinned there, a real OpenID Connect
+      # identity provider, and the tests of the email channel against the
+      # Mailpit pinned there, a real SMTP server that delivers nothing.
+      - name: Start Postgres, Dex and Mailpit
+        run: docker compose up --detach --wait postgres dex mailpit
 
       - name: Test
         env:
           BEACON_TEST_DATABASE_URL: postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable
           BEACON_TEST_OIDC_ISSUER: http://127.0.0.1:5556/dex
+          BEACON_TEST_SMTP_ADDR: 127.0.0.1:1025
+          BEACON_TEST_MAILPIT_URL: http://127.0.0.1:8025
         run: go test -race ./...
 
   docker:

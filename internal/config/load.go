@@ -502,6 +502,7 @@ func resolveSecrets(doc *document, r secretReader, dir string) Errors {
 			resolve(&in.Email.Password, in.Origin, object, "email.password")
 		}
 		if in.Webhook != nil {
+			resolve(&in.Webhook.SigningSecret, in.Origin, object, "webhook.signing_secret")
 			for name, value := range in.Webhook.Headers {
 				resolve(&value.Secret, in.Origin, object, "webhook.headers."+name)
 				in.Webhook.Headers[name] = value

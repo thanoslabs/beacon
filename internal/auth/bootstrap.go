@@ -106,6 +106,7 @@ func (h *Handler) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true, Secure: s.secure, SameSite: http.SameSiteLaxMode,
 	})
 	h.logger.InfoContext(ctx, "bootstrap admin signed in", slog.String("user_id", u.ID), slog.String("remote_addr", r.RemoteAddr))
+	expires = expires.UTC()
 	h.write(w, r, http.StatusOK, me{ID: u.ID, Email: u.Email, DisplayName: u.DisplayName, Role: u.Role, SessionExpiresAt: &expires})
 }
 

@@ -56,17 +56,21 @@ Beacon is closed by default. Every route needs a session unless it is on the sho
 |---|---|---|
 | `GET /auth/login` | Public | Starts a sign-in and sends the browser to the provider |
 | `GET /auth/callback` | Public | Where the provider sends the browser back. This is the redirect URI. |
+| `GET /auth/methods` | Public | Which ways to sign in exist, for a sign-in page: `{"oidc": true, "bootstrap_admin": false}` |
 | `POST /auth/logout` | Member | Ends the session. Answers `204`. |
 | `GET /api/v1/me` | Member | Who is signed in: `id`, `email`, `display_name`, `role` and `session_expires_at` |
 | `GET /api/v1/me/identities` | Member | The chat accounts linked to whoever is signed in; see [Chat accounts](#chat-accounts) |
 | `POST /api/v1/config/reload` | Admin | Reloads the configuration; see [[configuration#Reload without a restart]] |
 | `GET /api/v1/tokens`, `POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | Admin | Lists, creates and revokes [API tokens](#api-tokens) |
-| `GET /api/v1/silences`, `POST /api/v1/silences`, `GET /api/v1/silences/<id>`, `DELETE /api/v1/silences/<id>` | Member | Lists, creates, reads and expires [[silences]] |
+| The routes of alerts and alert groups | Member | Lists, reads and acts on alerts; see [[api#Alerts]] |
+| `GET` on sources, integrations, escalation policies, routing, teams and users | Member | What the configuration defines, for reading, and the users; see [[api#What the configuration defines]] |
+| `GET /api/v1/silences`, `POST /api/v1/silences`, `POST /api/v1/silences/preview`, `GET /api/v1/silences/<id>`, `DELETE /api/v1/silences/<id>` | Member | Lists, creates, previews, reads and expires [[silences]] |
 | `GET /api/v1/schedules`, `GET /api/v1/schedules/<name>`, `GET /api/v1/schedules/<name>/shifts`, `GET /api/v1/teams/<name>/on-call` | Member | Schedules, who is on call now and over a period; see [[schedules#Who is on call]] |
 | `GET /api/v1/schedules/<name>/overrides`, `POST /api/v1/schedules/<name>/overrides`, `DELETE /api/v1/schedules/<name>/overrides/<id>` | Member | Lists, creates and removes the overrides of a schedule; see [[schedules#Overrides]] |
 | `POST /auth/bootstrap` | Public | Signs the [bootstrap admin](#bootstrap-admin) in. The password is checked and the attempts are bounded; `404` unless the account is enabled. |
 | `POST /api/v1/ingest/<source>` | Public | Receives alerts. The source's own token is checked; see [[webhook]]. |
-| `POST /api/v1/integrations/<name>/interactions` | Public | Receives button presses from Slack. Slack's signature is checked; see [[slack]]. |
+| `POST /api/v1/integrations/<name>/interactions` | Public | Receives button presses from Slack and from Discord. The service's signature is checked; see [[slack]] and [[discord]]. |
+| `GET /api/v1/openapi.json`, `GET /api/v1/openapi.yaml` | Public | The OpenAPI description of the API; see [[api#OpenAPI description]] |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Public | Probes and metrics, for machines that have no session |
 
 "Member" means anyone who is signed in or presents an API token, with either role. "Admin" needs the admin role; a member gets `403`.
@@ -90,7 +94,7 @@ curl -X POST https://beacon.example.com/api/v1/tokens \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"name": "deploy-pipeline", "role": "member", "expires_in": "90d"}'
 
-# List. Shows names, roles and times, never the tokens.
+# List. Shows names, roles and times, never the tokens. Paged with limit and cursor.
 curl -H "Authorization: Bearer $ADMIN_TOKEN" https://beacon.example.com/api/v1/tokens
 
 # Revoke. The token stops working at once.
@@ -162,10 +166,10 @@ Beacon keeps track of which account in Slack or Discord belongs to which user. I
 | Service | How an account is linked |
 |---|---|
 | Slack | Beacon finds it by the user's email address, without the person doing anything; see [[slack#People]] |
-| Discord | The person links it themselves. Not available yet: see the note below. |
+| Discord | The person links it themselves, with a one-time code; see [[discord#People]] |
 
-- **Acknowledging and snoozing from chat need a linked account.** A chat account that belongs to no Beacon user can resolve an alert and nothing else ([[slack#Who can act]]). An install without an identity provider has no users to link, so nobody can acknowledge from chat there.
-- An account belongs to one user. Beacon never moves an account from one person to another: if Slack reports, for one user's address, an account that another user has linked, it is logged as an error and nothing changes.
+- **Acknowledging and snoozing from chat need a linked account.** A chat account that belongs to no Beacon user can resolve an alert and nothing else ([[slack#Who can act]], [[discord#Who can act]]). An install without an identity provider has no users to link, so nobody can acknowledge from chat there.
+- An account belongs to one user. Beacon never moves an account from one person to another: if Slack reports, for one user's address, an account that another user has linked, it is logged as an error and nothing changes, and a Discord account that is someone else's cannot be linked with a code.
 - An identity is tied to the integration through which it is known. A user ID of Slack means something in one workspace only, so a person has one identity per Slack integration.
 - The bootstrap admin is an account, not a person with an address, and is never looked up.
 - A disabled user's accounts are attributed to nobody.
@@ -180,8 +184,14 @@ Beacon keeps track of which account in Slack or Discord belongs to which user. I
 
 `origin` is `email` for an account that Beacon found by the email address and `self` for one the person linked. An API token is not a person and has no identities.
 
-> [!note] Discord
-> Discord does not let an application look a person up by email address, so a person will link their Discord account themselves: Beacon gives the signed-in user a one-time code, and the person gives that code to Beacon from inside Discord, which proves the account is theirs. The codes (valid once, for ten minutes, stored as hashes) and the linking are implemented and tested. What is missing is the part that Discord talks to, which arrives with the Discord integration; until then no route issues a code.
+For a service in which people link their accounts themselves, two more routes act on the account of whoever asks. `<integration>` is the name of the integration:
+
+| Route | What it does |
+|---|---|
+| `POST /api/v1/me/identities/<integration>/link-code` | Issues a one-time code, valid for ten minutes, and answers `201` with it and with the command to type in the service. [[discord#People]] shows the whole exchange. |
+| `DELETE /api/v1/me/identities/<integration>` | Removes the account the person linked. Answers `204`, or `404` when there is none. |
+
+Both answer `404` for a name that is no chat integration, `409` for an integration whose accounts are linked by email address, such as Slack, and `403` for an API token. The bootstrap admin gets `403` for a code: it is not a person.
 
 ## Roles and teams
 

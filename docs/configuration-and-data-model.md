@@ -70,7 +70,7 @@ An integration is a connection to a notification service. Other objects name it 
 | `slack` | `bot_token` (secret), `signing_secret` (secret) |
 | `discord` | `bot_token` (secret), `public_key`, `application_id` |
 | `email` | `host`, `port`, `username`, `password` (secret), `from`, `tls` (`starttls`, `implicit` or `none`) |
-| `webhook` | `url`, `headers` (map; each value is a plain string or a secret reference) |
+| `webhook` | `url`, `signing_secret` (secret), `headers` (map; each value is a plain string or a secret reference) |
 
 ### Teams
 
@@ -118,8 +118,9 @@ Each target is a map with exactly one of these forms:
 | `{team: <name>}` | Every member of the team |
 | `{user: <email>}` | One user |
 | `{channel: <channel>, integration: <name>}` | A shared channel, for example a Slack channel |
+| `{integration: <name>}` | An outbound webhook, which has one address and no channels |
 
-People targets (`schedule`, `team`, `user`) accept an optional `via` list of integration names. Without it, the person is notified through every integration that can reach them directly: a Slack or Discord direct message when their account is linked, and email. Of these, Slack direct messages exist today.
+People targets (`schedule`, `team`, `user`) accept an optional `via` list of integration names. Without it, the person is notified through every integration that can reach them directly: a Slack or Discord direct message when their account is linked, and email, at the address the user has in Beacon.
 
 ### Routing
 
@@ -390,6 +391,8 @@ The **bootstrap admin** has a row in `users` with the email address `bootstrap-a
 
 ### Alerts
 
+The alerts API lists alerts newest first and a page at a time ([[api#Lists]]), which two indexes on (`started_at`, `id`) serve: one over every alert, and one over the alerts that are not resolved.
+
 **`alerts`**
 
 | Column | Type | Notes |
@@ -528,7 +531,7 @@ These are judgement calls made in this proposal. Each can be changed before the 
 | 10 | Provisioned objects are copied into one table per kind with a `jsonb` definition, and removed objects keep their row | One generic table for all kinds; or fully normalised tables per kind |
 | 11 | Routing rules are a flat ordered list where the first match wins | A nested routing tree as in Alertmanager |
 | 12 | Keys are random `uuid` values, with `bigint` identity for append-only logs; no extensions | Time-ordered UUIDs, which need a newer minimum Postgres version or generation in the application |
-| 13 | Escalation steps name their targets, and people are reached through every integration that can reach them unless `via` narrows it. With Slack as the only channel so far, that is a direct message to the Slack account linked by email address. | Per-user notification rules, which are a later requirement |
+| 13 | Escalation steps name their targets, and people are reached through every integration that can reach them unless `via` narrows it. That is a direct message to the linked Slack or Discord account, and email to the user's address. | Per-user notification rules, which are a later requirement |
 | 14 | Severity levels are fixed: `critical`, `warning`, `info` | Configurable levels |
 
 ## Open questions

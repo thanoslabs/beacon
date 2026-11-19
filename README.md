@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md), [routes](docs/configuration.md#how-an-alert-is-routed) them by label, [groups](docs/configuration.md#grouping) related alerts and [escalates](docs/escalation.md) each group through its policy: it pages the person on call, the team or a [Slack channel](docs/slack.md), step by step, until someone acknowledges, snoozes or resolves the alert from Slack, and it [attributes](docs/slack.md#people) those actions to the Beacon user behind the Slack account. It runs [on-call rotations](docs/schedules.md), records every shift, takes [overrides](docs/schedules.md#overrides), answers [who is on call](docs/schedules.md#who-is-on-call) and [previews](docs/schedules.md#preview-a-change) what a change to a schedule would move. People are reached through Slack only so far, the Slack integration has not been tried against a real workspace, and there is no web interface yet. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md), [routes](docs/configuration.md#how-an-alert-is-routed) them by label, [groups](docs/configuration.md#grouping) related alerts and [escalates](docs/escalation.md) each group through its policy: it pages the person on call, the team or a [Slack](docs/slack.md) or [Discord](docs/discord.md) channel, in chat and by [email](docs/email.md), and posts to an [outbound webhook](docs/outbound-webhook.md), step by step, until someone acknowledges, snoozes or resolves the alert from Slack or Discord, and it [attributes](docs/access.md#chat-accounts) those actions to the Beacon user behind the chat account. It runs [on-call rotations](docs/schedules.md), records every shift, takes [overrides](docs/schedules.md#overrides), answers [who is on call](docs/schedules.md#who-is-on-call) and [previews](docs/schedules.md#preview-a-change) what a change to a schedule would move. Neither chat integration has been tried against the real service, and there is no web interface yet. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -55,7 +55,7 @@ curl -X POST http://localhost:8080/api/v1/ingest/default \
 
 Without `BEACON_SOURCE_TOKEN`, Compose uses a fixed token that is only fit for a local try-out.
 
-The [webhook page](docs/webhook.md) describes the payload and the responses. Sources, integrations and everything else that is provisioned are defined in YAML files; the [configuration page](docs/configuration.md) is the reference. To use your own, point Compose at a directory of them with `BEACON_CONFIG_DIR`. To have alerts posted to Slack, start from [`examples/slack`](examples/slack/beacon.yaml) as the [Slack page](docs/slack.md) describes. Alerts can be resolved from Slack straight away; acknowledging and snoozing from Slack need people to sign in to Beacon through an identity provider first, so that Beacon knows whose Slack account is whose ([who can act](docs/slack.md#who-can-act)). For a rotation and a policy that pages whoever is on call, see [`examples/on-call`](examples/on-call/beacon.yaml). To put Beacon behind an Alertmanager or Grafana alerting, see the [Alertmanager page](docs/alertmanager.md) and the [Grafana page](docs/grafana.md); `docker compose --profile alertmanager up` and `--profile grafana` start one that sends to Beacon.
+The [webhook page](docs/webhook.md) describes the payload and the responses. Sources, integrations and everything else that is provisioned are defined in YAML files; the [configuration page](docs/configuration.md) is the reference. To use your own, point Compose at a directory of them with `BEACON_CONFIG_DIR`. To have alerts posted to Slack, start from [`examples/slack`](examples/slack/beacon.yaml) as the [Slack page](docs/slack.md) describes; for Discord, from [`examples/discord`](examples/discord/beacon.yaml) and the [Discord page](docs/discord.md); for email, from [`examples/email`](examples/email/beacon.yaml) and the [email page](docs/email.md); and to have them posted to an endpoint of your own, from [`examples/outbound-webhook`](examples/outbound-webhook/beacon.yaml) and the [outbound webhook page](docs/outbound-webhook.md). Alerts can be resolved from Slack straight away; acknowledging and snoozing from Slack need people to sign in to Beacon through an identity provider first, so that Beacon knows whose Slack account is whose ([who can act](docs/slack.md#who-can-act)). For a rotation and a policy that pages whoever is on call, see [`examples/on-call`](examples/on-call/beacon.yaml). To put Beacon behind an Alertmanager or Grafana alerting, see the [Alertmanager page](docs/alertmanager.md) and the [Grafana page](docs/grafana.md); `docker compose --profile alertmanager up` and `--profile grafana` start one that sends to Beacon.
 
 Releases publish a container image for `linux/amd64` and `linux/arm64`, tagged with the bare version:
 
@@ -96,18 +96,22 @@ export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmo
 ./bin/beacon hash-password      # hash a password for the bootstrap admin
 ```
 
-The server answers on these endpoints. Everything that is not listed as open in the [access page](docs/access.md) needs a session, and an address that does not exist answers `401` like one that does:
+The server answers on these endpoints; the [API page](docs/api.md) describes how they behave as a whole, and the [API reference](docs/api-reference.md) lists every route from the OpenAPI description. Everything that is not listed as open in the [access page](docs/access.md) needs a session, and an address that does not exist answers `401` like one that does:
 
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/v1/ingest/<source>` | Receives alerts from a source: Alertmanager's notifications ([Alertmanager page](docs/alertmanager.md)), Grafana's ([Grafana page](docs/grafana.md)) or the generic JSON payload ([webhook page](docs/webhook.md)), by the type of the source. |
-| `POST /api/v1/integrations/<name>/interactions` | Receives button presses from Slack. See the [Slack page](docs/slack.md). |
+| `POST /api/v1/integrations/<name>/interactions` | Receives button presses from Slack, and button presses and the link command from Discord, by the type of the integration. See the [Slack page](docs/slack.md) and the [Discord page](docs/discord.md). |
 | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` | Sign-in through an OpenID Connect identity provider. See the [access page](docs/access.md). |
 | `GET /api/v1/me` | Who is signed in. Needs a session. |
-| `GET /api/v1/me/identities` | The Slack accounts linked to whoever is signed in. See the [access page](docs/access.md#chat-accounts). |
+| `GET /api/v1/me/identities`, `POST /api/v1/me/identities/<integration>/link-code`, `DELETE /api/v1/me/identities/<integration>` | The chat accounts linked to whoever is signed in, a one-time code with which they link their Discord account, and its removal. See the [access page](docs/access.md#chat-accounts). |
+| `GET /api/v1/alerts`, `GET /api/v1/alerts/<id>`, `GET /api/v1/alerts/<id>/timeline`, `POST /api/v1/alerts/<id>/acknowledge`, `.../snooze`, `.../resolve`, and the same under `/api/v1/alert-groups/<id>` | Alerts: list with filters, read, and act on one alert or on a whole group. Needs a session or a token, with either role. See the [API page](docs/api.md#alerts). |
+| `GET /api/v1/sources`, `/api/v1/integrations`, `/api/v1/escalation-policies`, `/api/v1/routing`, `/api/v1/teams`, each also by `/<name>` except routing, and `GET /api/v1/users` | What the configuration defines, for reading, without credentials, and the users. Needs a session or a token, with either role. See the [API page](docs/api.md#what-the-configuration-defines). |
+| `GET /auth/methods` | Which ways to sign in exist. Open. |
+| `GET /api/v1/openapi.json`, `GET /api/v1/openapi.yaml` | The [OpenAPI description](docs/api.md#openapi-description) of the API. Open. |
 | `POST /api/v1/config/reload` | Reloads the configuration. Needs the admin role. |
 | `GET`, `POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | API tokens for automation. Needs the admin role. |
-| `GET`, `POST /api/v1/silences`, `GET`, `DELETE /api/v1/silences/<id>` | Silences. Needs a session or a token, with either role. See the [silences page](docs/silences.md). |
+| `GET`, `POST /api/v1/silences`, `POST /api/v1/silences/preview`, `GET`, `DELETE /api/v1/silences/<id>` | Silences, and which open alerts one would match. Needs a session or a token, with either role. See the [silences page](docs/silences.md). |
 | `GET /api/v1/schedules`, `GET /api/v1/schedules/<name>`, `GET /api/v1/schedules/<name>/shifts`, `GET /api/v1/teams/<name>/on-call` | Who is on call, now and over a period, for a schedule and for a team. Needs a session or a token, with either role. See the [schedules page](docs/schedules.md#who-is-on-call). |
 | `GET`, `POST /api/v1/schedules/<name>/overrides`, `DELETE /api/v1/schedules/<name>/overrides/<id>` | Overrides: someone covers a schedule for a period. Needs a session or a token, with either role. See the [schedules page](docs/schedules.md#overrides). |
 | `POST /auth/bootstrap` | Sign-in of the bootstrap admin, for installs with no identity provider. Off unless configured. |
@@ -131,7 +135,14 @@ docker compose up -d --wait postgres dex
 export BEACON_TEST_OIDC_ISSUER='http://127.0.0.1:5556/dex'
 ```
 
-The tests in `internal/e2e` build the binary and run it as a process against Postgres and a fake Slack: an alert goes in by webhook, a message comes out to Slack, a button press acknowledges it and the source resolves it. They run with the rest of the tests.
+The tests of the email channel need an SMTP server. `compose.yaml` has one, [Mailpit](https://mailpit.axllent.org/), which keeps every message and delivers none; it is started by name and is skipped by the tests unless its addresses are set:
+
+```sh
+docker compose up -d --wait mailpit
+export BEACON_TEST_SMTP_ADDR='127.0.0.1:1025' BEACON_TEST_MAILPIT_URL='http://127.0.0.1:8025'
+```
+
+The tests in `internal/e2e` build the binary and run it as a process against Postgres, a fake Slack, a fake Discord and the SMTP server above: an alert goes in by webhook, a message comes out to Slack, a button press acknowledges it and the source resolves it; and the same from Discord, where a person first links their account with a code. They run with the rest of the tests.
 
 Every process setting can be given as a flag or as an environment variable; run `beacon <command> -h` to list them. Provisioned objects come from the files named by `--config` (or `BEACON_CONFIG`); without it Beacon starts with no sources and notifies nobody.
 

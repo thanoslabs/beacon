@@ -23,6 +23,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/thanoslabs/beacon/internal/auth/oidctest"
+	"github.com/thanoslabs/beacon/internal/discord/discordtest"
+	"github.com/thanoslabs/beacon/internal/email/mailpittest"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
 	"github.com/thanoslabs/beacon/internal/slack/slacktest"
@@ -33,6 +35,8 @@ const (
 	sourceToken   = "e2e-source-token-marker-a41c7f"
 	botToken      = "xoxb-e2e-bot-token-marker-5d20"
 	signingSecret = "e2e-signing-secret-marker-9be3"
+	discordToken  = "e2e-discord-bot-token-marker-c7d1"
+	hookSecret    = "e2e-hook-signing-secret-marker-3a9f"
 )
 
 var (
@@ -117,8 +121,11 @@ type beacon struct {
 	t     *testing.T
 	url   string
 	slack *slacktest.Server
-	db    *pgxpool.Pool
-	cmd   *exec.Cmd
+	// discord is the fake Discord, for the configurations that have a
+	// Discord integration.
+	discord *discordtest.Server
+	db      *pgxpool.Pool
+	cmd     *exec.Cmd
 
 	mu   sync.Mutex
 	logs strings.Builder
@@ -168,7 +175,14 @@ func launch(t *testing.T, dbURL, dir string) *beacon {
 	t.Helper()
 	bin := build(t)
 
-	b := &beacon{t: t, slack: slacktest.New(t, botToken), done: make(chan struct{}), addr: make(chan string, 1), dir: dir}
+	b := &beacon{t: t, slack: slacktest.New(t, botToken), discord: discordtest.New(t, discordToken), done: make(chan struct{}), addr: make(chan string, 1), dir: dir}
+	// The fake Discord signs with a key of its own, which the configuration
+	// must name.
+	if raw, err := os.ReadFile(filepath.Join(dir, "beacon.yaml")); err == nil {
+		if err := os.WriteFile(filepath.Join(dir, "beacon.yaml"), []byte(b.withDiscordKey(string(raw))), 0o600); err != nil {
+			t.Fatalf("write configuration: %v", err)
+		}
+	}
 	b.cmd = exec.Command(bin, "serve")
 	b.cmd.Env = []string{
 		"BEACON_DATABASE_URL=" + dbURL,
@@ -177,6 +191,10 @@ func launch(t *testing.T, dbURL, dir string) *beacon {
 		"BEACON_SOURCE_TOKEN=" + sourceToken,
 		"BEACON_SLACK_BOT_TOKEN=" + botToken,
 		"BEACON_SLACK_API_URL=" + b.slack.URL,
+		"BEACON_DISCORD_BOT_TOKEN=" + discordToken,
+		"BEACON_DISCORD_API_URL=" + b.discord.URL,
+		"BEACON_SMTP_PASSWORD=" + mailpittest.Password,
+		"BEACON_HOOK_SIGNING_SECRET=" + hookSecret,
 		"BEACON_OIDC_CLIENT_SECRET=" + oidctest.ClientSecret,
 		"BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH=" + bootstrapHash(t),
 	}
@@ -1310,7 +1328,7 @@ func TestConfigurationChangesBetweenStarts(t *testing.T) {
 // would, and waits for the n-th outcome in the log.
 func (b *beacon) reload(yaml string, n int) (logs string) {
 	b.t.Helper()
-	if err := os.WriteFile(filepath.Join(b.dir, "beacon.yaml"), []byte(yaml), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(b.dir, "beacon.yaml"), []byte(b.withDiscordKey(yaml)), 0o600); err != nil {
 		b.t.Fatalf("write configuration: %v", err)
 	}
 	if err := b.cmd.Process.Signal(syscall.SIGHUP); err != nil {
@@ -1439,10 +1457,20 @@ func TestReload(t *testing.T) {
 	b.find("the first step of the reloaded policy", inChannel("C0ALERTS", "AfterReload"))
 	b.find("the second step of the reloaded policy", inChannel("C0SECOND", "AfterReload"))
 
+	// 5. So do the channels: an integration of another service that arrives
+	// with a reload delivers from then on.
+	reloadAddsDiscord(b, twoSteps, 5)
+	reloads := 5
+	if mailpittest.Configured() {
+		reloads++
+		reloadAddsEmail(b, twoSteps, reloads)
+	}
+	reloadAddsWebhook(b, twoSteps, reloads+1)
+
 	if code := b.terminate(); code != 0 {
 		t.Errorf("exit code after SIGTERM = %d, want 0", code)
 	}
-	for _, secret := range []string{sourceToken, botToken, signingSecret} {
+	for _, secret := range []string{sourceToken, botToken, signingSecret, discordToken, hookSecret} {
 		if strings.Contains(b.output(), secret) {
 			t.Errorf("the logs contain the credential %q", secret)
 		}

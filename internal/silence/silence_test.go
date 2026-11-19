@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/thanoslabs/beacon/internal/access"
+	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
 	"github.com/thanoslabs/beacon/internal/silence"
 )
@@ -457,5 +459,113 @@ func TestTheDatabaseKeepsASilenceWhole(t *testing.T) {
 		if _, err := f.pool.Exec(ctx, query); err == nil {
 			t.Errorf("%s: the database accepted it", name)
 		}
+	}
+}
+
+// openAlerts stands in for the alert store in a preview: it answers the
+// alerts it holds, a page at a time, as the store does.
+type openAlerts []alert.View
+
+func (o openAlerts) List(_ context.Context, f alert.Filter) ([]alert.View, error) {
+	start := 0
+	if f.After != nil {
+		for i, v := range o {
+			if v.ID == f.After.ID {
+				start = i + 1
+			}
+		}
+	}
+	return o[start:min(start+f.Limit, len(o))], nil
+}
+
+// TestPreview: before a silence is created, Beacon says which open alerts
+// it would match, and stores nothing.
+func TestPreview(t *testing.T) {
+	f := newFixture(t)
+	var alerts openAlerts
+	for i := range 1200 {
+		name := "HighLoad"
+		if i%10 == 0 {
+			name = "DiskFull"
+		}
+		alerts = append(alerts, alert.View{Alert: alert.Alert{ID: fmt.Sprintf("alert-%04d", i), Status: alert.StatusFiring, Severity: alert.SeverityWarning,
+			Labels: map[string]string{"alertname": name, "host": fmt.Sprintf("db%d", i)}}, Source: "prod"})
+	}
+	h := silence.NewHandler(slog.New(slog.DiscardHandler), f.store)
+	h.SetAlerts(alerts)
+	mux := http.NewServeMux()
+	for _, route := range h.Routes() {
+		mux.Handle(route.Pattern, route.Handler)
+	}
+	preview := func(body string) (int, map[string]any) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/silences/preview", strings.NewReader(body)))
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("preview answered %d %q", rec.Code, rec.Body)
+		}
+		return rec.Code, out
+	}
+
+	// Every page of open alerts is looked through; the newest matches are
+	// answered and all are counted.
+	code, body := preview(`{"matchers": [{"label": "alertname", "operator": "=", "value": "DiskFull"}]}`)
+	listed, _ := body["alerts"].([]any)
+	if code != http.StatusOK || body["total"] != float64(120) || body["complete"] != true || len(listed) != 50 {
+		t.Fatalf("preview = %d total %v complete %v with %d alerts listed", code, body["total"], body["complete"], len(listed))
+	}
+	if first := listed[0].(map[string]any); first["id"] != "alert-0000" || first["source"] != "prod" || first["labels"].(map[string]any)["alertname"] != "DiskFull" {
+		t.Errorf("first alert = %v", first)
+	}
+	if code, body := preview(`{"matchers": [{"label": "host", "operator": "=~", "value": "db1[0-9]"}]}`); code != http.StatusOK || body["total"] != float64(10) || len(body["alerts"].([]any)) != 10 {
+		t.Errorf("a pattern = %d %v", code, body["total"])
+	}
+	if code, body := preview(`{"matchers": [{"label": "alertname", "operator": "=", "value": "Nothing"}]}`); code != http.StatusOK || body["total"] != float64(0) || body["alerts"] == nil {
+		t.Errorf("no match = %d %v", code, body)
+	}
+	// The matchers are checked like those of a silence.
+	for body, field := range map[string]string{
+		`{"matchers": []}`: "matchers", `{"matchers": [{"label": "host", "operator": "=~", "value": "("}]}`: "matchers[0].value",
+		`{"matchers": [{"label": "host", "operator": "=", "value": "db1"}], "comment": "x"}`: "", `nonsense`: "",
+	} {
+		if code, answer := preview(body); code != http.StatusBadRequest || fmt.Sprint(answer["field"]) != fmt.Sprint(map[bool]any{true: nil, false: field}[field == ""]) {
+			t.Errorf("preview of %s = %d %v, want 400 naming %q", body, code, answer, field)
+		}
+	}
+	if code, list := f.call(http.MethodGet, "/api/v1/silences?expired=true", ""); code != http.StatusOK || len(list["silences"].([]any)) != 0 {
+		t.Errorf("a preview stored a silence: %v", list)
+	}
+}
+
+// TestSilencesArePaged: the list takes limit and cursor like every list.
+func TestSilencesArePaged(t *testing.T) {
+	f := newFixture(t)
+	for i := range 5 {
+		f.create(silence.New{Matchers: []silence.Matcher{equal("host", fmt.Sprintf("db%d", i))}, EndsAt: f.clock.Now().Add(time.Duration(i+1) * time.Hour)})
+	}
+	var pages []string
+	cursor := ""
+	for range 5 {
+		code, body := f.call(http.MethodGet, "/api/v1/silences?limit=2&cursor="+url.QueryEscape(cursor), "")
+		if code != http.StatusOK {
+			t.Fatalf("list = %d %v", code, body)
+		}
+		var hosts []string
+		for _, item := range body["silences"].([]any) {
+			hosts = append(hosts, item.(map[string]any)["matchers"].([]any)[0].(map[string]any)["value"].(string))
+		}
+		pages = append(pages, strings.Join(hosts, ","))
+		next, more := body["next_cursor"].(string)
+		if !more {
+			break
+		}
+		cursor = next
+	}
+	if got := strings.Join(pages, " | "); got != "db0,db1 | db2,db3 | db4" {
+		t.Errorf("silences in pages of two = %s", got)
+	}
+	if code, body := f.call(http.MethodGet, "/api/v1/silences?limit=1000", ""); code != http.StatusBadRequest || body["field"] != "limit" {
+		t.Errorf("limit=1000 = %d %v", code, body)
 	}
 }

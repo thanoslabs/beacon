@@ -161,9 +161,13 @@ type EmailIntegration struct {
 	TLS string `yaml:"tls" json:"tls"`
 }
 
-// WebhookIntegration is an outbound webhook.
+// WebhookIntegration is an outbound webhook: an address that Beacon posts
+// notifications to.
 type WebhookIntegration struct {
 	URL string `yaml:"url" json:"url"`
+	// SigningSecret is the key with which every request is signed, so that
+	// the receiver can check that it comes from Beacon.
+	SigningSecret Secret `yaml:"signing_secret" json:"signing_secret"`
 	// Headers are sent with every request. A value is a plain string or a
 	// secret reference.
 	Headers map[string]HeaderValue `yaml:"headers" json:"headers,omitempty"`
@@ -231,7 +235,8 @@ type EscalationStep struct {
 }
 
 // Target is who an escalation step notifies. It has exactly one of four
-// forms: a schedule, a team, a user, or a channel with its integration.
+// forms: a schedule, a team, a user, or an integration with the channel to
+// send to. An outbound webhook has no channels, and is named alone.
 type Target struct {
 	Schedule string `yaml:"schedule" json:"schedule,omitempty"`
 	Team     string `yaml:"team" json:"team,omitempty"`

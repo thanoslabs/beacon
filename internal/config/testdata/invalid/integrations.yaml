@@ -11,11 +11,17 @@ integrations:
   - name: email
     type: email
     email: {port: 70000, from: "Beacon <beacon@example.com>", tls: yes, username: beacon}
+  - name: relay
+    type: email
+    email: {host: smtp.example.com, port: 25, from: beacon@example.com, tls: none, username: beacon, password: {env: GOOD_TOKEN}}
   - name: hook
     type: webhook
     webhook:
       url: tickets.example.com
-      headers: {"Bad Header": x}
+      headers: {"Bad Header": x, "x-beacon-signature": forged, Content-Type: text/plain}
+  - name: weak
+    type: webhook
+    webhook: {url: "https://tickets.example.com/hook", signing_secret: {env: SHORT_TOKEN}}
   - name: pager
     type: sms
   - name: untyped

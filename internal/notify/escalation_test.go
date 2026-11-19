@@ -774,3 +774,50 @@ func TestUpdatesReachEveryoneWhoWasPaged(t *testing.T) {
 		t.Errorf("updates went to %v, %v; want both destinations that were paged", updated, err)
 	}
 }
+
+// TestAnUpdateToAPersonStaysTheirs: a channel is told whom a notification is
+// for, in the page and in every update that follows it, so that it can tell
+// a person from a shared destination.
+func TestAnUpdateToAPersonStaysTheirs(t *testing.T) {
+	f := newEscalationFixture(t)
+	ctx := context.Background()
+	ada := notify.Person{Email: "oncall@example.com"}
+	if err := f.pool.QueryRow(ctx, `INSERT INTO users (email) VALUES ($1) RETURNING id::text`, ada.Email).Scan(&ada.UserID); err != nil {
+		t.Fatal(err)
+	}
+	f.p.SetPeople(&directory{onCall: map[string][]notify.Person{"s": {ada}}, addresses: map[string]string{f.integrationID + "/" + ada.UserID: "U0ADA"}})
+	f.p.SetPolicies(map[string]notify.Policy{f.policyID: {Name: "default", Steps: []notify.Step{{Timeout: 5 * time.Minute, Targets: []notify.StepTarget{
+		notify.ChannelTarget(f.integrationID, "chat", "#alerts"),
+		{Kind: notify.TargetSchedule, Name: "primary", ID: "s", Via: []notify.Via{{IntegrationID: f.integrationID, Name: "chat"}}},
+	}}}}})
+	g := f.open("db1")
+	f.sent()
+	if _, err := f.alerts.ApplyToGroup(ctx, g, alert.ActionAcknowledge, alert.ChatUser("slack", "U0ADA", "ada"), alert.Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// What the workers hand to the channel.
+	var mu sync.Mutex
+	var got []string
+	p := notify.New(f.pool, f.alerts, slog.New(slog.DiscardHandler), fastConfig())
+	p.SetClock(f.clock.Now)
+	p.Register(f.integrationID, channelFunc(func(_ context.Context, m notify.Message) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		who := "nobody"
+		if m.Notification.UserID == ada.UserID {
+			who = "ada"
+		}
+		got = append(got, string(m.Notification.Reason)+" to "+m.Notification.Destination+" for "+who)
+		return "msg", nil
+	}))
+	f.run(p)
+	f.waitStatus(g, "sent", "sent", "sent", "sent")
+	mu.Lock()
+	defer mu.Unlock()
+	slices.Sort(got)
+	want := []string{"group_update to #alerts for nobody", "group_update to U0ADA for ada"}
+	if !slices.Equal(got, want) {
+		t.Errorf("the channel was handed %v, want %v", got, want)
+	}
+}
