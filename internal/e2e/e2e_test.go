@@ -1870,7 +1870,9 @@ func (b *beacon) escalationSteps() (steps []string, status string) {
 // policy then runs out, which is recorded once.
 func TestEscalationSurvivesARestart(t *testing.T) {
 	dbURL := postgrestest.NewURL(t)
-	cfg := strings.Replace(configuration, "        timeout: 5m\n", "        timeout: 3s\n      - notify:\n          - channel: C0SECOND\n            integration: slack\n        timeout: 2s\n", 1)
+	// Six seconds leave the first process time to stop before the second
+	// step is due, also on a slow machine.
+	cfg := strings.Replace(configuration, "        timeout: 5m\n", "        timeout: 6s\n      - notify:\n          - channel: C0SECOND\n            integration: slack\n        timeout: 2s\n", 1)
 	first := launch(t, dbURL, writeConfig(t, cfg))
 	first.waitUntilServing()
 	if code, res := first.webhook(diskFull); code != http.StatusCreated {
