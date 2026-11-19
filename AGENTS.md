@@ -51,7 +51,8 @@ Tooling:
 ├── internal/
 │   ├── access/               # Roles and the principal behind a request
 │   ├── alert/                # Alert model, state machine and timeline
-│   ├── api/                  # REST API: its conventions, and the routes of alerts
+│   ├── api/                  # REST API: its conventions, the routes of alerts, read access to what is provisioned, and the OpenAPI description
+│   │   └── apitest/          # Test helper: checks answers against the OpenAPI description
 │   ├── auth/                 # Sign-in through OpenID Connect, users and sessions
 │   │   └── oidctest/         # Test helper: sign in through the Dex of compose.yaml
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
@@ -115,6 +116,7 @@ Run `mise install` first so that the pinned versions are used.
 | Lint | `golangci-lint run ./...` |
 | Fix formatting | `golangci-lint fmt ./...` |
 | Check module files | `go mod tidy -diff` |
+| Regenerate the published API description | `go test ./internal/api -run TestPublishedDescription -update` |
 | Build the image | `docker build -t beacon:dev .` |
 | Run Beacon and Postgres | `docker compose up --build -d --wait`, then `curl localhost:8080/readyz` (set `BEACON_PORT` if 8080 is taken) |
 | Run them with an Alertmanager that sends to Beacon | `BEACON_CONFIG_DIR=./examples/alertmanager docker compose --profile alertmanager up --build -d --wait` (set `BEACON_ALERTMANAGER_PORT` if 9093 is taken) |
@@ -135,6 +137,11 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Attach a route with `Server.Handle(access.Route{Pattern, Level, Handler})`; there is no other way to the router. Every route passes through the request identifier, access log and panic recovery middleware, and every route that is not `access.Public` through the guard in `internal/access`: `401` without a valid credential, `403` for a cross-site request that changes something, `403` for a member on an `access.Admin` route. The handler finds who is asking with `access.FromContext`.
 - **Beacon is closed by default.** A new route is `access.Member` or `access.Admin`. The zero value of the level is `Admin`, so a forgotten level is closed. `access.Public` is only for a route that a machine without a session must reach, and then the handler must check a credential of its own (the source's token, Slack's signature) unless the route is harmless to a stranger. Every route of `beacon serve` is listed in `provisioner.routes` in `internal/cli/app.go` and, on purpose, a second time in `wantRoutes` in `internal/cli/routes_test.go`: adding a route means writing its level down twice and justifying a public one in the comment there.
 - **The API has one style**, written down for users in `docs/api.md` and for code in `internal/api/api.go`: a list is an object with one named array, and `next_cursor` when it is paged (`api.Limit`, `api.Cursor`, `api.ParseCursor`); an error is `{"error", "field"}` (`api.Fail`); `400` names the field at fault, `404` also answers an identifier of the wrong form, `409` is for what the state does not allow; times are RFC 3339 in UTC; an absent value is `null`, never an empty string, and an array is never `null`; a parameter or a body field that the route does not know is refused. A new route follows it, and a route that cannot says why in `docs/api.md`.
+- **The OpenAPI description is `internal/api/openapi.yaml`**, written by hand, embedded and served at `/api/v1/openapi.json` and `.yaml`. Three tests hold it to the server, and a change to a route or to an answer goes through all three:
+  - `TestRoutes` compares it with `wantRoutes`: every route is described, with its level as `x-beacon-access` (and `security: []` exactly when public), and nothing else is.
+  - `TestAnswersMatchTheOpenAPIDescription` (`internal/cli/openapi_test.go`) uses every route of the real server and checks each answer with `apitest`: the status must be described and the body must fit its schema. A new route must be used there until it is seen to succeed; the few that cannot be are listed in `notChecked` with the reason.
+  - `TestPublishedDescription` keeps `docs/openapi.yaml` and `docs/api-reference.md` equal to it; regenerate them with `go test ./internal/api -run TestPublishedDescription -update`.
+- Every object schema of an answer says `additionalProperties: false` and lists what is `required`, which is what makes an undescribed field fail. `apitest` understands a small part of JSON Schema on purpose and refuses a keyword it does not check; teach it the keyword rather than loosen a schema.
 - A handler that changes something takes who is acting from `access.FromContext`, never from the request, and logs the change with `by_user` and `by_token`.
 - Log with the `slog` methods that take a context (`InfoContext` and so on) inside request handling, so the record carries `request_id`.
 - Register metrics on the registry from `server.NewRegistry()`, not the global default. Keep label values to bounded sets (see the cardinality warning in `docs/requirements.md`).
@@ -185,6 +192,7 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Hold every credential in a `config.Secret`. In a file it is a reference, `{env: NAME}` or `{file: /path}`, never the value. It prints, logs and encodes as that reference; call `Reveal` only at the point of use. A new secret field also goes into `resolveSecrets` in `internal/config/load.go`. Add every new secret to `secretSettings` and `secretsConfig` in `internal/cli/secrets_test.go`, which checks that no secret reaches help, errors or logs. A credential that is a process setting, such as the database URL, is registered with `secretSetting`.
 - `provision.Reconcile` makes the provisioned rows match the configuration: it creates, updates and marks as removed, in one transaction under an advisory lock, and returns the row of every object. It never deletes; a removed object keeps its row for history and is revived if it returns. A new kind needs its table (with the common columns, including `provisioned`), a constant in `provision.Kinds` in dependency order, and a case in `objectsOf`.
 - Rows with `provisioned = true` belong to the files. Nothing but reconciliation may write them: an API route for a provisioned kind is read-only.
+- `api.Provisioned` answers the provisioned objects from the active configuration, which the provisioner hands it (`SetConfig`), through types of its own, never by encoding a `config` type. **It answers no credential and no reference to one**: a new field of an integration is added to `settings` only when it is not a secret, and the address of a webhook goes out through `withoutSecrets`. `TestProvisionedObjectsAreReadable` reads every route with every secret set.
 
 ### Sign-in and sessions
 

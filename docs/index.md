@@ -18,7 +18,8 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[webhook]]: send alerts to Beacon as JSON over HTTP
 - [[schedules]]: on-call rotations, handoffs, time zones and recorded shifts
 - [[escalation]]: how a policy pages people step by step until someone responds
-- [[api]]: the REST API: how it behaves as a whole, and the routes of alerts
+- [[api]]: the REST API: how it behaves as a whole, the routes of alerts and of what the configuration defines, and its OpenAPI description
+- [[api-reference]]: every route of the API, generated from the OpenAPI description
 - [[silences]]: keep Beacon quiet about matching alerts for a period, through the API
 - [[notifications]]: how notifications are queued, retried and recorded
 - [[slack]]: set up the Slack app and send alerts to a channel

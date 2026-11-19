@@ -171,12 +171,14 @@ func runServe(ctx context.Context, e env, args []string) error {
 		auth:                signIn,
 		silences:            silence.NewHandler(logger, silences),
 		alertsAPI:           api.NewAlerts(logger, alerts),
+		provisionedAPI:      api.NewProvisioned(logger, pool),
 		schedules:           schedules,
 		scheduleAPI:         schedule.NewHandler(logger, schedules),
 		identities:          identities,
 		identityAPI:         identity.NewHandler(logger, identities, linker.Integrations),
 		linker:              linker,
 	}
+	prov.silences.SetAlerts(alerts)
 	prov.registerMetrics(registry)
 	prov.ingest.RegisterMetrics(registry)
 	linker.RegisterMetrics(registry)

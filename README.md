@@ -96,7 +96,7 @@ export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmo
 ./bin/beacon hash-password      # hash a password for the bootstrap admin
 ```
 
-The server answers on these endpoints; the [API page](docs/api.md) describes how they behave as a whole. Everything that is not listed as open in the [access page](docs/access.md) needs a session, and an address that does not exist answers `401` like one that does:
+The server answers on these endpoints; the [API page](docs/api.md) describes how they behave as a whole, and the [API reference](docs/api-reference.md) lists every route from the OpenAPI description. Everything that is not listed as open in the [access page](docs/access.md) needs a session, and an address that does not exist answers `401` like one that does:
 
 | Endpoint | Purpose |
 |---|---|
@@ -106,9 +106,12 @@ The server answers on these endpoints; the [API page](docs/api.md) describes how
 | `GET /api/v1/me` | Who is signed in. Needs a session. |
 | `GET /api/v1/me/identities`, `POST /api/v1/me/identities/<integration>/link-code`, `DELETE /api/v1/me/identities/<integration>` | The chat accounts linked to whoever is signed in, a one-time code with which they link their Discord account, and its removal. See the [access page](docs/access.md#chat-accounts). |
 | `GET /api/v1/alerts`, `GET /api/v1/alerts/<id>`, `GET /api/v1/alerts/<id>/timeline`, `POST /api/v1/alerts/<id>/acknowledge`, `.../snooze`, `.../resolve`, and the same under `/api/v1/alert-groups/<id>` | Alerts: list with filters, read, and act on one alert or on a whole group. Needs a session or a token, with either role. See the [API page](docs/api.md#alerts). |
+| `GET /api/v1/sources`, `/api/v1/integrations`, `/api/v1/escalation-policies`, `/api/v1/routing`, `/api/v1/teams`, each also by `/<name>` except routing, and `GET /api/v1/users` | What the configuration defines, for reading, without credentials, and the users. Needs a session or a token, with either role. See the [API page](docs/api.md#what-the-configuration-defines). |
+| `GET /auth/methods` | Which ways to sign in exist. Open. |
+| `GET /api/v1/openapi.json`, `GET /api/v1/openapi.yaml` | The [OpenAPI description](docs/api.md#openapi-description) of the API. Open. |
 | `POST /api/v1/config/reload` | Reloads the configuration. Needs the admin role. |
 | `GET`, `POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | API tokens for automation. Needs the admin role. |
-| `GET`, `POST /api/v1/silences`, `GET`, `DELETE /api/v1/silences/<id>` | Silences. Needs a session or a token, with either role. See the [silences page](docs/silences.md). |
+| `GET`, `POST /api/v1/silences`, `POST /api/v1/silences/preview`, `GET`, `DELETE /api/v1/silences/<id>` | Silences, and which open alerts one would match. Needs a session or a token, with either role. See the [silences page](docs/silences.md). |
 | `GET /api/v1/schedules`, `GET /api/v1/schedules/<name>`, `GET /api/v1/schedules/<name>/shifts`, `GET /api/v1/teams/<name>/on-call` | Who is on call, now and over a period, for a schedule and for a team. Needs a session or a token, with either role. See the [schedules page](docs/schedules.md#who-is-on-call). |
 | `GET`, `POST /api/v1/schedules/<name>/overrides`, `DELETE /api/v1/schedules/<name>/overrides/<id>` | Overrides: someone covers a schedule for a period. Needs a session or a token, with either role. See the [schedules page](docs/schedules.md#overrides). |
 | `POST /auth/bootstrap` | Sign-in of the bootstrap admin, for installs with no identity provider. Off unless configured. |
