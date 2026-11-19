@@ -22,3 +22,4 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[notifications]]: how notifications are queued, retried and recorded
 - [[slack]]: set up the Slack app and send alerts to a channel
 - [[discord]]: set up the Discord application and send alerts to a channel
+- [[email]]: send alerts as email over SMTP

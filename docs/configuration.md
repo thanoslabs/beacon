@@ -65,14 +65,14 @@ An integration is a connection to a notification service.
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | Identity |
-| `type` | yes | `slack`, `discord`, `email` or `webhook`. `slack` and `discord` deliver today; see [[slack]] and [[discord]]. |
+| `type` | yes | `slack`, `discord`, `email` or `webhook`. `slack`, `discord` and `email` deliver today; see [[slack]], [[discord]] and [[email]]. |
 | `slack`, `discord`, `email` or `webhook` | yes | The settings. Exactly the block that matches `type`. |
 
 | Type | Settings |
 |---|---|
 | `slack` | `bot_token` (secret), `signing_secret` (secret) |
 | `discord` | `bot_token` (secret), `public_key` (64 hexadecimal characters), `application_id` |
-| `email` | `host`, `port`, `from`, `tls` (`starttls`, `implicit` or `none`), and optionally `username` with `password` (secret) |
+| `email` | `host`, `port`, `from`, `tls` (`starttls`, `implicit` or `none`), and optionally `username` with `password` (secret). `tls: none` with a password is refused unless `host` is `localhost`. |
 | `webhook` | `url`, and optionally `headers`: a map whose values are plain strings or secret references |
 
 ## Teams

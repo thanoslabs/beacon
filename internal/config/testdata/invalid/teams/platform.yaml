@@ -41,6 +41,8 @@ escalation_policies:
           - {}
           - channel: "#alerts"
             integration: discord
+          - channel: "#alerts"
+            integration: email
       - notify: []
         timeout: 0s
   - name: empty

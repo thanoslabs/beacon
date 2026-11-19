@@ -11,6 +11,9 @@ integrations:
   - name: email
     type: email
     email: {port: 70000, from: "Beacon <beacon@example.com>", tls: yes, username: beacon}
+  - name: relay
+    type: email
+    email: {host: smtp.example.com, port: 25, from: beacon@example.com, tls: none, username: beacon, password: {env: GOOD_TOKEN}}
   - name: hook
     type: webhook
     webhook:

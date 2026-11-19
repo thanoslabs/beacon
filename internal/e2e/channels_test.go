@@ -3,6 +3,7 @@ package e2e_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/thanoslabs/beacon/internal/auth/oidctest"
 	"github.com/thanoslabs/beacon/internal/discord/discordtest"
+	"github.com/thanoslabs/beacon/internal/email/mailpittest"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
 )
 
@@ -301,5 +303,140 @@ func TestDiscordFirstPath(t *testing.T) {
 		if strings.Contains(b.output(), secret) {
 			t.Errorf("the logs contain %q", secret)
 		}
+	}
+}
+
+// withEmail returns a configuration with an email integration that sends
+// through the Mailpit of compose.yaml, and with the Slack channel of the
+// first step replaced by targets, which are lines of a notify list.
+func withEmail(t *testing.T, server *mailpittest.Server, yaml, targets string) string {
+	t.Helper()
+	integration := fmt.Sprintf(`  - name: email
+    type: email
+    email: {host: %q, port: %d, from: beacon@example.invalid, tls: none, username: %s, password: {env: BEACON_SMTP_PASSWORD}}
+`, server.Host, server.Port, mailpittest.Username)
+	out := strings.Replace(yaml, "escalation_policies:\n", integration+"escalation_policies:\n", 1)
+	replaced := false
+	out = firstSlackTarget.ReplaceAllStringFunc(out, func(target string) string {
+		if replaced {
+			return target
+		}
+		replaced = true
+		return targets
+	})
+	if !replaced {
+		t.Fatal("the configuration has no Slack channel to replace")
+	}
+	return out
+}
+
+// mail waits until Mailpit holds a message for the recipient whose subject
+// contains every one of the substrings, and returns it.
+func mail(t *testing.T, server *mailpittest.Server, to string, subject ...string) mailpittest.Message {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		msgs := server.Messages(t, to)
+	next:
+		for _, m := range msgs {
+			for _, s := range subject {
+				if !strings.Contains(m.Subject, s) {
+					continue next
+				}
+			}
+			return m
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no message for %s with %q in its subject; Mailpit has %d for that address", to, subject, len(msgs))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// reloadAddsEmail reloads the running process with an email integration
+// added to yaml, as the n-th reload, and checks that an alert that fires
+// afterwards is sent to the real SMTP server.
+func reloadAddsEmail(b *beacon, yaml string, n int) {
+	b.t.Helper()
+	server := mailpittest.New(b.t)
+	to := mailpittest.Address(b.t, "reload")
+	logs := b.reload(withEmail(b.t, server, yaml, "          - channel: "+to+"\n            integration: email\n"), n)
+	if !strings.Contains(logs, `"msg":"integration configured","integration":"email","type":"email"`) {
+		b.t.Errorf("the logs do not show the email integration")
+	}
+	if code, res := b.webhookTo("second", `{"labels": {"alertname": "ToEmail", "severity": "warning"}}`); code != http.StatusCreated {
+		b.t.Fatalf("webhook = %d %v", code, res)
+	}
+	mail(b.t, server, to, "[FIRING] warning: ToEmail")
+}
+
+// TestEmailChannel: an alert group is sent as email through a real SMTP
+// server, to a shared address and to a person at the address they have in
+// Beacon, and every change is a further message in the same conversation.
+func TestEmailChannel(t *testing.T) {
+	oidctest.Issuer(t)
+	server := mailpittest.New(t)
+	dbURL := postgrestest.NewURL(t)
+	shared := mailpittest.Address(t, "team")
+	// Ada's address is the one she has at the identity provider, which
+	// other tests use too: this test's messages are told apart by the name
+	// of its alert.
+	name := "Mail" + strings.ToUpper(strings.TrimSuffix(strings.TrimPrefix(shared, "team-"), "@example.invalid"))
+	cfg := withEmail(t, server, signInConfiguration(t),
+		"          - channel: "+shared+"\n            integration: email\n          - user: "+oidctest.Ada+"\n            via: [email]\n")
+	b := launch(t, dbURL, writeConfig(t, cfg))
+	b.waitUntilServing()
+	// Ada becomes a user by signing in. Nothing has to be linked: her
+	// address is where email reaches her.
+	if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), oidctest.Ada, oidctest.Password); code != http.StatusOK {
+		t.Fatalf("sign-in = %d %s", code, body)
+	}
+
+	code, res := b.webhook(`{"labels": {"alertname": "` + name + `", "host": "db1", "severity": "critical"},
+		"annotations": {"summary": "Disk is full on db1 (` + name + `)", "runbook_url": "https://runbooks.example.com/disk-full"}}`)
+	if code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	alertID := res["alert_id"]
+	subject := "critical: Disk is full on db1 (" + name + ")"
+	first := mail(t, server, shared, "[FIRING] "+subject)
+	page := mail(t, server, oidctest.Ada, "[FIRING] "+subject)
+	if first.From != "beacon@example.invalid" || len(page.To) != 1 || page.To[0] != oidctest.Ada {
+		t.Errorf("from %q, the page went to %v", first.From, page.To)
+	}
+	for _, want := range []string{
+		"FIRING · critical", "  alertname = " + name, "  host = db1", "  severity = critical", "Status: Firing since ",
+		"Paged: ", "Open in Beacon: " + oidctest.PublicURL + "/api/v1/alerts/" + alertID, "Runbook: https://runbooks.example.com/disk-full",
+	} {
+		if !strings.Contains(first.Text, want) {
+			t.Errorf("the message does not contain %q:\n%s", want, first.Text)
+		}
+	}
+	b.timeline(alertID, 4)
+
+	// The source resolves the alert: a second message, which answers the
+	// first.
+	if code, res := b.webhook(`{"status": "resolved", "labels": {"alertname": "` + name + `", "host": "db1", "severity": "critical"}}`); code != http.StatusOK {
+		t.Fatalf("resolve webhook = %d %v", code, res)
+	}
+	resolved := mail(t, server, shared, "[RESOLVED] "+subject)
+	if !strings.Contains(resolved.Text, "Status: Resolved by the source") || !strings.Contains(resolved.Text, "Sent by Beacon because this alert is resolved.") {
+		t.Errorf("the resolution:\n%s", resolved.Text)
+	}
+	if id := first.Headers["Message-Id"]; len(id) != 1 || len(resolved.Headers["In-Reply-To"]) != 1 || resolved.Headers["In-Reply-To"][0] != id[0] {
+		t.Errorf("the resolution does not answer the first message: %v after %v", resolved.Headers["In-Reply-To"], id)
+	}
+	mail(t, server, oidctest.Ada, "[RESOLVED] "+subject)
+	var sent int
+	b.waitFor("four recorded deliveries", func() bool {
+		err := b.db.QueryRow(context.Background(), `SELECT count(*) FROM notifications WHERE status = 'sent'`).Scan(&sent)
+		return err == nil && sent == 4
+	})
+
+	if code := b.terminate(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+	if strings.Contains(b.output(), mailpittest.Password) {
+		t.Error("the logs contain the SMTP password")
 	}
 }

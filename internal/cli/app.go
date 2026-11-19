@@ -18,6 +18,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/config"
 	"github.com/thanoslabs/beacon/internal/discord"
+	"github.com/thanoslabs/beacon/internal/email"
 	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/notify"
@@ -53,13 +54,16 @@ type provisioner struct {
 	// its type, which decides whose interactions a request is checked as.
 	integrationTypes atomic.Pointer[map[string]string]
 	pipeline         *notify.Pipeline
-	auth             *auth.Handler
-	silences         *silence.Handler
-	schedules        *schedule.Store
-	scheduleAPI      *schedule.Handler
-	identities       *identity.Store
-	identityAPI      *identity.Handler
-	linker           *identity.Linker
+	// people is the directory the escalation engine asks. It is told which
+	// integrations reach a person by email address.
+	people      *people
+	auth        *auth.Handler
+	silences    *silence.Handler
+	schedules   *schedule.Store
+	scheduleAPI *schedule.Handler
+	identities  *identity.Store
+	identityAPI *identity.Handler
+	linker      *identity.Linker
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -425,6 +429,14 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	var direct []notify.Via
 	publicKeys := map[string]string{}
 	var applications []discord.Application
+	// The address at which people reach Beacon, for the links in messages
+	// that cannot carry buttons.
+	publicURL := ""
+	if cfg.Auth != nil {
+		publicURL = cfg.Auth.PublicURL
+	}
+	// The integrations that reach a person at their email address.
+	addressed := map[string]bool{}
 	for _, i := range cfg.Integrations {
 		id := integrations[i.Name]
 		switch i.Type {
@@ -446,6 +458,16 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 			direct = append(direct, notify.Via{IntegrationID: id, Name: i.Name, Provider: i.Type})
 			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
 				slog.String("interactions_path", strings.Replace(discord.InteractionsPath, "{name}", i.Name, 1)))
+		case config.IntegrationTypeEmail:
+			channels[id] = email.NewChannel(*i.Email, publicURL)
+			addressed[id] = true
+			direct = append(direct, notify.Via{IntegrationID: id, Name: i.Name, Provider: i.Type})
+			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
+				slog.String("smtp_server", i.Email.Host), slog.String("tls", i.Email.TLS))
+			if publicURL == "" {
+				p.logger.WarnContext(ctx, "emails will carry no link to the alert in Beacon: Beacon does not know its own address; set auth.public_url",
+					slog.String("integration", i.Name))
+			}
 		default:
 			p.logger.WarnContext(ctx, "this type of integration does not deliver yet, so nothing is sent through it",
 				slog.String("integration", i.Name), slog.String("type", i.Type))
@@ -498,12 +520,15 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 		byID[policies[policy.Name]] = out
 		p.logger.InfoContext(ctx, "escalation policy configured", slog.String("policy", policy.Name), slog.Int("steps", len(out.Steps)), slog.Int("repeat", out.Repeat))
 		if !notifies[policy.Name] {
-			p.logger.WarnContext(ctx, "this escalation policy can notify nobody: none of its targets is reached through an integration that delivers; today that is a Slack or a Discord integration, for channels and for people",
+			p.logger.WarnContext(ctx, "this escalation policy can notify nobody: none of its targets is reached through an integration that delivers; add a Slack, Discord or email integration and name it in a step",
 				slog.String("policy", policy.Name))
 		}
 	}
 	if cfg.Routing == nil {
 		p.logger.WarnContext(ctx, "alerts are stored but nobody is notified: the configuration has no routing block, so alerts have no escalation policy")
+	}
+	if p.people != nil {
+		p.people.SetAddressed(addressed)
 	}
 	p.pipeline.SetChannels(channels)
 	p.pipeline.SetPolicies(byID)

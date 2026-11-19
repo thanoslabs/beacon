@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules run their rotations with overrides, and escalation policies page the person on call, teams and channels step by step until someone responds. The same works in Discord, where people link their accounts themselves. Email, outbound webhooks and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules run their rotations with overrides, and escalation policies page the person on call, teams and channels step by step until someone responds. The same works in Discord, where people link their accounts themselves, and alert groups are also sent as email. Outbound webhooks and the web interface do not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -44,6 +44,7 @@ Tooling:
 ├── dev/
 │   ├── alertmanager/         # Configuration of the Alertmanager of the Compose profile "alertmanager"
 │   ├── grafana/              # Provisioning of the Grafana of the Compose profile "grafana", and a rule to try it with
+│   ├── mailpit/              # The one account of the SMTP server used in development and tests
 │   └── dex/                  # Configuration of the identity provider used in development and tests
 ├── docs/                     # Project documentation (markdown source for the docs site)
 ├── examples/                 # Example configurations; a test keeps them valid
@@ -56,7 +57,9 @@ Tooling:
 │   ├── config/               # Typed provisioned objects, the YAML loader and the Secret type
 │   ├── discord/              # Discord channel: HTTP API client, message rendering, button presses and the link command
 │   │   └── discordtest/      # Fake Discord for tests
-│   ├── e2e/                  # End-to-end tests: the real binary, Postgres, a fake Slack and a fake Discord
+│   ├── e2e/                  # End-to-end tests: the real binary, Postgres, a fake Slack, a fake Discord and a real SMTP server
+│   ├── email/                # Email channel: SMTP delivery and message composition
+│   │   └── mailpittest/      # Test helper: the Mailpit of compose.yaml
 │   ├── identity/             # Which Slack or Discord account belongs to which user: lookup by email, link codes
 │   ├── ingest/               # Receivers for Alertmanager, Grafana and the generic webhook: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
@@ -99,7 +102,8 @@ Run `mise install` first so that the pinned versions are used.
 | Run | `./bin/beacon version` (or `go run ./cmd/beacon version`) |
 | Start Postgres | `docker compose up -d --wait postgres` |
 | Start Postgres and the identity provider | `docker compose up -d --wait postgres dex` |
-| Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_TEST_OIDC_ISSUER='http://127.0.0.1:5556/dex' go test -race ./...` |
+| Start everything the tests use | `docker compose up -d --wait postgres dex mailpit` |
+| Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_TEST_OIDC_ISSUER='http://127.0.0.1:5556/dex' BEACON_TEST_SMTP_ADDR='127.0.0.1:1025' BEACON_TEST_MAILPIT_URL='http://127.0.0.1:8025' go test -race ./...` |
 | Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_SOURCE_TOKEN=local-development-token ./bin/beacon serve --config examples/quickstart` then `curl localhost:8080/readyz` |
 | Check configuration | `./bin/beacon validate --config examples/full` |
 | Preview schedule changes | `BEACON_DATABASE_URL=... ./bin/beacon preview --config examples/full` |
@@ -114,7 +118,7 @@ Run `mise install` first so that the pinned versions are used.
 | Run them with an Alertmanager that sends to Beacon | `BEACON_CONFIG_DIR=./examples/alertmanager docker compose --profile alertmanager up --build -d --wait` (set `BEACON_ALERTMANAGER_PORT` if 9093 is taken) |
 | Run them with a Grafana that sends to Beacon | `BEACON_CONFIG_DIR=./examples/grafana docker compose --profile grafana up --build -d --wait` (set `BEACON_GRAFANA_PORT` if 3000 is taken), then create the rule as `docs/grafana.md` shows |
 
-CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres and Dex from `compose.yaml`, so CI and development use the same versions. The tests include the end-to-end tests in `internal/e2e`. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, the non-root user and a clean exit on termination. It then starts the Alertmanager and the Grafana of the Compose profiles `alertmanager` and `grafana` and checks that an alert of each fires and resolves in Beacon.
+CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres, Dex and Mailpit from `compose.yaml`, so CI and development use the same versions. The tests include the end-to-end tests in `internal/e2e`. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, the non-root user and a clean exit on termination. It then starts the Alertmanager and the Grafana of the Compose profiles `alertmanager` and `grafana` and checks that an alert of each fires and resolves in Beacon.
 
 ### Container image
 
@@ -240,7 +244,7 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - The engine is `internal/notify/escalation.go`, and `docs/escalation.md` describes its rules; keep it true. It owns the `escalations` table: one row per group, whose `next_step_at` is the timer.
 - `Pipeline.startEscalation` runs the first step, in the transaction that marks the group as notified. `Pipeline.EscalateDue` runs later steps: it claims a due row under `FOR UPDATE SKIP LOCKED`, reads the row from its own table alone, and moves the timer in the same transaction. `Pipeline.Observe` stops an escalation when no alert of its group is firing, in the transaction of the change, and restarts it when a snooze runs out. **A group is paged once**: an alert that joins a group whose escalation has stopped must not restart it or queue an `escalation_step`; the group's update edits the messages that exist. The opt-in re-page policy (issue 100) has its seam marked in `observeEscalation`. Do not add another place that writes `escalations`.
 - A step asks `Pipeline.quiet` before it notifies, as a group's notification does: while every firing alert is silenced it waits for the silence, and `WakeEscalationsWaitingFor` wakes it when the silence is expired.
-- The pipeline learns about people through `notify.People` and nothing else: who is on call (`schedule.Store.OnCall`), who is in a team, and where an integration reaches a person (`identity.Store.Address`). The adapter is `internal/cli/people.go`. People are resolved when the step runs, inside its transaction.
+- The pipeline learns about people through `notify.People` and nothing else: who is on call (`schedule.Store.OnCall`), who is in a team, and where an integration reaches a person: the linked account of a chat service (`identity.Store.Address`), or, for an email integration, the address the user has in Beacon, which needs no link. The adapter is `internal/cli/people.go`. People are resolved when the step runs, inside its transaction.
 - A person who has no linked account is skipped for delivery and stays visible: the `skipped` entry carries `not_connected` and `shown_as` (`notify.NotConnected`, "Grace Hopper (Slack not connected)"), and a channel that names who was paged shows that text, never a mention. The Slack message builds its "Paged:" line from the `escalated` events (`pagedLine`); a mention is only ever made from a destination that is a Slack user ID of the integration the message is sent with.
 - A target that cannot be notified is skipped, logged (`escalation target not notified`) and listed in the `skipped` of the step's `escalated` event with a reason. It never fails the step. Every step that runs writes one `escalated` event.
 - The steps are read from the policies of the active configuration each time (`SetPolicies`), never copied into the row, so a reload applies to escalations in progress. The provisioner resolves the names of schedules, teams and integrations to rows when it builds a `notify.Policy`.
@@ -271,9 +275,19 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - `/beacon-link` redeems a link code (`Identities.CompleteLink`). `discord.Commands` registers the command for every Discord application in the background, with backoff; the start never waits for Discord. What it has registered is a memory of the process, which is fine because registering is an overwrite with the same content.
 - `docs/discord.md` is the setup guide. Update it when permissions or settings change.
 
+### Email
+
+- `internal/email` is the email channel: SMTP with the standard library (`net/smtp`, `crypto/tls`), and a message built with `mime/multipart` and `mime/quotedprintable`. There is no mail library. `docs/email.md` is the guide; keep it true.
+- An email cannot be edited, so every notification is a message. The reference a `Send` returns is the `Message-ID`, which the next message about the group answers. The identifier is made from the notification's row, so a repeated attempt repeats the identifier.
+- **Never downgrade.** With `starttls`, a server that does not offer `STARTTLS` is refused for good; the certificate is verified against the system's authorities for the configured host; the password is sent with `PLAIN` or `LOGIN` only over TLS or to this machine, and validation refuses `tls: none` with a password for any other host. Do not add a setting that turns verification off.
+- **Nothing from an alert reaches a header or the SMTP exchange as it is.** The subject is the only header an alert fills: it goes through `oneLine` and RFC 2047 encoding. The body is quoted-printable, the HTML form passes everything through `html.EscapeString`, and an address becomes a link only through `webAddress`. A destination must be one plain address (`recipient`), and only a `Message-ID` that Beacon made goes back into `In-Reply-To`. `TestAnAlertCannotAddHeadersOrMessages` runs the usual attacks through a real server.
+- A reply that starts with 5 is `notify.Permanent`; one that starts with 4, and every failure of the network, is retried.
+- An email carries no link that changes anything. A link that acknowledges would be followed by mail scanners; a safe one needs a confirmation page, which belongs to the web interface.
+- Tests that need a real SMTP server use `mailpittest` against the Mailpit in `compose.yaml` (`dev/mailpit/auth` holds its one account). Without `BEACON_TEST_SMTP_ADDR` and `BEACON_TEST_MAILPIT_URL` they are skipped locally and fail in CI. The server is shared by every test, so a test sends to an address of its own (`mailpittest.Address`). Use the scripted server in `internal/email/fake_test.go` only for what Mailpit will not do: TLS, `LOGIN` alone, a reply at a chosen step.
+
 ### End-to-end tests
 
-- `internal/e2e` builds the binary, runs it as a process against a real Postgres, the fake Slack and the fake Discord, and uses it only from outside: the webhook as a source would, the interactions endpoint as Slack would. It reads the database to check what was stored and never writes to it. The tests run with `go test ./...`, so CI runs them against the Postgres from `compose.yaml`.
+- `internal/e2e` builds the binary, runs it as a process against a real Postgres, the fake Slack, the fake Discord and the Mailpit of `compose.yaml`, and uses it only from outside: the webhook as a source would, the interactions endpoint as Slack would. It reads the database to check what was stored and never writes to it. The tests run with `go test ./...`, so CI runs them against the Postgres from `compose.yaml`.
 - The test configuration sets `group_wait: 0s` and `group_interval: 1s`, so a notification follows a delivery within about two seconds. The tests wait for the message they expect, never for a time, and must not count notifications: how many updates a group gets depends on what the timer batched.
 - `TestFirstPath` is the path the product exists for: webhook in, Slack message out, acknowledgement from Slack, resolve from the source. The acknowledgement needs a Beacon user, so the test signs one in through Dex first (`startSignedIn`); `TestSlackWithoutSignIn` is the same path in an install with no identity provider, where the alert can be resolved from Slack and not acknowledged. `TestFirstPathWithEscalation` is the same path with people in it: the person on call is paged, the second step tells the team and a channel, and an acknowledgement stops the escalation. `TestDiscordFirstPath` is the path through Discord: a person signs in, links their Discord account with a code, is paged in a direct message and acknowledges from it. A change that breaks any of them is not ready. Extend these tests when a feature changes that path, for example when routing decides where the message goes.
 - Prefer a package test for a single behaviour; add an end-to-end test for a path that crosses packages.

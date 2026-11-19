@@ -491,6 +491,10 @@ func (in Integration) validate(o object) {
 		if (e.Username != "") != hasPassword {
 			o.errorf("email.password", "username and password go together: set both or neither")
 		}
+		// A password must not cross a network in the clear.
+		if e.TLS == EmailTLSNone && hasPassword && e.Host != "localhost" && e.Host != "127.0.0.1" && e.Host != "::1" {
+			o.errorf("email.tls", "none would send the password unencrypted; use starttls or implicit, or remove username and password")
+		}
 	case IntegrationTypeWebhook:
 		u, err := url.Parse(in.Webhook.URL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -559,8 +563,12 @@ func (t Target) validate(o object, at string, schedules, teams, integrations map
 			o.errorf(at+".via", "applies to schedule, team and user targets, not to a channel")
 		}
 		// What a channel is depends on the service.
-		if t.Channel != "" && types[t.Integration] == IntegrationTypeDiscord && !discordChannelRE.MatchString(t.Channel) {
+		switch {
+		case t.Channel == "":
+		case types[t.Integration] == IntegrationTypeDiscord && !discordChannelRE.MatchString(t.Channel):
 			o.errorf(at+".channel", "must be the numeric ID of the Discord channel, in quotes; Discord does not take a channel by name")
+		case types[t.Integration] == IntegrationTypeEmail && !validEmail(t.Channel):
+			o.errorf(at+".channel", "must be an email address: for an email integration the channel is where the message is sent")
 		}
 		return
 	}

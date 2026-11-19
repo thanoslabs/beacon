@@ -23,6 +23,9 @@ services:
       # that has a Discord integration, such as examples/discord. See
       # docs/discord.md.
       BEACON_DISCORD_BOT_TOKEN: ${BEACON_DISCORD_BOT_TOKEN:-}
+      # Password of the SMTP account, read only by a configuration that has
+      # an email integration, such as examples/email. See docs/email.md.
+      BEACON_SMTP_PASSWORD: ${BEACON_SMTP_PASSWORD:-}
     volumes:
       # The configuration: a directory of YAML files. See docs/configuration.md.
       - ${BEACON_CONFIG_DIR:-./examples/quickstart}:/etc/beacon:ro
@@ -70,6 +73,33 @@ services:
       - "127.0.0.1:${BEACON_DEX_PORT:-5556}:5556"
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:5556/dex/.well-known/openid-configuration"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # An SMTP server that keeps every message it is sent and delivers none,
+  # for development and for the tests of the email channel. It is not
+  # started by `docker compose up`; ask for it by name:
+  #
+  #   docker compose up -d --wait mailpit
+  #
+  # Read the messages at http://localhost:8025. It takes mail without TLS,
+  # from the user in dev/mailpit/auth only. See docs/email.md.
+  mailpit:
+    image: axllent/mailpit:v1.33.1
+    profiles: ["mail"]
+    environment:
+      MP_SMTP_AUTH_FILE: /etc/mailpit/auth
+      # The tests reach it on this machine, where a password may travel
+      # without TLS.
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    volumes:
+      - ./dev/mailpit/auth:/etc/mailpit/auth:ro
+    ports:
+      - "127.0.0.1:${BEACON_MAILPIT_SMTP_PORT:-1025}:1025"
+      - "127.0.0.1:${BEACON_MAILPIT_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
       interval: 2s
       timeout: 3s
       retries: 30

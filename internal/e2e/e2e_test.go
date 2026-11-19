@@ -24,6 +24,7 @@ import (
 
 	"github.com/thanoslabs/beacon/internal/auth/oidctest"
 	"github.com/thanoslabs/beacon/internal/discord/discordtest"
+	"github.com/thanoslabs/beacon/internal/email/mailpittest"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
 	"github.com/thanoslabs/beacon/internal/slack/slacktest"
@@ -191,6 +192,7 @@ func launch(t *testing.T, dbURL, dir string) *beacon {
 		"BEACON_SLACK_API_URL=" + b.slack.URL,
 		"BEACON_DISCORD_BOT_TOKEN=" + discordToken,
 		"BEACON_DISCORD_API_URL=" + b.discord.URL,
+		"BEACON_SMTP_PASSWORD=" + mailpittest.Password,
 		"BEACON_OIDC_CLIENT_SECRET=" + oidctest.ClientSecret,
 		"BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH=" + bootstrapHash(t),
 	}
@@ -1456,6 +1458,9 @@ func TestReload(t *testing.T) {
 	// 5. So do the channels: an integration of another service that arrives
 	// with a reload delivers from then on.
 	reloadAddsDiscord(b, twoSteps, 5)
+	if mailpittest.Configured() {
+		reloadAddsEmail(b, twoSteps, 6)
+	}
 
 	if code := b.terminate(); code != 0 {
 		t.Errorf("exit code after SIGTERM = %d, want 0", code)
