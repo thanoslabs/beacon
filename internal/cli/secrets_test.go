@@ -17,6 +17,7 @@ var secretSettings = map[string]string{
 	"BEACON_SMTP_PASSWORD":        "smtp-password-marker-6a3d",
 	"BEACON_DISCORD_BOT_TOKEN":    "discord-token-marker-0c8f",
 	"BEACON_HOOK_AUTHORIZATION":   "Bearer hook-marker-b7e2",
+	"BEACON_HOOK_SIGNING_SECRET":  "hook-signing-secret-marker-4d1a",
 	"BEACON_OIDC_CLIENT_SECRET":   "client-secret-marker-93fa",
 	// A bcrypt hash of a password that is used nowhere. The hash is a
 	// credential too: it must not be printed either.
@@ -35,12 +36,12 @@ const secretsConfig = slackConfig + `  - name: email
       application_id: "1234567890123456789"
   - name: hook
     type: webhook
-    webhook: {url: "https://tickets.example.com/hook", headers: {Authorization: {env: BEACON_HOOK_AUTHORIZATION}}}
+    webhook: {url: "https://tickets.example.com/hook", signing_secret: {env: BEACON_HOOK_SIGNING_SECRET}, headers: {Authorization: {env: BEACON_HOOK_AUTHORIZATION}}}
 `
 
 // secretMarkers are the substrings that must never be printed.
 var secretMarkers = []string{"db-pass-marker-1f9a", "source-token-marker-7c2e41d0", "bot-token-marker-55d1", "signing-secret-marker-e07b",
-	"smtp-password-marker-6a3d", "discord-token-marker-0c8f", "hook-marker-b7e2", "client-secret-marker-93fa", "2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"}
+	"smtp-password-marker-6a3d", "discord-token-marker-0c8f", "hook-marker-b7e2", "hook-signing-secret-marker-4d1a", "client-secret-marker-93fa", "2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"}
 
 func assertNoSecrets(t *testing.T, what, out string, markers ...string) {
 	t.Helper()

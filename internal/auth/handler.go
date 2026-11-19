@@ -153,6 +153,8 @@ func (h *Handler) Routes() []access.Route {
 	routes := []access.Route{
 		{Pattern: "GET " + LoginPath, Level: access.Public, Handler: http.HandlerFunc(h.handleLogin)},
 		{Pattern: "GET " + CallbackPath, Level: access.Public, Handler: http.HandlerFunc(h.handleCallback)},
+		// Says what a sign-in page shows: which ways to sign in exist.
+		{Pattern: "GET " + MethodsPath, Level: access.Public, Handler: http.HandlerFunc(h.handleMethods)},
 		{Pattern: "POST " + LogoutPath, Level: access.Member, Handler: http.HandlerFunc(h.handleLogout)},
 		{Pattern: "GET " + MePath, Level: access.Member, Handler: http.HandlerFunc(h.handleMe)},
 		// Checks the password itself, and bounds the attempts.
@@ -375,12 +377,34 @@ type me struct {
 	SessionExpiresAt *time.Time `json:"session_expires_at,omitempty"`
 }
 
+// MethodsPath is where a client asks which ways to sign in exist.
+const MethodsPath = "/auth/methods"
+
+// handleMethods answers which ways to sign in are configured, so that a
+// sign-in page can offer those and no others. It says nothing that the
+// sign-in routes do not say to anyone who tries them.
+func (h *Handler) handleMethods(w http.ResponseWriter, r *http.Request) {
+	body := struct {
+		// OIDC says that people sign in through an identity provider, at
+		// LoginPath.
+		OIDC bool `json:"oidc"`
+		// BootstrapAdmin says that the bootstrap admin can sign in with its
+		// password, at BootstrapPath.
+		BootstrapAdmin bool `json:"bootstrap_admin"`
+	}{}
+	if s := h.settings.Load(); s != nil {
+		body.OIDC, body.BootstrapAdmin = s.auth.OIDC != nil, s.auth.BootstrapAdmin != nil
+	}
+	h.write(w, r, http.StatusOK, body)
+}
+
 // handleMe answers who is signed in.
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	p, _ := access.FromContext(r.Context())
 	body := me{ID: p.UserID, TokenID: p.TokenID, Email: p.Email, DisplayName: p.Name, Role: p.Role}
 	if p.TokenID == "" {
 		if _, expires, err := h.session(r); err == nil {
+			expires = expires.UTC()
 			body.SessionExpiresAt = &expires
 		}
 	}

@@ -147,6 +147,8 @@ POST   /api/v1/schedules/<name>/overrides             create one
 DELETE /api/v1/schedules/<name>/overrides/<id>        remove one
 ```
 
+The list is paged with `limit` and `cursor` ([[api#Conventions]]).
+
 ```sh
 curl -X POST https://beacon.example.com/api/v1/schedules/platform-primary/overrides \
   -H "Authorization: Bearer $BEACON_TOKEN" \

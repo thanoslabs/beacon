@@ -10,10 +10,14 @@ testdata/invalid/integrations.yaml:13: integration "email": email.password: user
 testdata/invalid/integrations.yaml:13: integration "email": email.port: is required: a port between 1 and 65535
 testdata/invalid/integrations.yaml:13: integration "email": email.tls: is required: starttls, implicit or none
 testdata/invalid/integrations.yaml:16: integration "relay": email.tls: none would send the password unencrypted; use starttls or implicit, or remove username and password
+testdata/invalid/integrations.yaml:19: integration "hook": webhook.signing_secret: is required: the key with which Beacon signs every request, as {env: NAME} or {file: /path}
 testdata/invalid/integrations.yaml:20: integration "hook": webhook.url: is required: an http or https URL
 testdata/invalid/integrations.yaml:21: integration "hook": webhook.headers: "Bad Header" is not a header name
-testdata/invalid/integrations.yaml:23: integration "pager": type: "sms" is not slack, discord, email or webhook
-testdata/invalid/integrations.yaml:24: integration "untyped": type: is required: slack, discord, email or webhook
+testdata/invalid/integrations.yaml:21: integration "hook": webhook.headers: "Content-Type" is set by Beacon and cannot be configured
+testdata/invalid/integrations.yaml:21: integration "hook": webhook.headers: "x-beacon-signature" is set by Beacon and cannot be configured
+testdata/invalid/integrations.yaml:24: integration "weak": webhook.signing_secret: must be at least 16 characters
+testdata/invalid/integrations.yaml:26: integration "pager": type: "sms" is not slack, discord, email or webhook
+testdata/invalid/integrations.yaml:27: integration "untyped": type: is required: slack, discord, email or webhook
 testdata/invalid/sources.yaml:2: source "Prod": name: must be lowercase letters, digits and hyphens, start with a letter and be at most 63 characters
 testdata/invalid/sources.yaml:2: source "Prod": token: is required
 testdata/invalid/sources.yaml:3: source "Prod": type: "pager" is not alertmanager, grafana or webhook
@@ -57,28 +61,30 @@ testdata/invalid/teams/platform.yaml:34: escalation policy "default": steps[0].n
 testdata/invalid/teams/platform.yaml:35: escalation policy "default": steps[0].notify[4].channel: is required with integration
 testdata/invalid/teams/platform.yaml:37: escalation policy "default": steps[0].notify[5].integration: integration "carrier-pigeon" does not exist
 testdata/invalid/teams/platform.yaml:38: escalation policy "default": steps[0].notify[5].via: applies to schedule, team and user targets, not to a channel
-testdata/invalid/teams/platform.yaml:39: escalation policy "default": steps[0].notify[6]: a target is exactly one of {schedule}, {team}, {user} and {channel, integration}
-testdata/invalid/teams/platform.yaml:41: escalation policy "default": steps[0].notify[7]: a target is exactly one of {schedule}, {team}, {user} and {channel, integration}
+testdata/invalid/teams/platform.yaml:39: escalation policy "default": steps[0].notify[6]: a target is exactly one of {schedule}, {team}, {user} and {channel, integration}; an outbound webhook is {integration} alone
+testdata/invalid/teams/platform.yaml:41: escalation policy "default": steps[0].notify[7]: a target is exactly one of {schedule}, {team}, {user} and {channel, integration}; an outbound webhook is {integration} alone
 testdata/invalid/teams/platform.yaml:42: escalation policy "default": steps[0].notify[8].channel: must be the numeric ID of the Discord channel, in quotes; Discord does not take a channel by name
 testdata/invalid/teams/platform.yaml:44: escalation policy "default": steps[0].notify[9].channel: must be an email address: for an email integration the channel is where the message is sent
-testdata/invalid/teams/platform.yaml:46: escalation policy "default": steps[1].notify: at least one target is required
-testdata/invalid/teams/platform.yaml:47: escalation policy "default": steps[1].timeout: is required, and must be longer than zero
-testdata/invalid/teams/platform.yaml:48: escalation policy "empty": steps: at least one step is required
-testdata/invalid/teams/platform.yaml:50: routing: group_by[1]: "not a label" is not a label name
-testdata/invalid/teams/platform.yaml:50: routing: group_by[2]: "alertname" is listed twice
-testdata/invalid/teams/platform.yaml:52: routing: group_interval: must be longer than zero
-testdata/invalid/teams/platform.yaml:53: routing: default.escalation_policy: is required
-testdata/invalid/teams/platform.yaml:54: routing: default.team: team "nobody" does not exist
-testdata/invalid/teams/platform.yaml:56: routing rule "r1": match: a rule needs match, match_re or both
-testdata/invalid/teams/platform.yaml:57: routing rule "r1": escalation_policy: escalation policy "missing" does not exist
-testdata/invalid/teams/platform.yaml:58: routing rule "r1": team: team "nobody" does not exist
-testdata/invalid/teams/platform.yaml:59: routing rule "r1": escalation_policy: is required
-testdata/invalid/teams/platform.yaml:59: routing rule "r1": name: the name is used twice; first at testdata/invalid/teams/platform.yaml:56
-testdata/invalid/teams/platform.yaml:60: routing rule "r1": match: "bad-label" is not a label name
-testdata/invalid/teams/platform.yaml:61: routing rule "r1": match_re: "also bad" is not a label name
-testdata/invalid/teams/platform.yaml:61: routing rule "r1": match_re.severity: is not a regular expression: missing closing ): `^(?:(critical)$`
-testdata/invalid/teams/platform.yaml:62: routing rule "r1": group_interval: must be longer than zero
-testdata/invalid/teams/platform.yaml:64: routing rule "r3": match.severity: the label is in match and in match_re; use one of them
-testdata/invalid/teams/platform.yaml:64: routing rule "r3": match.team: is longer than 1024 characters
-testdata/invalid/teams/platform.yaml:65: routing rule "r3": match_re.instance: is longer than 1024 characters
-testdata/invalid/teams/platform.yaml:66: routing rule "r3": service: must be at most 100 characters, without control characters
+testdata/invalid/teams/platform.yaml:46: escalation policy "default": steps[0].notify[10].channel: does not apply to an outbound webhook, whose address is in the integration; name it alone: {integration: hook}
+testdata/invalid/teams/platform.yaml:49: escalation policy "default": steps[0].notify[11].via[0]: "hook" is an outbound webhook, which cannot reach a person; name it as a target of its own: {integration: hook}
+testdata/invalid/teams/platform.yaml:50: escalation policy "default": steps[1].notify: at least one target is required
+testdata/invalid/teams/platform.yaml:51: escalation policy "default": steps[1].timeout: is required, and must be longer than zero
+testdata/invalid/teams/platform.yaml:52: escalation policy "empty": steps: at least one step is required
+testdata/invalid/teams/platform.yaml:54: routing: group_by[1]: "not a label" is not a label name
+testdata/invalid/teams/platform.yaml:54: routing: group_by[2]: "alertname" is listed twice
+testdata/invalid/teams/platform.yaml:56: routing: group_interval: must be longer than zero
+testdata/invalid/teams/platform.yaml:57: routing: default.escalation_policy: is required
+testdata/invalid/teams/platform.yaml:58: routing: default.team: team "nobody" does not exist
+testdata/invalid/teams/platform.yaml:60: routing rule "r1": match: a rule needs match, match_re or both
+testdata/invalid/teams/platform.yaml:61: routing rule "r1": escalation_policy: escalation policy "missing" does not exist
+testdata/invalid/teams/platform.yaml:62: routing rule "r1": team: team "nobody" does not exist
+testdata/invalid/teams/platform.yaml:63: routing rule "r1": escalation_policy: is required
+testdata/invalid/teams/platform.yaml:63: routing rule "r1": name: the name is used twice; first at testdata/invalid/teams/platform.yaml:60
+testdata/invalid/teams/platform.yaml:64: routing rule "r1": match: "bad-label" is not a label name
+testdata/invalid/teams/platform.yaml:65: routing rule "r1": match_re: "also bad" is not a label name
+testdata/invalid/teams/platform.yaml:65: routing rule "r1": match_re.severity: is not a regular expression: missing closing ): `^(?:(critical)$`
+testdata/invalid/teams/platform.yaml:66: routing rule "r1": group_interval: must be longer than zero
+testdata/invalid/teams/platform.yaml:68: routing rule "r3": match.severity: the label is in match and in match_re; use one of them
+testdata/invalid/teams/platform.yaml:68: routing rule "r3": match.team: is longer than 1024 characters
+testdata/invalid/teams/platform.yaml:69: routing rule "r3": match_re.instance: is longer than 1024 characters
+testdata/invalid/teams/platform.yaml:70: routing rule "r3": service: must be at most 100 characters, without control characters

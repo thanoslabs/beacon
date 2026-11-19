@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/thanoslabs/beacon/internal/access"
+	"github.com/thanoslabs/beacon/internal/api/apitest"
 	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
 	"github.com/thanoslabs/beacon/internal/provision"
@@ -534,11 +535,20 @@ func TestLinkCodeAPI(t *testing.T) {
 		}
 		mux.Handle(route.Pattern, route.Handler)
 	}
+	// Every answer is checked against the OpenAPI description, which the
+	// test of the whole server cannot do for these routes: they need a
+	// person who signed in through an identity provider.
+	spec := apitest.Load(t)
 	call := func(p access.Principal, method, path string) (int, map[string]any) {
 		t.Helper()
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(method, path, nil)
 		mux.ServeHTTP(rec, req.WithContext(access.WithPrincipal(req.Context(), p)))
+		if op, ok := spec.Match(method, path); !ok {
+			t.Errorf("%s %s is not in the OpenAPI description", method, path)
+		} else if err := spec.Check(op, rec.Code, rec.Header().Get("Content-Type"), rec.Body.Bytes()); err != nil {
+			t.Error(err)
+		}
 		var body map[string]any
 		if rec.Body.Len() > 0 {
 			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {

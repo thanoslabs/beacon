@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"net/mail"
 	"net/url"
 	"regexp"
@@ -21,6 +22,17 @@ import (
 // minTokenLength is the shortest source token accepted. A token is the only
 // thing that stops anyone who can reach Beacon from sending alerts.
 const minTokenLength = 16
+
+// minSigningSecretLength is the shortest key accepted for signing outbound
+// webhooks. A signature made with a key that can be guessed proves nothing.
+const minSigningSecretLength = 16
+
+// reservedHeaders are the headers of an outbound webhook that Beacon sets
+// itself, by canonical name, besides everything that starts with X-Beacon-.
+var reservedHeaders = map[string]bool{
+	"Content-Type": true, "Content-Length": true, "Host": true, "User-Agent": true, "Idempotency-Key": true,
+	"Transfer-Encoding": true, "Connection": true,
+}
 
 // maxRepeat bounds how often an escalation policy runs again.
 const maxRepeat = 100
@@ -500,9 +512,20 @@ func (in Integration) validate(o object) {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			o.errorf("webhook.url", "is required: an http or https URL")
 		}
+		// A request that nobody can verify is not sent: the secret is not
+		// optional.
+		switch secret := in.Webhook.SigningSecret; {
+		case !secret.IsReferenced() && !secret.IsSet():
+			o.errorf("webhook.signing_secret", "is required: the key with which Beacon signs every request, as {env: NAME} or {file: /path}")
+		case secret.IsSet() && len(secret.Reveal()) < minSigningSecretLength:
+			o.errorf("webhook.signing_secret", "must be at least %d characters", minSigningSecretLength)
+		}
 		for name := range in.Webhook.Headers {
-			if !headerNameRE.MatchString(name) {
+			switch canonical := http.CanonicalHeaderKey(name); {
+			case !headerNameRE.MatchString(name):
 				o.errorf("webhook.headers", "%q is not a header name", name)
+			case reservedHeaders[canonical] || strings.HasPrefix(canonical, "X-Beacon-"):
+				o.errorf("webhook.headers", "%q is set by Beacon and cannot be configured", name)
 			}
 		}
 	}
@@ -531,6 +554,12 @@ func (r Rotation) validate(o object) {
 }
 
 func (t Target) validate(o object, at string, schedules, teams, integrations map[string]Origin, types map[string]string) {
+	// An outbound webhook cannot reach a person: it has one address.
+	personal := func(at, name string) {
+		if types[name] == IntegrationTypeWebhook {
+			o.errorf(at, "%q is an outbound webhook, which cannot reach a person; name it as a target of its own: {integration: %s}", name, name)
+		}
+	}
 	forms := 0
 	for _, set := range []bool{t.Schedule != "", t.Team != "", t.User != "", t.Channel != "" || t.Integration != ""} {
 		if set {
@@ -538,7 +567,7 @@ func (t Target) validate(o object, at string, schedules, teams, integrations map
 		}
 	}
 	if forms != 1 {
-		o.errorf(at, "a target is exactly one of {schedule}, {team}, {user} and {channel, integration}")
+		o.errorf(at, "a target is exactly one of {schedule}, {team}, {user} and {channel, integration}; an outbound webhook is {integration} alone")
 		return
 	}
 	switch {
@@ -551,7 +580,12 @@ func (t Target) validate(o object, at string, schedules, teams, integrations map
 			o.errorf(at+".user", "%q is not an email address", t.User)
 		}
 	default:
-		if t.Channel == "" {
+		// An outbound webhook has one address, which is in the integration.
+		webhook := types[t.Integration] == IntegrationTypeWebhook
+		switch {
+		case webhook && t.Channel != "":
+			o.errorf(at+".channel", "does not apply to an outbound webhook, whose address is in the integration; name it alone: {integration: %s}", t.Integration)
+		case !webhook && t.Channel == "":
 			o.errorf(at+".channel", "is required with integration")
 		}
 		if t.Integration == "" {
@@ -574,5 +608,6 @@ func (t Target) validate(o object, at string, schedules, teams, integrations map
 	}
 	for i, name := range t.Via {
 		o.ref(fmt.Sprintf("%s.via[%d]", at, i), kindIntegration, name, integrations)
+		personal(fmt.Sprintf("%s.via[%d]", at, i), name)
 	}
 }

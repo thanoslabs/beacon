@@ -26,6 +26,10 @@ services:
       # Password of the SMTP account, read only by a configuration that has
       # an email integration, such as examples/email. See docs/email.md.
       BEACON_SMTP_PASSWORD: ${BEACON_SMTP_PASSWORD:-}
+      # Key that signs outbound webhooks, read only by a configuration that
+      # has one, such as examples/outbound-webhook. See
+      # docs/outbound-webhook.md.
+      BEACON_WEBHOOK_SIGNING_SECRET: ${BEACON_WEBHOOK_SIGNING_SECRET:-}
     volumes:
       # The configuration: a directory of YAML files. See docs/configuration.md.
       - ${BEACON_CONFIG_DIR:-./examples/quickstart}:/etc/beacon:ro

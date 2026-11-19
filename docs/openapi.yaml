@@ -1,0 +1,1037 @@
+# The OpenAPI description of Beacon's HTTP API. It is embedded in the binary
+# and served at /api/v1/openapi.json and /api/v1/openapi.yaml.
+#
+# It is written by hand and kept true by tests: every route of beacon serve
+# must be described here with its access level and nothing else may be, and
+# the answers of the real server are checked against the schemas below. An
+# object schema lists every field its answer can have (additionalProperties:
+# false), so a field that is added to an answer and not to this file fails a
+# test.
+openapi: 3.0.3
+info:
+  title: Beacon
+  version: "1"
+  license: {name: MIT}
+  description: |
+    The HTTP API of Beacon, an alerting and on-call platform.
+
+    Every route needs a session cookie or an API token, sent as
+    `Authorization: Bearer bcn_...`, unless it is marked as public. A route
+    marked admin needs the admin role. A request without a valid credential
+    is answered 401, also for an address that does not exist.
+
+    A list is an object with one array and, when it is paged, a next_cursor
+    to send back as cursor. An error is an object with error and, when one
+    part of the request is at fault, field. Times are RFC 3339 in UTC.
+    docs/api.md describes the conventions in full.
+servers:
+  - url: /
+security:
+  - session: []
+  - token: []
+tags:
+  - {name: alerts, description: "Alerts, their groups and their timelines"}
+  - {name: silences, description: Keep Beacon quiet about matching alerts for a period}
+  - {name: schedules, description: "On-call schedules, who is on call, and overrides"}
+  - {name: configuration, description: "What the configuration files define, for reading"}
+  - {name: access, description: "Sign-in, the signed-in user, chat accounts and API tokens"}
+  - {name: machines, description: "Routes that other systems call: sources, chat services, probes"}
+
+paths:
+  /healthz:
+    get:
+      tags: [machines]
+      summary: "Liveness: the process is running"
+      x-beacon-access: public
+      security: []
+      responses:
+        "200": {description: The process is running, content: {application/json: {schema: {$ref: "#/components/schemas/Health"}}}}
+  /readyz:
+    get:
+      tags: [machines]
+      summary: "Readiness: the database answers and the server is not shutting down"
+      x-beacon-access: public
+      security: []
+      responses:
+        "200": {description: Ready, content: {application/json: {schema: {$ref: "#/components/schemas/Health"}}}}
+        "503": {description: Not ready, content: {application/json: {schema: {$ref: "#/components/schemas/Health"}}}}
+  /metrics:
+    get:
+      tags: [machines]
+      summary: Prometheus metrics
+      x-beacon-access: public
+      security: []
+      responses:
+        "200": {description: Metrics in the Prometheus text format, content: {text/plain: {schema: {type: string}}}}
+  /api/v1/openapi.json:
+    get:
+      tags: [machines]
+      summary: This description, as JSON
+      x-beacon-access: public
+      security: []
+      responses:
+        "200": {description: The OpenAPI description, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+  /api/v1/openapi.yaml:
+    get:
+      tags: [machines]
+      summary: This description, as YAML
+      x-beacon-access: public
+      security: []
+      responses:
+        "200": {description: The OpenAPI description, content: {application/yaml: {schema: {type: string}}}}
+  /api/v1/ingest/{source}:
+    post:
+      tags: [machines]
+      summary: Receive alerts from a source
+      description: |
+        The payload is Alertmanager's, Grafana's or Beacon's generic one, by
+        the type of the source. The credential is the source's own token, as
+        a bearer token; a session or an API token is not one here.
+      x-beacon-access: public
+      security: []
+      parameters: [{$ref: "#/components/parameters/source"}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: The alerts were updated or resolved, content: {application/json: {schema: {$ref: "#/components/schemas/IngestResult"}}}}
+        "201": {description: An alert was opened, content: {application/json: {schema: {$ref: "#/components/schemas/IngestResult"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/integrations/{name}/interactions:
+    post:
+      tags: [machines]
+      summary: Receive button presses and commands from Slack or Discord
+      description: |
+        The request is verified with the signature of the chat service of
+        the integration: Slack's signing secret, or Discord's public key.
+        The body and the answer are the service's own.
+      x-beacon-access: public
+      security: []
+      parameters: [{$ref: "#/components/parameters/name"}]
+      responses:
+        "200": {description: "The interaction was handled. The body, if any, is in the form the service expects."}
+        "401": {description: The signature is missing or wrong}
+        default: {description: The request was not an interaction}
+  /api/v1/config/reload:
+    post:
+      tags: [configuration]
+      summary: Reload the configuration files
+      x-beacon-access: admin
+      responses:
+        "200":
+          description: The configuration was reloaded
+          content: {application/json: {schema: {type: object, additionalProperties: false, required: [result], properties: {result: {type: string, enum: [reloaded]}}}}}
+        "422": {description: "The files have problems; the previous configuration stays active", content: {application/json: {schema: {$ref: "#/components/schemas/ReloadError"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /auth/login:
+    get:
+      tags: [access]
+      summary: Start a sign-in through the identity provider
+      x-beacon-access: public
+      security: []
+      responses:
+        "302": {description: The browser is sent to the identity provider}
+        default: {$ref: "#/components/responses/Error"}
+  /auth/callback:
+    get:
+      tags: [access]
+      summary: Where the identity provider sends the browser back
+      x-beacon-access: public
+      security: []
+      responses:
+        "302": {description: "The person is signed in, and the browser is sent to Beacon"}
+        default: {$ref: "#/components/responses/Error"}
+  /auth/methods:
+    get:
+      tags: [access]
+      summary: Which ways to sign in exist
+      x-beacon-access: public
+      security: []
+      responses:
+        "200":
+          description: The ways to sign in
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [oidc, bootstrap_admin]
+                properties:
+                  oidc: {type: boolean, description: People sign in through an identity provider at /auth/login}
+                  bootstrap_admin: {type: boolean, description: The bootstrap admin can sign in at /auth/bootstrap}
+  /auth/bootstrap:
+    post:
+      tags: [access]
+      summary: Sign the bootstrap admin in with its password
+      x-beacon-access: public
+      security: []
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [password], properties: {password: {type: string}}}}}
+      responses:
+        "200": {description: Signed in; the session is in a cookie, content: {application/json: {schema: {$ref: "#/components/schemas/Me"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /auth/logout:
+    post:
+      tags: [access]
+      summary: End the session
+      x-beacon-access: member
+      responses:
+        "204": {description: Signed out}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/me:
+    get:
+      tags: [access]
+      summary: Who is signed in
+      x-beacon-access: member
+      responses:
+        "200": {description: The user or the API token behind the request, content: {application/json: {schema: {$ref: "#/components/schemas/Me"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/me/identities:
+    get:
+      tags: [access]
+      summary: The chat accounts linked to whoever is signed in
+      x-beacon-access: member
+      responses:
+        "200":
+          description: The linked accounts
+          content: {application/json: {schema: {type: object, additionalProperties: false, required: [identities], properties: {identities: {type: array, items: {$ref: "#/components/schemas/Identity"}}}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/me/identities/{integration}:
+    delete:
+      tags: [access]
+      summary: Remove the chat account the person linked themselves
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/integration"}]
+      responses:
+        "204": {description: The link was removed}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/me/identities/{integration}/link-code:
+    post:
+      tags: [access]
+      summary: Issue a one-time code with which the person links their chat account
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/integration"}]
+      responses:
+        "201": {description: "The code, shown this once", content: {application/json: {schema: {$ref: "#/components/schemas/LinkCode"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/tokens:
+    get:
+      tags: [access]
+      summary: List API tokens
+      x-beacon-access: admin
+      parameters: [{$ref: "#/components/parameters/limit"}, {$ref: "#/components/parameters/cursor"}]
+      responses:
+        "200":
+          description: "The tokens, newest first, without their secrets"
+          content: {application/json: {schema: {type: object, additionalProperties: false, required: [tokens], properties: {tokens: {type: array, items: {$ref: "#/components/schemas/Token"}}, next_cursor: {type: string}}}}}
+        default: {$ref: "#/components/responses/Error"}
+    post:
+      tags: [access]
+      summary: Create an API token
+      x-beacon-access: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, role]
+              properties:
+                name: {type: string}
+                role: {$ref: "#/components/schemas/Role"}
+                expires_in: {type: string, description: "A duration such as 30d; without it the token does not expire"}
+      responses:
+        "201": {description: "The token, with its secret, which is shown this once", content: {application/json: {schema: {$ref: "#/components/schemas/CreatedToken"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/tokens/{id}:
+    delete:
+      tags: [access]
+      summary: Revoke an API token
+      x-beacon-access: admin
+      parameters: [{$ref: "#/components/parameters/id"}]
+      responses:
+        "204": {description: The token stops working}
+        default: {$ref: "#/components/responses/Error"}
+
+  /api/v1/alerts:
+    get:
+      tags: [alerts]
+      summary: "List alerts, newest first"
+      x-beacon-access: member
+      parameters:
+        - {name: status, in: query, description: "firing, acknowledged, snoozed, resolved, or open for all that are not resolved; several may be given", schema: {type: array, items: {type: string, enum: [firing, acknowledged, snoozed, resolved, open]}}, style: form, explode: true}
+        - {name: severity, in: query, schema: {type: array, items: {$ref: "#/components/schemas/Severity"}}, style: form, explode: true}
+        - {name: team, in: query, description: The name of a team, schema: {type: string}}
+        - {name: service, in: query, schema: {type: string}}
+        - {name: source, in: query, description: The name of a source, schema: {type: string}}
+        - {name: group, in: query, description: The identifier of an alert group, schema: {type: string, format: uuid}}
+        - {$ref: "#/components/parameters/limit"}
+        - {$ref: "#/components/parameters/cursor"}
+      responses:
+        "200":
+          description: A page of alerts
+          content: {application/json: {schema: {type: object, additionalProperties: false, required: [alerts], properties: {alerts: {type: array, items: {$ref: "#/components/schemas/Alert"}}, next_cursor: {type: string}}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/alerts/{id}:
+    get:
+      tags: [alerts]
+      summary: Read one alert
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/id"}]
+      responses:
+        "200": {description: The alert, content: {application/json: {schema: {$ref: "#/components/schemas/Alert"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/alerts/{id}/timeline:
+    get:
+      tags: [alerts]
+      summary: "What happened to an alert and its group, oldest first"
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/id"}, {$ref: "#/components/parameters/limit"}, {$ref: "#/components/parameters/cursor"}]
+      responses:
+        "200":
+          description: A page of events
+          content: {application/json: {schema: {type: object, additionalProperties: false, required: [events], properties: {events: {type: array, items: {$ref: "#/components/schemas/Event"}}, next_cursor: {type: string}}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/alerts/{id}/acknowledge:
+    post:
+      tags: [alerts]
+      summary: Acknowledge an alert
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/id"}]
+      responses:
+        "200": {description: The alert as it is afterwards, content: {application/json: {schema: {$ref: "#/components/schemas/Alert"}}}}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/alerts/{id}/snooze:
+    post:
+      tags: [alerts]
+      summary: Snooze an alert
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/id"}]
+      requestBody: {$ref: "#/components/requestBodies/Snooze"}
+      responses:
+        "200": {description: The alert as it is afterwards, content: {application/json: {schema: {$ref: "#/components/schemas/Alert"}}}}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/alerts/{id}/resolve:
+    post:
+      tags: [alerts]
+      summary: Resolve an alert by hand
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/id"}]
+      responses:
+        "200": {description: The alert as it is afterwards, content: {application/json: {schema: {$ref: "#/components/schemas/Alert"}}}}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/alert-groups/{id}:
+    get:
+      tags: [alerts]
+      summary: Read an alert group with its alerts
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/id"}]
+      responses:
+        "200": {description: The group, content: {application/json: {schema: {$ref: "#/components/schemas/AlertGroup"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/alert-groups/{id}/acknowledge:
+    post:
+      tags: [alerts]
+      summary: Acknowledge every alert of a group that can be
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/id"}]
+      responses:
+        "200": {description: The group as it is afterwards, content: {application/json: {schema: {$ref: "#/components/schemas/AlertGroup"}}}}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/alert-groups/{id}/snooze:
+    post:
+      tags: [alerts]
+      summary: Snooze every alert of a group that can be
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/id"}]
+      requestBody: {$ref: "#/components/requestBodies/Snooze"}
+      responses:
+        "200": {description: The group as it is afterwards, content: {application/json: {schema: {$ref: "#/components/schemas/AlertGroup"}}}}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/alert-groups/{id}/resolve:
+    post:
+      tags: [alerts]
+      summary: Resolve every alert of a group by hand
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/id"}]
+      responses:
+        "200": {description: The group as it is afterwards, content: {application/json: {schema: {$ref: "#/components/schemas/AlertGroup"}}}}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /api/v1/sources:
+    get:
+      tags: [configuration]
+      summary: List the sources
+      x-beacon-access: member
+      responses:
+        "200": {description: The sources in the order of the files, content: {application/json: {schema: {type: object, additionalProperties: false, required: [sources], properties: {sources: {type: array, items: {$ref: "#/components/schemas/Source"}}}}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/sources/{name}:
+    get:
+      tags: [configuration]
+      summary: Read one source
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/name"}]
+      responses:
+        "200": {description: The source, content: {application/json: {schema: {$ref: "#/components/schemas/Source"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/integrations:
+    get:
+      tags: [configuration]
+      summary: "List the integrations, without credentials"
+      x-beacon-access: member
+      responses:
+        "200": {description: The integrations in the order of the files, content: {application/json: {schema: {type: object, additionalProperties: false, required: [integrations], properties: {integrations: {type: array, items: {$ref: "#/components/schemas/Integration"}}}}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/integrations/{name}:
+    get:
+      tags: [configuration]
+      summary: "Read one integration, without credentials"
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/name"}]
+      responses:
+        "200": {description: The integration, content: {application/json: {schema: {$ref: "#/components/schemas/Integration"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/escalation-policies:
+    get:
+      tags: [configuration]
+      summary: List the escalation policies
+      x-beacon-access: member
+      responses:
+        "200": {description: The policies in the order of the files, content: {application/json: {schema: {type: object, additionalProperties: false, required: [escalation_policies], properties: {escalation_policies: {type: array, items: {$ref: "#/components/schemas/EscalationPolicy"}}}}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/escalation-policies/{name}:
+    get:
+      tags: [configuration]
+      summary: Read one escalation policy
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/name"}]
+      responses:
+        "200": {description: The policy, content: {application/json: {schema: {$ref: "#/components/schemas/EscalationPolicy"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/routing:
+    get:
+      tags: [configuration]
+      summary: "Read the routing block: grouping, the default route and the rules in order"
+      x-beacon-access: member
+      responses:
+        "200": {description: The routing block, content: {application/json: {schema: {$ref: "#/components/schemas/Routing"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/teams:
+    get:
+      tags: [configuration]
+      summary: List the teams with their members
+      x-beacon-access: member
+      responses:
+        "200": {description: The teams in the order of the files, content: {application/json: {schema: {type: object, additionalProperties: false, required: [teams], properties: {teams: {type: array, items: {$ref: "#/components/schemas/Team"}}}}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/teams/{name}:
+    get:
+      tags: [configuration]
+      summary: Read one team with its members
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/name"}]
+      responses:
+        "200": {description: The team, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/teams/{name}/on-call:
+    get:
+      tags: [schedules]
+      summary: Who is on call for each schedule of a team
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/name"}]
+      responses:
+        "200":
+          description: Who is on call now
+          content: {application/json: {schema: {type: object, additionalProperties: false, required: [team, on_call], properties: {team: {type: string}, on_call: {type: array, items: {$ref: "#/components/schemas/OnCall"}}}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/users:
+    get:
+      tags: [configuration]
+      summary: "List the users, by email address"
+      x-beacon-access: member
+      parameters:
+        - {name: team, in: query, description: The name of a team, schema: {type: string}}
+        - {name: role, in: query, schema: {$ref: "#/components/schemas/Role"}}
+        - {$ref: "#/components/parameters/limit"}
+        - {$ref: "#/components/parameters/cursor"}
+      responses:
+        "200":
+          description: A page of users
+          content: {application/json: {schema: {type: object, additionalProperties: false, required: [users], properties: {users: {type: array, items: {$ref: "#/components/schemas/User"}}, next_cursor: {type: string}}}}}
+        default: {$ref: "#/components/responses/Error"}
+
+  /api/v1/silences:
+    get:
+      tags: [silences]
+      summary: List silences
+      x-beacon-access: member
+      parameters:
+        - {name: expired, in: query, description: Also list the expired ones, schema: {type: boolean}}
+        - {$ref: "#/components/parameters/limit"}
+        - {$ref: "#/components/parameters/cursor"}
+      responses:
+        "200":
+          description: "The active and pending silences, the one that ends first at the top"
+          content: {application/json: {schema: {type: object, additionalProperties: false, required: [silences], properties: {silences: {type: array, items: {$ref: "#/components/schemas/Silence"}}, next_cursor: {type: string}}}}}
+        default: {$ref: "#/components/responses/Error"}
+    post:
+      tags: [silences]
+      summary: Create a silence
+      x-beacon-access: member
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [matchers, comment]
+              properties:
+                matchers: {type: array, items: {$ref: "#/components/schemas/Matcher"}}
+                starts_at: {type: string, format: date-time}
+                ends_at: {type: string, format: date-time}
+                duration: {type: string, description: "Such as 2h, in place of ends_at"}
+                comment: {type: string}
+      responses:
+        "201": {description: The silence, content: {application/json: {schema: {$ref: "#/components/schemas/Silence"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/silences/preview:
+    post:
+      tags: [silences]
+      summary: "Which open alerts a silence would match, without creating it"
+      x-beacon-access: member
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [matchers], properties: {matchers: {type: array, items: {$ref: "#/components/schemas/Matcher"}}}}}}
+      responses:
+        "200":
+          description: The matching alerts
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [alerts, total, complete]
+                properties:
+                  alerts: {type: array, description: The newest fifty of the matching alerts, items: {$ref: "#/components/schemas/Alert"}}
+                  total: {type: integer, description: How many open alerts match}
+                  complete: {type: boolean, description: "False when there are more open alerts than a preview looks through"}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/silences/{id}:
+    get:
+      tags: [silences]
+      summary: Read one silence
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/id"}]
+      responses:
+        "200": {description: The silence, content: {application/json: {schema: {$ref: "#/components/schemas/Silence"}}}}
+        default: {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [silences]
+      summary: Expire a silence now
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/id"}]
+      responses:
+        "204": {description: The silence is over}
+        default: {$ref: "#/components/responses/Error"}
+
+  /api/v1/schedules:
+    get:
+      tags: [schedules]
+      summary: "List the schedules, with who is on call"
+      x-beacon-access: member
+      responses:
+        "200": {description: The schedules, content: {application/json: {schema: {type: object, additionalProperties: false, required: [schedules], properties: {schedules: {type: array, items: {$ref: "#/components/schemas/Schedule"}}}}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/schedules/{name}:
+    get:
+      tags: [schedules]
+      summary: "Read one schedule, with who is on call"
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/name"}]
+      responses:
+        "200": {description: The schedule, content: {application/json: {schema: {$ref: "#/components/schemas/Schedule"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/schedules/{name}/shifts:
+    get:
+      tags: [schedules]
+      summary: "Who is on call over a period: recorded shifts and planned ones"
+      x-beacon-access: member
+      parameters:
+        - {$ref: "#/components/parameters/name"}
+        - {name: from, in: query, description: "The beginning of the period; now when absent", schema: {type: string, format: date-time}}
+        - {name: to, in: query, description: "The end of the period; four weeks after from when absent", schema: {type: string, format: date-time}}
+      responses:
+        "200":
+          description: The shifts of the period
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [schedule, from, to, shifts]
+                properties:
+                  schedule: {type: string}
+                  from: {type: string, format: date-time}
+                  to: {type: string, format: date-time}
+                  shifts: {type: array, items: {$ref: "#/components/schemas/Shift"}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/schedules/{name}/overrides:
+    get:
+      tags: [schedules]
+      summary: List the overrides of a schedule
+      x-beacon-access: member
+      parameters:
+        - {$ref: "#/components/parameters/name"}
+        - {name: past, in: query, description: Also list the ended and the removed ones, schema: {type: boolean}}
+        - {$ref: "#/components/parameters/limit"}
+        - {$ref: "#/components/parameters/cursor"}
+      responses:
+        "200":
+          description: The overrides
+          content: {application/json: {schema: {type: object, additionalProperties: false, required: [overrides], properties: {overrides: {type: array, items: {$ref: "#/components/schemas/Override"}}, next_cursor: {type: string}}}}}
+        default: {$ref: "#/components/responses/Error"}
+    post:
+      tags: [schedules]
+      summary: "Create an override: someone covers the schedule for a period"
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/name"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user: {type: string, description: The email address of the person who covers}
+                starts_at: {type: string, format: date-time}
+                ends_at: {type: string, format: date-time}
+                duration: {type: string, description: "Such as 8h, in place of ends_at"}
+                reason: {type: string}
+      responses:
+        "201": {description: The override, content: {application/json: {schema: {$ref: "#/components/schemas/Override"}}}}
+        default: {$ref: "#/components/responses/Error"}
+  /api/v1/schedules/{name}/overrides/{id}:
+    delete:
+      tags: [schedules]
+      summary: Remove an override
+      x-beacon-access: member
+      parameters: [{$ref: "#/components/parameters/name"}, {$ref: "#/components/parameters/id"}]
+      responses:
+        "204": {description: The override is removed}
+        default: {$ref: "#/components/responses/Error"}
+
+components:
+  securitySchemes:
+    session: {type: apiKey, in: cookie, name: beacon_session, description: "The session of a signed-in person. The cookie is named __Host-beacon_session when Beacon is reached over https."}
+    token: {type: http, scheme: bearer, description: "An API token, which starts with bcn_"}
+  parameters:
+    id: {name: id, in: path, required: true, description: An identifier, schema: {type: string}}
+    name: {name: name, in: path, required: true, description: "The name of the object, as in the configuration", schema: {type: string}}
+    source: {name: source, in: path, required: true, description: The name of the source, schema: {type: string}}
+    integration: {name: integration, in: path, required: true, description: The name of the integration, schema: {type: string}}
+    limit: {name: limit, in: query, description: How many entries a page holds, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+    cursor: {name: cursor, in: query, description: "The next_cursor of the page before", schema: {type: string}}
+  requestBodies:
+    Snooze:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            description: When the snooze ends. Exactly one of the two.
+            properties:
+              until: {type: string, format: date-time}
+              duration: {type: string, description: "Such as 1h; 30 days at most"}
+  responses:
+    Error:
+      description: "The request failed. 400: it cannot be carried out as written; 401: no valid credential; 403: the role is missing; 404: no such thing; 409: the state does not allow it; 500: Beacon failed."
+      content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: {type: string, description: "What went wrong, for a person"}
+        field: {type: string, description: The part of the request at fault}
+    ReloadError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: {type: string}
+        problems:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [problem]
+            properties:
+              file: {type: string}
+              line: {type: integer}
+              object: {type: string}
+              field: {type: string}
+              problem: {type: string}
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {type: string}
+        checks: {type: object, additionalProperties: {type: string}}
+    IngestResult:
+      type: object
+      additionalProperties: false
+      required: [result]
+      properties:
+        result: {type: string}
+        alert_id: {type: string}
+        status: {type: string}
+        received: {type: integer}
+        created: {type: integer}
+        updated: {type: integer}
+        resolved: {type: integer}
+        not_found: {type: integer}
+    Role: {type: string, enum: [admin, member]}
+    Severity: {type: string, enum: [critical, warning, info]}
+    AlertStatus: {type: string, enum: [firing, acknowledged, snoozed, resolved]}
+    Action: {type: string, enum: [acknowledge, snooze, resolve]}
+    Labels: {type: object, additionalProperties: {type: string}}
+    Me:
+      type: object
+      additionalProperties: false
+      required: [display_name, role]
+      properties:
+        id: {type: string, description: "The user. Absent for an API token."}
+        token_id: {type: string, description: "The API token. Absent for a user."}
+        email: {type: string}
+        display_name: {type: string}
+        role: {$ref: "#/components/schemas/Role"}
+        session_expires_at: {type: string, format: date-time}
+    Identity:
+      type: object
+      additionalProperties: false
+      required: [integration, provider, external_id, origin, linked_at]
+      properties:
+        integration: {type: string}
+        provider: {type: string, enum: [slack, discord]}
+        external_id: {type: string, description: The account in the chat service}
+        origin: {type: string, enum: [email, self], description: "email: found by the email address; self: linked by the person"}
+        linked_at: {type: string, format: date-time}
+    LinkCode:
+      type: object
+      additionalProperties: false
+      required: [integration, provider, code, expires_at, command]
+      properties:
+        integration: {type: string}
+        provider: {type: string}
+        code: {type: string}
+        expires_at: {type: string, format: date-time}
+        command: {type: string, description: What to type in the chat service}
+    Token:
+      type: object
+      additionalProperties: false
+      required: [id, name, role, created_at]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        role: {$ref: "#/components/schemas/Role"}
+        created_by: {type: string, description: The email address of the user who created it}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        last_used_at: {type: string, format: date-time}
+        revoked_at: {type: string, format: date-time}
+    CreatedToken:
+      type: object
+      additionalProperties: false
+      required: [id, name, role, created_at, token]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        role: {$ref: "#/components/schemas/Role"}
+        created_by: {type: string}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        last_used_at: {type: string, format: date-time}
+        revoked_at: {type: string, format: date-time}
+        token: {type: string, description: "The secret, shown this once"}
+    Alert:
+      type: object
+      additionalProperties: false
+      required: [id, group_id, source, fingerprint, status, severity, labels, annotations, links, team, service, routing_rule, started_at, last_received_at, acknowledged_at, snoozed_until, resolved_at, actions]
+      properties:
+        id: {type: string}
+        group_id: {type: string}
+        source: {type: string, description: The name of the source}
+        fingerprint: {type: string}
+        status: {$ref: "#/components/schemas/AlertStatus"}
+        severity: {$ref: "#/components/schemas/Severity"}
+        labels: {$ref: "#/components/schemas/Labels"}
+        annotations: {$ref: "#/components/schemas/Labels"}
+        links: {$ref: "#/components/schemas/Labels"}
+        team: {type: string, nullable: true}
+        service: {type: string, nullable: true}
+        routing_rule: {type: string, nullable: true}
+        started_at: {type: string, format: date-time}
+        last_received_at: {type: string, format: date-time}
+        acknowledged_at: {type: string, format: date-time, nullable: true}
+        snoozed_until: {type: string, format: date-time, nullable: true}
+        resolved_at: {type: string, format: date-time, nullable: true}
+        actions: {type: array, description: What the alert's state allows, items: {$ref: "#/components/schemas/Action"}}
+    AlertGroup:
+      type: object
+      additionalProperties: false
+      required: [id, status, labels, team, routing_rule, escalation_policy, created_at, notified_at, resolved_at, alerts, actions]
+      properties:
+        id: {type: string}
+        status: {type: string, enum: [open, resolved]}
+        labels: {$ref: "#/components/schemas/Labels"}
+        team: {type: string, nullable: true}
+        routing_rule: {type: string, nullable: true}
+        escalation_policy: {type: string, nullable: true}
+        created_at: {type: string, format: date-time}
+        notified_at: {type: string, format: date-time, nullable: true}
+        resolved_at: {type: string, format: date-time, nullable: true}
+        alerts: {type: array, items: {$ref: "#/components/schemas/Alert"}}
+        actions: {type: array, items: {$ref: "#/components/schemas/Action"}}
+    Event:
+      type: object
+      additionalProperties: false
+      required: [id, alert_id, group_id, type, occurred_at, actor, data]
+      properties:
+        id: {type: integer}
+        alert_id: {type: string, nullable: true, description: Null for an event about the whole group}
+        group_id: {type: string}
+        type: {type: string, description: "fired, acknowledged, snoozed, snooze_ended, resolved, escalated, notification_sent and others; show one you do not know by its name"}
+        occurred_at: {type: string, format: date-time}
+        actor:
+          type: object
+          additionalProperties: false
+          required: [type, id, name, provider, external_id]
+          properties:
+            type: {type: string, enum: [user, api_token, source, system]}
+            id: {type: string, nullable: true}
+            name: {type: string, nullable: true}
+            provider: {type: string, nullable: true}
+            external_id: {type: string, nullable: true}
+        data: {type: object, additionalProperties: true, description: Details that depend on the type}
+    Matcher:
+      type: object
+      additionalProperties: false
+      required: [label, operator, value]
+      properties:
+        label: {type: string}
+        operator: {type: string, enum: ["=", "!=", "=~", "!~"]}
+        value: {type: string}
+    Silence:
+      type: object
+      additionalProperties: false
+      required: [id, matchers, starts_at, ends_at, comment, created_at, state]
+      properties:
+        id: {type: string}
+        matchers: {type: array, items: {$ref: "#/components/schemas/Matcher"}}
+        starts_at: {type: string, format: date-time}
+        ends_at: {type: string, format: date-time}
+        created_by: {type: string, description: The email address of the user who created it}
+        created_by_token: {type: string, description: The name of the API token it was created with}
+        comment: {type: string}
+        created_at: {type: string, format: date-time}
+        state: {type: string, enum: [pending, active, expired]}
+    Override:
+      type: object
+      additionalProperties: false
+      required: [id, schedule, user, starts_at, ends_at, reason, created_at, state]
+      properties:
+        id: {type: string}
+        schedule: {type: string}
+        user: {type: string, description: The email address of the person who covers}
+        starts_at: {type: string, format: date-time}
+        ends_at: {type: string, format: date-time}
+        reason: {type: string}
+        created_by: {type: string}
+        created_by_token: {type: string}
+        created_at: {type: string, format: date-time}
+        cancelled_at: {type: string, format: date-time}
+        state: {type: string}
+    OnCall:
+      type: object
+      additionalProperties: false
+      required: [schedule, user, since, until, rotation_user]
+      properties:
+        schedule: {type: string}
+        user: {type: string, nullable: true, description: "The email address of the person on call, or null when nobody is"}
+        since: {type: string, format: date-time}
+        until: {type: string, format: date-time}
+        override: {$ref: "#/components/schemas/Override"}
+        rotation_user: {type: string, nullable: true, description: Whom the rotation has on call}
+    Rotation:
+      type: object
+      additionalProperties: false
+      required: [time_zone, members, shift_length, handoff_time]
+      properties:
+        time_zone: {type: string}
+        members: {type: array, items: {type: string}}
+        shift_length: {type: string}
+        handoff_time: {type: string}
+        handoff_day: {type: string}
+    Schedule:
+      type: object
+      additionalProperties: false
+      required: [name, team, rotation, next_handoff, on_call]
+      properties:
+        name: {type: string}
+        team: {type: string}
+        rotation: {$ref: "#/components/schemas/Rotation"}
+        next_handoff: {type: string, format: date-time}
+        pending:
+          type: object
+          description: A change of definition that has not taken over yet
+          additionalProperties: false
+          required: [rotation, takes_over_at, stated]
+          properties:
+            rotation: {$ref: "#/components/schemas/Rotation"}
+            takes_over_at: {type: string, format: date-time}
+            stated: {type: boolean}
+        on_call: {$ref: "#/components/schemas/OnCall"}
+    Shift:
+      type: object
+      additionalProperties: false
+      required: [user, starts_at, ends_at, kind, planned]
+      properties:
+        user: {type: string}
+        starts_at: {type: string, format: date-time}
+        ends_at: {type: string, format: date-time}
+        kind: {type: string}
+        override_id: {type: string}
+        planned: {type: boolean, description: "True for a shift that has not been recorded yet"}
+    Source:
+      type: object
+      additionalProperties: false
+      required: [name, type, ingest_path, labels, severity, provisioned]
+      properties:
+        name: {type: string}
+        type: {type: string, enum: [alertmanager, grafana, webhook]}
+        ingest_path: {type: string}
+        labels: {$ref: "#/components/schemas/Labels"}
+        severity:
+          type: object
+          additionalProperties: false
+          required: [label, mapping, default]
+          properties:
+            label: {type: string}
+            mapping: {type: object, additionalProperties: {$ref: "#/components/schemas/Severity"}}
+            default: {$ref: "#/components/schemas/Severity"}
+        provisioned: {type: boolean}
+    Integration:
+      type: object
+      additionalProperties: false
+      required: [name, type, interactions_path, settings, provisioned]
+      properties:
+        name: {type: string}
+        type: {type: string, enum: [slack, discord, email, webhook]}
+        interactions_path: {type: string, nullable: true}
+        settings: {type: object, additionalProperties: true, description: "What is not a credential, by the type"}
+        provisioned: {type: boolean}
+    EscalationPolicy:
+      type: object
+      additionalProperties: false
+      required: [name, repeat, steps, provisioned]
+      properties:
+        name: {type: string}
+        repeat: {type: integer}
+        steps:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [timeout, notify]
+            properties:
+              timeout: {type: string}
+              notify:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [kind, schedule, team, user, channel, integration, via]
+                  properties:
+                    kind: {type: string, enum: [schedule, team, user, channel, webhook]}
+                    schedule: {type: string, nullable: true}
+                    team: {type: string, nullable: true}
+                    user: {type: string, nullable: true}
+                    channel: {type: string, nullable: true}
+                    integration: {type: string, nullable: true}
+                    via: {type: array, items: {type: string}}
+        provisioned: {type: boolean}
+    Routing:
+      type: object
+      additionalProperties: false
+      required: [group_by, group_wait, group_interval, default, rules, provisioned]
+      properties:
+        group_by: {type: array, items: {type: string}}
+        group_wait: {type: string}
+        group_interval: {type: string}
+        default:
+          type: object
+          additionalProperties: false
+          required: [team, escalation_policy]
+          properties:
+            team: {type: string, nullable: true}
+            escalation_policy: {type: string}
+        rules:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, match, match_re, team, service, escalation_policy, group_by, group_wait, group_interval]
+            properties:
+              name: {type: string}
+              match: {$ref: "#/components/schemas/Labels"}
+              match_re: {$ref: "#/components/schemas/Labels"}
+              team: {type: string, nullable: true}
+              service: {type: string, nullable: true}
+              escalation_policy: {type: string}
+              group_by: {type: array, items: {type: string}}
+              group_wait: {type: string}
+              group_interval: {type: string}
+        provisioned: {type: boolean}
+    Team:
+      type: object
+      additionalProperties: false
+      required: [name, display_name, groups, members, schedules, provisioned]
+      properties:
+        name: {type: string}
+        display_name: {type: string}
+        groups: {type: array, items: {type: string}}
+        members:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [email, display_name, origins]
+            properties:
+              email: {type: string}
+              display_name: {type: string, nullable: true}
+              origins: {type: array, items: {type: string, enum: [config, group]}}
+        schedules: {type: array, items: {type: string}}
+        skipped_members: {type: array, description: "Answered to admins only: the addresses in the files that no user has", items: {type: string}}
+        provisioned: {type: boolean}
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, email, display_name, role, disabled, created_at, last_sign_in_at, teams]
+      properties:
+        id: {type: string}
+        email: {type: string}
+        display_name: {type: string, nullable: true}
+        role: {$ref: "#/components/schemas/Role"}
+        disabled: {type: boolean}
+        created_at: {type: string, format: date-time}
+        last_sign_in_at: {type: string, format: date-time, nullable: true}
+        teams: {type: array, items: {type: string}}

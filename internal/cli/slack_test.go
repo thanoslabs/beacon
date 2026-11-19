@@ -189,14 +189,15 @@ func TestServeRejectsABadDiscordAPIURL(t *testing.T) {
 	}
 }
 
-// TestServeWarnsAboutWhatIsNotImplemented starts with an integration type
-// that is valid in the files but has no behaviour yet. It is stored, and the
-// log says that it does nothing.
-func TestServeWarnsAboutWhatIsNotImplemented(t *testing.T) {
+// TestServeWarnsAboutAPolicyThatReachesNobody starts with a policy whose
+// targets are people, and no integration that reaches a person. It is
+// valid, and the log says that it notifies nobody.
+func TestServeWarnsAboutAPolicyThatReachesNobody(t *testing.T) {
 	const token = "source-token-marker-7c2e41d0"
 	srv := startServe(t, map[string]string{
-		"BEACON_DATABASE_URL": postgrestest.NewURL(t),
-		"BEACON_SOURCE_TOKEN": token,
+		"BEACON_DATABASE_URL":        postgrestest.NewURL(t),
+		"BEACON_SOURCE_TOKEN":        token,
+		"BEACON_HOOK_SIGNING_SECRET": "hook-signing-secret-marker-4d1a",
 		"BEACON_CONFIG": writeConfig(t, `sources:
   - name: grafana
     type: grafana
@@ -204,11 +205,15 @@ func TestServeWarnsAboutWhatIsNotImplemented(t *testing.T) {
 integrations:
   - name: tickets
     type: webhook
-    webhook: {url: "https://tickets.example.com/hook"}
+    webhook: {url: "https://tickets.example.com/hook?token=query-token-marker-19de", signing_secret: {env: BEACON_HOOK_SIGNING_SECRET}}
 escalation_policies:
   - name: default
     steps:
-      - notify: [{channel: tickets, integration: tickets}]
+      - notify: [{user: ada@example.com}]
+        timeout: 5m
+  - name: tickets
+    steps:
+      - notify: [{integration: tickets}]
         timeout: 5m
 routing:
   default: {escalation_policy: default}
@@ -219,9 +224,18 @@ routing:
 		t.Errorf("a generic payload to a grafana source = %d %v, want 400 naming alerts", code, body)
 	}
 	logs := srv.logs.String()
-	for _, want := range []string{"this type of integration does not deliver yet", "this escalation policy can notify nobody"} {
-		if !strings.Contains(logs, want) {
-			t.Errorf("logs do not contain %q:\n%s", want, logs)
-		}
+	// A webhook reaches no person, so the first policy reaches nobody; the
+	// second names the webhook itself and is not warned about.
+	if want := `"msg":"this escalation policy can notify nobody: its targets are people, and no integration in the configuration reaches a person; add a Slack, Discord or email integration","policy":"default"`; !strings.Contains(logs, want) {
+		t.Errorf("logs do not contain %s:\n%s", want, logs)
 	}
+	if strings.Count(logs, "can notify nobody") != 1 {
+		t.Errorf("the policy that names the webhook is warned about:\n%s", logs)
+	}
+	// Every type of integration delivers, and the address of a webhook,
+	// which may hold a token, is logged by its host alone.
+	if strings.Contains(logs, "does not deliver") || !strings.Contains(logs, `"msg":"integration configured","integration":"tickets","type":"webhook","host":"tickets.example.com"`) {
+		t.Errorf("logs:\n%s", logs)
+	}
+	assertNoSecrets(t, "the logs", logs, "query-token-marker-19de", "hook-signing-secret-marker-4d1a")
 }

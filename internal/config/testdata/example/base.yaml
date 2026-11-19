@@ -47,6 +47,7 @@ integrations:
     type: webhook
     webhook:
       url: https://tickets.example.com/hooks/beacon
+      signing_secret: {env: BEACON_TICKETING_SIGNING_SECRET}
       headers:
         X-Team: platform
         Authorization: {env: BEACON_TICKETING_AUTHORIZATION}
