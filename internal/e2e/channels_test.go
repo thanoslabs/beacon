@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/discord/discordtest"
 	"github.com/thanoslabs/beacon/internal/email/mailpittest"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
+	"github.com/thanoslabs/beacon/internal/webhook"
 )
 
 // discordIntegration is a Discord integration, to go under "integrations:".
@@ -438,5 +442,160 @@ func TestEmailChannel(t *testing.T) {
 	}
 	if strings.Contains(b.output(), mailpittest.Password) {
 		t.Error("the logs contain the SMTP password")
+	}
+}
+
+// hookReceiver is the other end of an outbound webhook: it keeps the
+// payloads whose signature verifies, and counts the requests whose
+// signature does not.
+type hookReceiver struct {
+	*httptest.Server
+	mu       sync.Mutex
+	payloads []webhook.Payload
+	keys     []string
+	unsigned int
+}
+
+func newHookReceiver(t *testing.T) *hookReceiver {
+	t.Helper()
+	r := &hookReceiver{}
+	r.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		// As a receiver would: the signature over the timestamp and the raw
+		// body, and a timestamp that is recent.
+		if !webhook.Verify(hookSecret, req.Header.Get(webhook.HeaderTimestamp), req.Header.Get(webhook.HeaderSignature), body, time.Now(), 5*time.Minute) {
+			r.unsigned++
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var p webhook.Payload
+		if err := json.Unmarshal(body, &p); err != nil {
+			r.unsigned++
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		r.payloads = append(r.payloads, p)
+		r.keys = append(r.keys, req.Header.Get(webhook.HeaderIdempotencyKey))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(r.Close)
+	return r
+}
+
+// payload waits until the receiver holds a verified payload that satisfies
+// cond, and returns it.
+func (r *hookReceiver) payload(t *testing.T, what string, cond func(webhook.Payload) bool) webhook.Payload {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		r.mu.Lock()
+		for _, p := range r.payloads {
+			if cond(p) {
+				r.mu.Unlock()
+				return p
+			}
+		}
+		n, unsigned := len(r.payloads), r.unsigned
+		r.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s; the receiver has %d payloads and refused %d requests", what, n, unsigned)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// withWebhook returns a configuration with an outbound webhook that posts
+// to url, and with the Slack channel of the first step replaced by it.
+func withWebhook(t *testing.T, yaml, url string) string {
+	t.Helper()
+	integration := fmt.Sprintf(`  - name: tickets
+    type: webhook
+    webhook:
+      url: %q
+      signing_secret: {env: BEACON_HOOK_SIGNING_SECRET}
+      headers: {X-Team: platform}
+`, url)
+	out := strings.Replace(yaml, "escalation_policies:\n", integration+"escalation_policies:\n", 1)
+	replaced := false
+	out = firstSlackTarget.ReplaceAllStringFunc(out, func(target string) string {
+		if replaced {
+			return target
+		}
+		replaced = true
+		return "          - integration: tickets\n"
+	})
+	if !replaced {
+		t.Fatal("the configuration has no Slack channel to replace")
+	}
+	return out
+}
+
+// reloadAddsWebhook reloads the running process with an outbound webhook
+// added to yaml, as the n-th reload, and checks that an alert that fires
+// afterwards is posted to it.
+func reloadAddsWebhook(b *beacon, yaml string, n int) {
+	b.t.Helper()
+	r := newHookReceiver(b.t)
+	logs := b.reload(withWebhook(b.t, yaml, r.URL+"/hook"), n)
+	if !strings.Contains(logs, `"msg":"integration configured","integration":"tickets","type":"webhook"`) {
+		b.t.Errorf("the logs do not show the webhook integration")
+	}
+	if code, res := b.webhookTo("second", `{"labels": {"alertname": "ToWebhook", "severity": "warning"}}`); code != http.StatusCreated {
+		b.t.Fatalf("webhook = %d %v", code, res)
+	}
+	r.payload(b.t, "the alert at the receiver after the reload", func(p webhook.Payload) bool {
+		return p.Group.Title == "ToWebhook" && p.Group.Status == "firing"
+	})
+}
+
+// TestOutboundWebhook: an alert group is posted to an address as signed
+// JSON when it fires and when it resolves, and the receiver can verify
+// every request.
+func TestOutboundWebhook(t *testing.T) {
+	dbURL := postgrestest.NewURL(t)
+	r := newHookReceiver(t)
+	b := launch(t, dbURL, writeConfig(t, withWebhook(t, configuration, r.URL+"/hooks/beacon?token=e2e-query-token-marker-52aa")))
+	b.waitUntilServing()
+
+	code, res := b.webhook(diskFull)
+	if code != http.StatusCreated {
+		t.Fatalf("webhook = %d %v", code, res)
+	}
+	alertID := res["alert_id"]
+	fired := r.payload(t, "the firing group", func(p webhook.Payload) bool { return p.Group.Status == "firing" })
+	if fired.Version != "1" || fired.Reason != "escalation_step" || fired.Group.Severity != "critical" || fired.Group.Title != "Disk is full on db1" ||
+		len(fired.Alerts) != 1 || fired.Alerts[0].ID != alertID || fired.Alerts[0].Labels["host"] != "db1" ||
+		fired.Alerts[0].Annotations["runbook_url"] != "https://runbooks.example.com/disk-full" || fired.Group.Counts["firing"] != 1 {
+		t.Errorf("payload = %+v", fired)
+	}
+	b.timeline(alertID, 3)
+
+	if code, res := b.webhook(diskFullResolved); code != http.StatusOK {
+		t.Fatalf("resolve webhook = %d %v", code, res)
+	}
+	resolved := r.payload(t, "the resolved group", func(p webhook.Payload) bool { return p.Group.Status == "resolved" })
+	if resolved.Reason != "resolved" || resolved.Alerts[0].ResolvedAt == nil || resolved.LastChange == nil || resolved.LastChange.ActorName != "the source" ||
+		resolved.Group.ID != fired.Group.ID || resolved.ID == fired.ID {
+		t.Errorf("payload = %+v", resolved)
+	}
+	r.mu.Lock()
+	if r.unsigned != 0 || len(r.payloads) != 2 || r.keys[0] != fired.ID || r.keys[1] != resolved.ID {
+		t.Errorf("%d requests did not verify; %d payloads with the keys %v", r.unsigned, len(r.payloads), r.keys)
+	}
+	r.mu.Unlock()
+	var destinations string
+	if err := b.db.QueryRow(context.Background(), `SELECT string_agg(DISTINCT destination, ',') FROM notifications WHERE status = 'sent'`).Scan(&destinations); err != nil || destinations != "tickets" {
+		t.Errorf("destinations = %q, %v; want the name of the integration, never its address", destinations, err)
+	}
+
+	if code := b.terminate(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+	for _, secret := range []string{hookSecret, "e2e-query-token-marker-52aa"} {
+		if strings.Contains(b.output(), secret) {
+			t.Errorf("the logs contain %q", secret)
+		}
 	}
 }

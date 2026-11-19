@@ -23,3 +23,4 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[slack]]: set up the Slack app and send alerts to a channel
 - [[discord]]: set up the Discord application and send alerts to a channel
 - [[email]]: send alerts as email over SMTP
+- [[outbound-webhook]]: post alerts as signed JSON to any HTTP endpoint, and the contract for the payload

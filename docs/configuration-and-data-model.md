@@ -70,7 +70,7 @@ An integration is a connection to a notification service. Other objects name it 
 | `slack` | `bot_token` (secret), `signing_secret` (secret) |
 | `discord` | `bot_token` (secret), `public_key`, `application_id` |
 | `email` | `host`, `port`, `username`, `password` (secret), `from`, `tls` (`starttls`, `implicit` or `none`) |
-| `webhook` | `url`, `headers` (map; each value is a plain string or a secret reference) |
+| `webhook` | `url`, `signing_secret` (secret), `headers` (map; each value is a plain string or a secret reference) |
 
 ### Teams
 
@@ -118,6 +118,7 @@ Each target is a map with exactly one of these forms:
 | `{team: <name>}` | Every member of the team |
 | `{user: <email>}` | One user |
 | `{channel: <channel>, integration: <name>}` | A shared channel, for example a Slack channel |
+| `{integration: <name>}` | An outbound webhook, which has one address and no channels |
 
 People targets (`schedule`, `team`, `user`) accept an optional `via` list of integration names. Without it, the person is notified through every integration that can reach them directly: a Slack or Discord direct message when their account is linked, and email, at the address the user has in Beacon.
 

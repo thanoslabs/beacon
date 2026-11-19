@@ -18,7 +18,10 @@ integrations:
     type: webhook
     webhook:
       url: tickets.example.com
-      headers: {"Bad Header": x}
+      headers: {"Bad Header": x, "x-beacon-signature": forged, Content-Type: text/plain}
+  - name: weak
+    type: webhook
+    webhook: {url: "https://tickets.example.com/hook", signing_secret: {env: SHORT_TOKEN}}
   - name: pager
     type: sms
   - name: untyped

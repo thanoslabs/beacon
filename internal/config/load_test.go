@@ -18,6 +18,7 @@ var exampleEnv = map[string]string{
 	"BEACON_SMTP_PASSWORD":                  "smtp-" + secretValue,
 	"BEACON_DISCORD_BOT_TOKEN":              "discord-" + secretValue,
 	"BEACON_TICKETING_AUTHORIZATION":        "Bearer " + secretValue,
+	"BEACON_TICKETING_SIGNING_SECRET":       secretValue,
 	"BEACON_OIDC_CLIENT_SECRET":             "oidc-" + secretValue,
 }
 
@@ -56,7 +57,8 @@ func TestLoadDirectory(t *testing.T) {
 	}
 
 	hook := cfg.Integrations[3].Webhook
-	if hook == nil || hook.Headers["X-Team"].Reveal() != "platform" || hook.Headers["Authorization"].Reveal() != exampleEnv["BEACON_TICKETING_AUTHORIZATION"] {
+	if hook == nil || hook.Headers["X-Team"].Reveal() != "platform" || hook.Headers["Authorization"].Reveal() != exampleEnv["BEACON_TICKETING_AUTHORIZATION"] ||
+		hook.SigningSecret.Reveal() != secretValue {
 		t.Errorf("webhook integration = %+v", hook)
 	}
 	if email := cfg.Integrations[1].Email; email == nil || email.Port != 587 || email.TLS != EmailTLSStartTLS {
@@ -78,7 +80,7 @@ func TestLoadDirectory(t *testing.T) {
 	}
 	rule := cfg.Routing.Rules[0]
 	if rule.Match["team"] != "platform" || rule.MatchRE["severity"] != "critical|page" || *rule.GroupWait != Duration(10*time.Second) ||
-		cfg.Routing.Default.EscalationPolicy != "platform-default" || rule.Origin.Line != 62 {
+		cfg.Routing.Default.EscalationPolicy != "platform-default" || rule.Origin.Line != 63 {
 		t.Errorf("routing = %+v", cfg.Routing)
 	}
 
@@ -189,6 +191,10 @@ integrations:
     type: email
     email:
       port: many
+  - name: hook
+    type: webhook
+    webhook:
+      signing_secret: ` + inline + `
 routing:
   group_wait: soon
   default: {escalation_policy: p}
@@ -234,8 +240,9 @@ auth:
 		`a.yaml:19: integration "slack": slack.signing_secret: a secret takes exactly one of env and file`,
 		`a.yaml:20: integration "slack": slack.workspace: unknown field`,
 		`a.yaml:24: integration "email": email.port: must be a whole number, not a string`,
-		`a.yaml:26: routing: group_wait: "soon" is not a duration such as 30s, 5m, 12h, 1d or 1w`,
-		`a.yaml:31: routing rule "r1": match: must be a mapping of names to values, not a number`,
+		`a.yaml:28: integration "hook": webhook.signing_secret: secrets are never written inline; use {env: NAME} or {file: /path}`,
+		`a.yaml:30: routing: group_wait: "soon" is not a duration such as 30s, 5m, 12h, 1d or 1w`,
+		`a.yaml:35: routing rule "r1": match: must be a mapping of names to values, not a number`,
 		`b.yaml:3: team "platform": members: must be a list, not a string`,
 		`b.yaml:5: team "twice": name: the field is set twice; first at line 4`,
 		`b.yaml:8: escalation policy "p": repeat: must be a whole number, not a string`,

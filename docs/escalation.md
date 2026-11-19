@@ -54,6 +54,7 @@ With this policy the person on call for `platform-primary` is paged first. If fi
 | `{team: <name>}` | Every member of the team: the ones listed in the files and the ones who belong through an identity provider group ([[access]]) |
 | `{user: <email>}` | The user with that email address |
 | `{channel: <channel>, integration: <name>}` | A shared destination: a Slack channel, a Discord channel by its numeric ID, or an email address |
+| `{integration: <name>}` | An outbound webhook: one request to its address ([[outbound-webhook]]) |
 
 People are resolved when the step runs, not when the alert arrives: a step that runs after a handoff pages the person who is on call by then.
 
@@ -75,7 +76,6 @@ A target that cannot be notified is skipped. The step goes on with the others, e
 | `the schedule has nobody on call: a gap in coverage` | No member of the rotation is a user, and no override is in force. A gap is a legitimate state: it is logged as a warning, like every skip, and never as an error. |
 | `the team has no members who are users` | |
 | `no user has this email address` | The person has never signed in |
-| `the integration does not deliver notifications` | The target names an integration of a type that Beacon cannot send through yet: an outbound webhook |
 | `no integration in the configuration can reach a person directly` | There is no Slack, Discord or email integration |
 
 **A person who has no linked account stays visible.** They are skipped for delivery, because there is nowhere to deliver to, but they were meant to be paged, and Beacon says so wherever it names who was paged: by their name followed by the service they are not connected to, as in `Grace Hopper (Slack not connected)`. The step's event holds that text as `shown_as`, with `not_connected`, and the group's messages in Slack and in Discord list the person that way next to the people they mention ([[slack#The message]], [[discord#The message]]).
