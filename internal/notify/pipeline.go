@@ -218,9 +218,9 @@ func (p *Pipeline) claim(ctx context.Context) (n Notification, ok bool, err erro
 						AND (older.created_at, older.id) < (n.created_at, n.id))
 			ORDER BY n.next_attempt_at, n.created_at
 			LIMIT 1 FOR UPDATE OF n SKIP LOCKED)
-		RETURNING id::text, alert_group_id::text, integration_id::text, destination, reason, attempts, created_at`,
+		RETURNING id::text, alert_group_id::text, integration_id::text, destination, reason, attempts, created_at, COALESCE(user_id::text, '')`,
 		now, now.Add(p.cfg.SendTimeout+claimMargin)).
-		Scan(&n.ID, &n.GroupID, &n.IntegrationID, &n.Destination, &n.Reason, &n.Attempts, &n.CreatedAt)
+		Scan(&n.ID, &n.GroupID, &n.IntegrationID, &n.Destination, &n.Reason, &n.Attempts, &n.CreatedAt, &n.UserID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Notification{}, false, nil
 	}

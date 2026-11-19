@@ -239,7 +239,9 @@ func (p *Pipeline) Observe(ctx context.Context, tx pgx.Tx, ev alert.Event, _ ale
 }
 
 // enqueueUpdate queues a notification about the group to every destination
-// that has been told about it before.
+// that has been told about it before. An update to a person stays an update
+// to that person: it carries the user of the notification it follows, so a
+// channel can tell a person from a shared destination.
 //
 // A message is built when it is delivered, so a notification that is still
 // waiting in the queue will show this change anyway. Such a destination gets
@@ -262,13 +264,15 @@ func (p *Pipeline) enqueueUpdate(ctx context.Context, tx pgx.Tx, groupID string,
 		return fmt.Errorf("update waiting notifications: %w", err)
 	}
 	_, err = tx.Exec(ctx, `
-		INSERT INTO notifications (alert_group_id, integration_id, destination, reason, next_attempt_at, created_at)
-		SELECT DISTINCT n.alert_group_id, n.integration_id, n.destination, $2, $3::timestamptz, $3::timestamptz
+		INSERT INTO notifications (alert_group_id, integration_id, destination, reason, next_attempt_at, created_at, user_id)
+		SELECT n.alert_group_id, n.integration_id, n.destination, $2, $3::timestamptz, $3::timestamptz,
+			(array_agg(n.user_id) FILTER (WHERE n.user_id IS NOT NULL))[1]
 		FROM notifications n
 		WHERE n.alert_group_id = $1 AND NOT EXISTS (
 			SELECT 1 FROM notifications w
 			WHERE w.alert_group_id = n.alert_group_id AND w.integration_id = n.integration_id
-				AND w.destination = n.destination AND w.status = 'pending' AND w.attempts = 0)`,
+				AND w.destination = n.destination AND w.status = 'pending' AND w.attempts = 0)
+		GROUP BY n.alert_group_id, n.integration_id, n.destination`,
 		groupID, reason, now)
 	if err != nil {
 		return fmt.Errorf("queue update: %w", err)
