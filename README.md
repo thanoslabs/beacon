@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md), [routes](docs/configuration.md#how-an-alert-is-routed) them by label, [groups](docs/configuration.md#grouping) related alerts and [escalates](docs/escalation.md) each group through its policy: it pages the person on call, the team or a [Slack](docs/slack.md) or [Discord](docs/discord.md) channel, step by step, until someone acknowledges, snoozes or resolves the alert from Slack, and it [attributes](docs/slack.md#people) those actions to the Beacon user behind the Slack account. It runs [on-call rotations](docs/schedules.md), records every shift, takes [overrides](docs/schedules.md#overrides), answers [who is on call](docs/schedules.md#who-is-on-call) and [previews](docs/schedules.md#preview-a-change) what a change to a schedule would move. People are reached through Slack only so far, neither the Slack nor the Discord integration has been tried against the real service, and there is no web interface yet. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md), [routes](docs/configuration.md#how-an-alert-is-routed) them by label, [groups](docs/configuration.md#grouping) related alerts and [escalates](docs/escalation.md) each group through its policy: it pages the person on call, the team or a [Slack](docs/slack.md) or [Discord](docs/discord.md) channel, step by step, until someone acknowledges, snoozes or resolves the alert from Slack or Discord, and it [attributes](docs/access.md#chat-accounts) those actions to the Beacon user behind the chat account. It runs [on-call rotations](docs/schedules.md), records every shift, takes [overrides](docs/schedules.md#overrides), answers [who is on call](docs/schedules.md#who-is-on-call) and [previews](docs/schedules.md#preview-a-change) what a change to a schedule would move. People are reached through Slack and Discord only so far, neither integration has been tried against the real service, and there is no web interface yet. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -101,10 +101,10 @@ The server answers on these endpoints. Everything that is not listed as open in 
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/v1/ingest/<source>` | Receives alerts from a source: Alertmanager's notifications ([Alertmanager page](docs/alertmanager.md)), Grafana's ([Grafana page](docs/grafana.md)) or the generic JSON payload ([webhook page](docs/webhook.md)), by the type of the source. |
-| `POST /api/v1/integrations/<name>/interactions` | Receives button presses from Slack. See the [Slack page](docs/slack.md). |
+| `POST /api/v1/integrations/<name>/interactions` | Receives button presses from Slack, and button presses and the link command from Discord, by the type of the integration. See the [Slack page](docs/slack.md) and the [Discord page](docs/discord.md). |
 | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` | Sign-in through an OpenID Connect identity provider. See the [access page](docs/access.md). |
 | `GET /api/v1/me` | Who is signed in. Needs a session. |
-| `GET /api/v1/me/identities` | The Slack accounts linked to whoever is signed in. See the [access page](docs/access.md#chat-accounts). |
+| `GET /api/v1/me/identities`, `POST /api/v1/me/identities/<integration>/link-code`, `DELETE /api/v1/me/identities/<integration>` | The chat accounts linked to whoever is signed in, a one-time code with which they link their Discord account, and its removal. See the [access page](docs/access.md#chat-accounts). |
 | `POST /api/v1/config/reload` | Reloads the configuration. Needs the admin role. |
 | `GET`, `POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | API tokens for automation. Needs the admin role. |
 | `GET`, `POST /api/v1/silences`, `GET`, `DELETE /api/v1/silences/<id>` | Silences. Needs a session or a token, with either role. See the [silences page](docs/silences.md). |
@@ -131,7 +131,7 @@ docker compose up -d --wait postgres dex
 export BEACON_TEST_OIDC_ISSUER='http://127.0.0.1:5556/dex'
 ```
 
-The tests in `internal/e2e` build the binary and run it as a process against Postgres, a fake Slack and a fake Discord: an alert goes in by webhook, a message comes out to Slack, a button press acknowledges it and the source resolves it. They run with the rest of the tests.
+The tests in `internal/e2e` build the binary and run it as a process against Postgres, a fake Slack and a fake Discord: an alert goes in by webhook, a message comes out to Slack, a button press acknowledges it and the source resolves it; and the same from Discord, where a person first links their account with a code. They run with the rest of the tests.
 
 Every process setting can be given as a flag or as an environment variable; run `beacon <command> -h` to list them. Provisioned objects come from the files named by `--config` (or `BEACON_CONFIG`); without it Beacon starts with no sources and notifies nobody.
 

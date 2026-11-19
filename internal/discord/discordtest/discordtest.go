@@ -8,6 +8,7 @@
 package discordtest
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -88,7 +89,13 @@ type Server struct {
 	// exhausted makes the next successful answer of a route say that its
 	// rate limit is used up, for so many seconds.
 	exhausted map[string]string
-	seq       int64
+	// commands holds the global commands of each application.
+	commands map[string][]map[string]any
+	seq      int64
+
+	// The key pair with which interactions are signed.
+	public  ed25519.PublicKey
+	private ed25519.PrivateKey
 }
 
 // Channel is the ID of the one channel a new fake Discord has.
@@ -106,8 +113,10 @@ func New(t testing.TB, token string) *Server {
 		messages:  map[string]*Message{},
 		failures:  map[string][]Failure{},
 		exhausted: map[string]string{},
+		commands:  map[string][]map[string]any{},
 		seq:       200000000000000000,
 	}
+	s.public, s.private = newKey(t)
 	srv := httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(srv.Close)
 	s.URL = srv.URL
@@ -247,6 +256,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.createMessage(w, parts[1], body)
 	case route == RouteEditMessage:
 		s.editMessage(w, parts[1], parts[3], body)
+	case route == RouteRegisterCommand:
+		s.registerCommand(w, parts[1], body)
 	default:
 		refuse(w, http.StatusNotFound, 0, "404: Not Found")
 	}

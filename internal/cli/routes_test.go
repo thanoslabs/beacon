@@ -26,7 +26,8 @@ import (
 //
 //   - /healthz, /readyz and /metrics are called by machines with no session;
 //   - the ingest endpoint checks the source's own token;
-//   - the interactions endpoint checks Slack's signature;
+//   - the interactions endpoint checks Slack's signature, or Discord's when
+//     the integration named in the path is a Discord one;
 //   - /auth/login and /auth/callback are how a person gets a session;
 //   - /auth/bootstrap is how the bootstrap admin gets one: it checks the
 //     password and bounds the attempts, and answers 404 unless the account
@@ -58,6 +59,8 @@ var wantRoutes = []string{
 	"member POST /api/v1/schedules/{name}/overrides",
 	"member DELETE /api/v1/schedules/{name}/overrides/{id}",
 	"member GET /api/v1/me/identities",
+	"member POST /api/v1/me/identities/{integration}/link-code",
+	"member DELETE /api/v1/me/identities/{integration}",
 }
 
 var pathParamRE = regexp.MustCompile(`\{[a-z]+\}`)
@@ -67,7 +70,7 @@ func TestRoutes(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	srv := server.New(server.Config{}, logger, nil, server.NewRegistry())
 	for _, route := range (&provisioner{auth: auth.NewHandler(logger, nil), silences: silence.NewHandler(logger, nil), scheduleAPI: schedule.NewHandler(logger, nil),
-		identityAPI: identity.NewHandler(logger, nil)}).routes() {
+		identityAPI: identity.NewHandler(logger, nil, nil)}).routes() {
 		srv.Handle(route)
 	}
 	var got []string
@@ -111,8 +114,8 @@ func TestRoutes(t *testing.T) {
 			closed++
 		}
 	}
-	if closed != 18 {
-		t.Errorf("%d routes refused a stranger, want 18", closed)
+	if closed != 20 {
+		t.Errorf("%d routes refused a stranger, want 20", closed)
 	}
 	for _, probe := range []string{"GET /", "GET /api/v1/alerts", "GET /api/v1/teams", "GET /api/v1/teams/x", "POST /api/v1/schedules", "DELETE /api/v1/schedules/x", "GET /api/v1/schedules/x/overrides/y", "PUT /api/v1/schedules/x/overrides", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
 		method, path, _ := strings.Cut(probe, " ")

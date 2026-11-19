@@ -44,14 +44,22 @@ type provisioner struct {
 
 	ingest       *ingest.Handler
 	interactions *slack.Interactions
-	pipeline     *notify.Pipeline
-	auth         *auth.Handler
-	silences     *silence.Handler
-	schedules    *schedule.Store
-	scheduleAPI  *schedule.Handler
-	identities   *identity.Store
-	identityAPI  *identity.Handler
-	linker       *identity.Linker
+	// discordInteractions handles what Discord sends to the same route, and
+	// discordCommands keeps the link command of each Discord application
+	// registered.
+	discordInteractions *discord.Interactions
+	discordCommands     *discord.Commands
+	// integrationTypes maps each integration of the active configuration to
+	// its type, which decides whose interactions a request is checked as.
+	integrationTypes atomic.Pointer[map[string]string]
+	pipeline         *notify.Pipeline
+	auth             *auth.Handler
+	silences         *silence.Handler
+	schedules        *schedule.Store
+	scheduleAPI      *schedule.Handler
+	identities       *identity.Store
+	identityAPI      *identity.Handler
+	linker           *identity.Linker
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -83,8 +91,9 @@ func (p *provisioner) routes() []access.Route {
 	routes := []access.Route{
 		// The source's token is checked by the handler.
 		{Pattern: "POST " + ingest.Path, Level: access.Public, Handler: p.ingest},
-		// Slack's signature over the body is checked by the handler.
-		{Pattern: "POST " + slack.InteractionsPath, Level: access.Public, Handler: p.interactions},
+		// Slack's signature over the body, or Discord's, is checked by the
+		// handler.
+		{Pattern: "POST " + slack.InteractionsPath, Level: access.Public, Handler: http.HandlerFunc(p.handleInteractions)},
 		{Pattern: "POST " + ReloadPath, Level: access.Admin, Handler: http.HandlerFunc(p.handleReload)},
 	}
 	routes = append(routes, p.auth.Routes()...)
@@ -94,6 +103,19 @@ func (p *provisioner) routes() []access.Route {
 	routes = append(routes, p.scheduleAPI.Routes()...)
 	// A person sees their own chat accounts.
 	return append(routes, p.identityAPI.Routes()...)
+}
+
+// handleInteractions hands what a chat service sends about the integration
+// named in the path to the handler of that service. Each handler verifies
+// the service's signature before it reads anything. A name that is no
+// integration goes to Slack's handler, which knows no secret for it and
+// refuses.
+func (p *provisioner) handleInteractions(w http.ResponseWriter, r *http.Request) {
+	if types := p.integrationTypes.Load(); types != nil && (*types)[r.PathValue("name")] == config.IntegrationTypeDiscord {
+		p.discordInteractions.ServeHTTP(w, r)
+		return
+	}
+	p.interactions.ServeHTTP(w, r)
 }
 
 // handleReload reloads the configuration for an admin. It does what SIGHUP
@@ -401,6 +423,8 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	// directly, unless the target narrows that with via: a direct message
 	// in Slack or in Discord.
 	var direct []notify.Via
+	publicKeys := map[string]string{}
+	var applications []discord.Application
 	for _, i := range cfg.Integrations {
 		id := integrations[i.Name]
 		switch i.Type {
@@ -414,10 +438,14 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
 				slog.String("interactions_path", strings.Replace(slack.InteractionsPath, "{name}", i.Name, 1)))
 		case config.IntegrationTypeDiscord:
-			channels[id] = discord.NewChannel(discord.NewClient(p.discordAPIURL, i.Discord.BotToken))
-			chat = append(chat, identity.Integration{ID: id, Name: i.Name, Provider: identity.ProviderDiscord})
+			client := discord.NewClient(p.discordAPIURL, i.Discord.BotToken)
+			channels[id] = discord.NewChannel(client)
+			publicKeys[i.Name] = i.Discord.PublicKey
+			applications = append(applications, discord.Application{Integration: i.Name, ID: i.Discord.ApplicationID, Client: client})
+			chat = append(chat, identity.Integration{ID: id, Name: i.Name, Provider: identity.ProviderDiscord, LinkCommand: "/" + discord.LinkCommand + " code:"})
 			direct = append(direct, notify.Via{IntegrationID: id, Name: i.Name, Provider: i.Type})
-			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type))
+			p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
+				slog.String("interactions_path", strings.Replace(discord.InteractionsPath, "{name}", i.Name, 1)))
 		default:
 			p.logger.WarnContext(ctx, "this type of integration does not deliver yet, so nothing is sent through it",
 				slog.String("integration", i.Name), slog.String("type", i.Type))
@@ -492,13 +520,34 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	if len(clients) > 0 && signIn == "" {
 		p.logger.WarnContext(ctx, "nobody can acknowledge or snooze from Slack: that needs a Slack account linked to a Beacon user, and without an identity provider (auth.oidc) there are no users to link; alerts can still be resolved from Slack")
 	}
+	// The same goes for Discord, where people link their accounts
+	// themselves, once they are users.
+	p.integrationTypes.Store(&types)
+	p.discordInteractions.SetPublicKeys(publicKeys)
+	p.discordInteractions.SetSignInURL(signIn)
+	p.discordCommands.SetApplications(applications)
+	if len(applications) > 0 && signIn == "" {
+		p.logger.WarnContext(ctx, "nobody can acknowledge or snooze from Discord: that needs a Discord account linked to a Beacon user, and without an identity provider (auth.oidc) there are no users to link; alerts can still be resolved from Discord")
+	}
 	p.linker.SetIntegrations(chat)
 	// The new integrations are asked about their users at once.
 	p.linker.Kick()
 }
 
-// UserFor tells the Slack handler which Beacon user an account of the
-// integration with this name belongs to.
+// CompleteLink links the account of a chat service to the user who was
+// given the code for the integration with this name, for the handler of
+// that service, which has verified where the request comes from.
+func (p *provisioner) CompleteLink(ctx context.Context, integration, externalID, code string) (name string, err error) {
+	in, ok := p.linker.Integrations()[integration]
+	if !ok || in.Lookup != nil {
+		return "", identity.ErrBadCode
+	}
+	u, err := p.identities.CompleteLink(ctx, in.ID, in.Provider, externalID, code)
+	return u.Name, err
+}
+
+// UserFor tells the handler of a chat service which Beacon user an account
+// of the integration with this name belongs to.
 func (p *provisioner) UserFor(ctx context.Context, integration, externalID string) (userID, name string, found bool, err error) {
 	in, ok := p.linker.Integrations()[integration]
 	if !ok {

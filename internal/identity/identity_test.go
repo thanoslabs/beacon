@@ -1,12 +1,15 @@
 package identity_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -483,8 +486,8 @@ func TestIdentitiesAPI(t *testing.T) {
 	if err := f.store.Link(context.Background(), f.pool, ada, f.slack, identity.ProviderSlack, "U0ADA", identity.OriginEmail); err != nil {
 		t.Fatal(err)
 	}
-	routes := identity.NewHandler(slog.New(slog.DiscardHandler), f.store).Routes()
-	if len(routes) != 1 || routes[0].Pattern != "GET /api/v1/me/identities" || routes[0].Level != access.Member {
+	routes := identity.NewHandler(slog.New(slog.DiscardHandler), f.store, nil).Routes()
+	if routes[0].Pattern != "GET /api/v1/me/identities" || routes[0].Level != access.Member {
 		t.Fatalf("routes = %+v", routes)
 	}
 	get := func(p access.Principal) string {
@@ -504,5 +507,91 @@ func TestIdentitiesAPI(t *testing.T) {
 		if got := get(p); got != `{"identities":[]}` {
 			t.Errorf("identities of %+v = %s", p, got)
 		}
+	}
+}
+
+// TestLinkCodeAPI: a signed-in person asks for a code, and removes the
+// account they linked.
+func TestLinkCodeAPI(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	ada := f.user("ada@example.com")
+	var bootstrap string
+	if err := f.pool.QueryRow(ctx, `INSERT INTO users (email) VALUES ('bootstrap-admin@beacon.invalid') RETURNING id::text`).Scan(&bootstrap); err != nil {
+		t.Fatal(err)
+	}
+	integrations := func() map[string]identity.Integration {
+		return map[string]identity.Integration{
+			"discord": {ID: f.discord, Name: "discord", Provider: identity.ProviderDiscord, LinkCommand: "/beacon-link code:"},
+			"slack":   {ID: f.slack, Name: "slack", Provider: identity.ProviderSlack, Lookup: &directory{}},
+		}
+	}
+	logs := &bytes.Buffer{}
+	mux := http.NewServeMux()
+	for _, route := range identity.NewHandler(slog.New(slog.NewJSONHandler(logs, nil)), f.store, integrations).Routes() {
+		if route.Level != access.Member {
+			t.Errorf("%s is open to %s, want members", route.Pattern, route.Level)
+		}
+		mux.Handle(route.Pattern, route.Handler)
+	}
+	call := func(p access.Principal, method, path string) (int, map[string]any) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, nil)
+		mux.ServeHTTP(rec, req.WithContext(access.WithPrincipal(req.Context(), p)))
+		var body map[string]any
+		if rec.Body.Len() > 0 {
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("%s %s answered %q, not JSON", method, path, rec.Body)
+			}
+		}
+		return rec.Code, body
+	}
+
+	// Who cannot have a code, and for what.
+	for _, tt := range []struct {
+		name string
+		p    access.Principal
+		path string
+		code int
+		want string
+	}{
+		{"an integration that does not exist", access.Principal{UserID: ada}, "/api/v1/me/identities/nope/link-code", http.StatusNotFound, "there is no chat integration with this name"},
+		{"an integration that links by email address", access.Principal{UserID: ada}, "/api/v1/me/identities/slack/link-code", http.StatusConflict, "linked by email address"},
+		{"an API token", access.Principal{TokenID: "00000000-0000-4000-8000-000000000000"}, "/api/v1/me/identities/discord/link-code", http.StatusForbidden, "an API token is not a person"},
+		{"the bootstrap admin", access.Principal{UserID: bootstrap}, "/api/v1/me/identities/discord/link-code", http.StatusForbidden, "not a person who signed in through the identity provider"},
+	} {
+		if code, body := call(tt.p, http.MethodPost, tt.path); code != tt.code || !strings.Contains(fmt.Sprint(body["error"]), tt.want) {
+			t.Errorf("%s: %d %v, want %d and %q", tt.name, code, body, tt.code, tt.want)
+		}
+	}
+
+	code, body := call(access.Principal{UserID: ada}, http.MethodPost, "/api/v1/me/identities/discord/link-code")
+	linkCode, _ := body["code"].(string)
+	if code != http.StatusCreated || body["integration"] != "discord" || body["provider"] != "discord" || body["expires_at"] != "2026-03-01T12:10:00Z" ||
+		!regexp.MustCompile(`^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$`).MatchString(linkCode) || body["command"] != "/beacon-link code: "+linkCode {
+		t.Fatalf("link code = %d %v", code, body)
+	}
+	if strings.Contains(logs.String(), linkCode) || strings.Contains(logs.String(), strings.ReplaceAll(linkCode, "-", "")) {
+		t.Errorf("the log contains the code:\n%s", logs)
+	}
+	// The code is accepted as it was shown, hyphens and all, in any case.
+	if u, err := f.store.CompleteLink(ctx, f.discord, identity.ProviderDiscord, "300000000000000001", strings.ToLower(linkCode)); err != nil || u.ID != ada {
+		t.Fatalf("CompleteLink with the code as shown = %+v, %v", u, err)
+	}
+
+	// She removes the account again; there is nothing to remove twice, and
+	// an account that Beacon found by email address is not hers to remove.
+	if code, body := call(access.Principal{UserID: ada}, http.MethodDelete, "/api/v1/me/identities/discord"); code != http.StatusNoContent {
+		t.Fatalf("unlink = %d %v", code, body)
+	}
+	if code, _ := call(access.Principal{UserID: ada}, http.MethodDelete, "/api/v1/me/identities/discord"); code != http.StatusNotFound {
+		t.Errorf("second unlink = %d, want 404", code)
+	}
+	if code, _ := call(access.Principal{UserID: ada}, http.MethodDelete, "/api/v1/me/identities/slack"); code != http.StatusConflict {
+		t.Errorf("unlink of an account linked by email address = %d, want 409", code)
+	}
+	if _, found, _ := f.store.Address(ctx, f.pool, f.discord, ada); found {
+		t.Error("the account is still linked")
 	}
 }

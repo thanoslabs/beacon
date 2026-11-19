@@ -174,6 +174,13 @@ func launch(t *testing.T, dbURL, dir string) *beacon {
 	bin := build(t)
 
 	b := &beacon{t: t, slack: slacktest.New(t, botToken), discord: discordtest.New(t, discordToken), done: make(chan struct{}), addr: make(chan string, 1), dir: dir}
+	// The fake Discord signs with a key of its own, which the configuration
+	// must name.
+	if raw, err := os.ReadFile(filepath.Join(dir, "beacon.yaml")); err == nil {
+		if err := os.WriteFile(filepath.Join(dir, "beacon.yaml"), []byte(b.withDiscordKey(string(raw))), 0o600); err != nil {
+			t.Fatalf("write configuration: %v", err)
+		}
+	}
 	b.cmd = exec.Command(bin, "serve")
 	b.cmd.Env = []string{
 		"BEACON_DATABASE_URL=" + dbURL,
@@ -1317,7 +1324,7 @@ func TestConfigurationChangesBetweenStarts(t *testing.T) {
 // would, and waits for the n-th outcome in the log.
 func (b *beacon) reload(yaml string, n int) (logs string) {
 	b.t.Helper()
-	if err := os.WriteFile(filepath.Join(b.dir, "beacon.yaml"), []byte(yaml), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(b.dir, "beacon.yaml"), []byte(b.withDiscordKey(yaml)), 0o600); err != nil {
 		b.t.Fatalf("write configuration: %v", err)
 	}
 	if err := b.cmd.Process.Signal(syscall.SIGHUP); err != nil {

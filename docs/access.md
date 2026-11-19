@@ -162,10 +162,10 @@ Beacon keeps track of which account in Slack or Discord belongs to which user. I
 | Service | How an account is linked |
 |---|---|
 | Slack | Beacon finds it by the user's email address, without the person doing anything; see [[slack#People]] |
-| Discord | The person links it themselves. Not available yet: see the note below. |
+| Discord | The person links it themselves, with a one-time code; see [[discord#People]] |
 
-- **Acknowledging and snoozing from chat need a linked account.** A chat account that belongs to no Beacon user can resolve an alert and nothing else ([[slack#Who can act]]). An install without an identity provider has no users to link, so nobody can acknowledge from chat there.
-- An account belongs to one user. Beacon never moves an account from one person to another: if Slack reports, for one user's address, an account that another user has linked, it is logged as an error and nothing changes.
+- **Acknowledging and snoozing from chat need a linked account.** A chat account that belongs to no Beacon user can resolve an alert and nothing else ([[slack#Who can act]], [[discord#Who can act]]). An install without an identity provider has no users to link, so nobody can acknowledge from chat there.
+- An account belongs to one user. Beacon never moves an account from one person to another: if Slack reports, for one user's address, an account that another user has linked, it is logged as an error and nothing changes, and a Discord account that is someone else's cannot be linked with a code.
 - An identity is tied to the integration through which it is known. A user ID of Slack means something in one workspace only, so a person has one identity per Slack integration.
 - The bootstrap admin is an account, not a person with an address, and is never looked up.
 - A disabled user's accounts are attributed to nobody.
@@ -180,8 +180,14 @@ Beacon keeps track of which account in Slack or Discord belongs to which user. I
 
 `origin` is `email` for an account that Beacon found by the email address and `self` for one the person linked. An API token is not a person and has no identities.
 
-> [!note] Discord
-> Discord does not let an application look a person up by email address, so a person will link their Discord account themselves: Beacon gives the signed-in user a one-time code, and the person gives that code to Beacon from inside Discord, which proves the account is theirs. The codes (valid once, for ten minutes, stored as hashes) and the linking are implemented and tested. What is missing is the part that Discord talks to, which arrives with the Discord integration; until then no route issues a code.
+For a service in which people link their accounts themselves, two more routes act on the account of whoever asks. `<integration>` is the name of the integration:
+
+| Route | What it does |
+|---|---|
+| `POST /api/v1/me/identities/<integration>/link-code` | Issues a one-time code, valid for ten minutes, and answers `201` with it and with the command to type in the service. [[discord#People]] shows the whole exchange. |
+| `DELETE /api/v1/me/identities/<integration>` | Removes the account the person linked. Answers `204`, or `404` when there is none. |
+
+Both answer `404` for a name that is no chat integration, `409` for an integration whose accounts are linked by email address, such as Slack, and `403` for an API token. The bootstrap admin gets `403` for a code: it is not a person.
 
 ## Roles and teams
 
