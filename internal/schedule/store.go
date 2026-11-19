@@ -602,7 +602,8 @@ type OnCall struct {
 	UserID string
 	Email  string
 	// Since and Until are the period for which that holds, as far as is
-	// known now: the shift, or the override.
+	// known now: the shift, or the part of the override on which no later
+	// override lies.
 	Since time.Time
 	Until time.Time
 	// Override is the override in force, or nil when the rotation decides.
@@ -661,8 +662,21 @@ func (s *Store) OnCall(ctx context.Context, q Querier, scheduleID string) (OnCal
 	if err != nil {
 		return OnCall{}, fmt.Errorf("read override: %w", err)
 	}
-	if active {
-		out.UserID, out.Email, out.Since, out.Until, out.Override = o.userID, o.User, o.StartsAt, o.EndsAt, &o
+	if !active {
+		return out, nil
+	}
+	out.UserID, out.Email, out.Since, out.Until, out.Override = o.userID, o.User, o.StartsAt, o.EndsAt, &o
+	// Other overrides may lie on top of parts of this one: it holds from
+	// the end of the one that covered it last until the next one above it
+	// begins.
+	layers, err := overrideLayers(ctx, q, scheduleID, o.StartsAt, o.EndsAt, now)
+	if err != nil {
+		return OnCall{}, err
+	}
+	for _, piece := range layers {
+		if piece.OverrideID == o.ID && !piece.StartsAt.After(now) && piece.EndsAt.After(now) {
+			out.Since, out.Until = piece.StartsAt.UTC(), piece.EndsAt.UTC()
+		}
 	}
 	return out, nil
 }

@@ -143,68 +143,185 @@ func TestOverrideThatBeginsNow(t *testing.T) {
 	equal(t, "shifts after it ended", f.shifts("primary", time.UTC), []string{"ada Jan 1 12:00..Jan 3 09:00", "grace Jan 3 09:00..", "linus Jan 3 10:00..Jan 3 20:00 override"})
 }
 
-// TestOverlappingOverridesAreRefused states the rule for overlaps: there is
-// no winner to work out, because the second override is not accepted.
-func TestOverlappingOverridesAreRefused(t *testing.T) {
+// who asks who is on call for the primary schedule at a moment, and checks
+// that the timeline of the hour around that moment says the same.
+func (f *fixture) who(at time.Time) string {
+	f.t.Helper()
+	f.clock.Set(at)
+	on := f.onCall("primary")
+	shifts, err := f.store.Timeline(context.Background(), "primary", at, at.Add(time.Second))
+	if err != nil || len(shifts) != 1 {
+		f.t.Fatalf("Timeline at %s = %+v, %v; want one shift", at.Format("Jan 2 15:04"), shifts, err)
+	}
+	if got := strings.TrimSuffix(shifts[0].User, "@example.com"); got != on {
+		f.t.Errorf("at %s OnCall says %s and the timeline says %s", at.Format("Jan 2 15:04"), on, got)
+	}
+	return on
+}
+
+// TestOverridesAreLayered states the rule for overrides that overlap: the
+// one created last is in force where they overlap, and the earlier one
+// still holds outside that time. Who is on call, the timeline and the
+// recorded shifts agree, before and after the worker runs.
+func TestOverridesAreLayered(t *testing.T) {
 	f := started(t)
-	first := f.override(linus, day(4, 0, 0), day(5, 0, 0))
-	create := func(from, to time.Time) error {
-		_, err := f.store.CreateOverride(context.Background(), schedule.NewOverride{Schedule: "primary", User: ada, StartsAt: from, EndsAt: to}, f.as(grace))
-		return err
-	}
-	for name, period := range map[string][2]time.Time{
-		"the same period":   {day(4, 0, 0), day(5, 0, 0)},
-		"inside":            {day(4, 6, 0), day(4, 12, 0)},
-		"around":            {day(3, 12, 0), day(6, 0, 0)},
-		"across the start":  {day(3, 20, 0), day(4, 0, 1)},
-		"across the end":    {day(4, 23, 59), day(5, 6, 0)},
-		"from now, into it": {{}, day(4, 12, 0)},
+	// Linus covers the 4th and the 5th. Then Ken is given the middle of
+	// that, and Ada, last, an hour in the middle of Ken's time.
+	long := f.override(linus, day(4, 0, 0), day(6, 0, 0))
+	f.override("ken@example.com", day(4, 12, 0), day(5, 12, 0))
+	f.override(ada, day(4, 18, 0), day(4, 19, 0))
+	// And one that was created first and begins last is beneath them all.
+	plan := f.timeline(day(3, 10, 0), day(6, 12, 0))
+	equal(t, "the plan", plan, []string{
+		"grace Jan 3 09:00..Jan 4 00:00 planned",
+		"linus Jan 4 00:00..Jan 4 12:00 override planned",
+		"ken Jan 4 12:00..Jan 4 18:00 override planned",
+		"ada Jan 4 18:00..Jan 4 19:00 override planned",
+		"ken Jan 4 19:00..Jan 5 12:00 override planned",
+		"linus Jan 5 12:00..Jan 6 00:00 override planned",
+		"ada Jan 6 00:00..Jan 6 09:00 planned",
+		"grace Jan 6 09:00..Jan 7 09:00 planned",
+	})
+
+	for _, step := range []struct {
+		at   time.Time
+		want string
+	}{
+		{day(3, 23, 59), "grace"},
+		{day(4, 0, 0), "linus"},
+		{day(4, 11, 59), "linus"},
+		{day(4, 12, 0), "ken"},
+		{day(4, 18, 0), "ada"},
+		{day(4, 18, 59), "ada"},
+		{day(4, 19, 0), "ken"},
+		{day(5, 11, 59), "ken"},
+		{day(5, 12, 0), "linus"},
+		{day(5, 23, 59), "linus"},
+		{day(6, 0, 0), "ada"},
 	} {
-		var overlap *schedule.OverlapError
-		if err := create(period[0], period[1]); !errors.As(err, &overlap) || overlap.Existing.ID != first.ID {
-			t.Errorf("%s: %v, want an overlap with the first override", name, err)
+		// Before the worker has run, and after.
+		if got := f.who(step.at); got != step.want {
+			t.Errorf("at %s, before the worker ran, %s is on call; want %s", step.at.Format("Jan 2 15:04"), got, step.want)
 		}
-	}
-	// Periods that touch do not overlap: one ends as the next begins.
-	if err := create(day(3, 12, 0), day(4, 0, 0)); err != nil {
-		t.Errorf("an override that ends when the first begins: %v", err)
-	}
-	if err := create(day(5, 0, 0), day(5, 12, 0)); err != nil {
-		t.Errorf("an override that begins when the first ends: %v", err)
-	}
-	// Another schedule is another matter.
-	f.apply(rota("primary", "UTC", ada, grace, linus), rota("secondary", "UTC", linus))
-	if _, err := f.store.CreateOverride(context.Background(), schedule.NewOverride{Schedule: "secondary", User: ada, StartsAt: day(4, 0, 0), EndsAt: day(5, 0, 0)}, f.as(grace)); err != nil {
-		t.Errorf("the same period on another schedule: %v", err)
-	}
-	// Once the first is removed, its period is free.
-	if _, err := f.store.CancelOverride(context.Background(), "primary", first.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := create(day(4, 6, 0), day(4, 12, 0)); err != nil {
-		t.Errorf("the period of a removed override: %v", err)
+		f.advance(step.at)
+		if got := f.who(step.at); got != step.want {
+			t.Errorf("at %s %s is on call, want %s", step.at.Format("Jan 2 15:04"), got, step.want)
+		}
 	}
 
-	// Requests that arrive together cannot both win, round after round.
-	for round := range 15 {
-		var (
-			wg sync.WaitGroup
-			mu sync.Mutex
-			ok int
-		)
-		for range 8 {
-			wg.Go(func() {
-				if err := create(day(10+round, 0, 0), day(10+round, 12, 0)); err == nil {
-					mu.Lock()
-					ok++
-					mu.Unlock()
-				}
-			})
+	// How long the person on call has it, with the layers taken into
+	// account: Linus, on the 5th, since Ken's override ended.
+	f.clock.Set(day(5, 13, 0))
+	on, err := f.store.OnCall(context.Background(), f.pool, f.ids["primary"])
+	if err != nil || on.Override == nil || on.Override.ID != long.ID || !on.Since.Equal(day(5, 12, 0)) || !on.Until.Equal(day(6, 0, 0)) || on.Rotation != ada {
+		t.Errorf("OnCall = %+v, %v; want Linus by his override from the 5th at 12:00 to the 6th, covering Ada", on, err)
+	}
+
+	// What happened is what was planned.
+	f.advance(day(6, 12, 0))
+	record := f.timeline(day(3, 10, 0), day(6, 12, 0))
+	for i := range plan {
+		plan[i] = strings.TrimSuffix(plan[i], " planned")
+	}
+	plan[len(plan)-1] += " planned"
+	equal(t, "the record against the plan", record, plan)
+
+	// Every override is on record as a shift of its own, for its whole
+	// period, like the rotation shifts beneath them: which of them was in
+	// force follows from the order they were created in.
+	equal(t, "recorded shifts", f.shifts("primary", time.UTC), []string{
+		"ada Jan 1 12:00..Jan 3 09:00",
+		"grace Jan 3 09:00..Jan 4 09:00",
+		"linus Jan 4 00:00..Jan 6 00:00 override",
+		"linus Jan 4 09:00..Jan 5 09:00",
+		"ken Jan 4 12:00..Jan 5 12:00 override",
+		"ada Jan 4 18:00..Jan 4 19:00 override",
+		"ada Jan 5 09:00..Jan 6 09:00",
+		"grace Jan 6 09:00..",
+	})
+}
+
+// TestLaterOverrideWinsWhateverItsPeriod: what decides between two
+// overrides is which was created last, not which begins first, is longer,
+// or was created at a later time on the clock.
+func TestLaterOverrideWinsWhateverItsPeriod(t *testing.T) {
+	f := started(t)
+	// Both are created at the same instant on the clock; the order of the
+	// requests decides.
+	f.override("ken@example.com", day(4, 12, 0), day(4, 13, 0))
+	f.override(linus, day(4, 0, 0), day(5, 0, 0))
+	if got := f.who(day(4, 12, 30)); got != "linus" {
+		t.Errorf("under a later, longer override %s is on call, want linus", got)
+	}
+	// The one beneath never comes into force, and is recorded all the same.
+	f.advance(day(5, 1, 0))
+	equal(t, "timeline", f.timeline(day(4, 0, 0), day(5, 0, 0)), []string{"linus Jan 4 00:00..Jan 5 00:00 override"})
+	var recorded []string
+	for _, shift := range f.shifts("primary", time.UTC) {
+		if strings.HasSuffix(shift, " override") {
+			recorded = append(recorded, shift)
 		}
-		wg.Wait()
-		if ok != 1 {
-			t.Fatalf("round %d: %d of 8 identical overrides were accepted, want 1", round, ok)
-		}
+	}
+	equal(t, "recorded override shifts", recorded, []string{"linus Jan 4 00:00..Jan 5 00:00 override", "ken Jan 4 12:00..Jan 4 13:00 override"})
+
+	// The same period twice: the second request wins, eight at once all
+	// succeed, and exactly one of them is on top.
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			if _, err := f.store.CreateOverride(context.Background(), schedule.NewOverride{Schedule: "primary", User: ada, StartsAt: day(10, 0, 0), EndsAt: day(11, 0, 0)}, f.as(grace)); err != nil {
+				t.Errorf("CreateOverride: %v", err)
+			}
+		})
+	}
+	wg.Wait()
+	equal(t, "eight overrides of one period", f.timeline(day(10, 0, 0), day(11, 0, 0)), []string{"ada Jan 10 00:00..Jan 11 00:00 override planned"})
+}
+
+// TestCancellingAnOverrideRevealsTheOneBeneath removes the override on top,
+// before it begins and while it is in force.
+func TestCancellingAnOverrideRevealsTheOneBeneath(t *testing.T) {
+	f := started(t)
+	ctx := context.Background()
+	f.override(linus, day(4, 0, 0), day(6, 0, 0))
+	top := f.override("ken@example.com", day(4, 12, 0), day(5, 12, 0))
+	later := f.override(ada, day(5, 0, 0), day(5, 6, 0))
+
+	// The one that has not begun is removed: Ken has that time again.
+	f.advance(day(4, 13, 0))
+	if _, err := f.store.CancelOverride(ctx, "primary", later.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.who(day(5, 3, 0)); got != "ken" {
+		t.Errorf("after the override on top was removed before it began, %s is on call; want ken", got)
+	}
+	// Ken's is removed while it is in force: Linus, beneath, is on call at
+	// once, and for the rest of his own period.
+	f.clock.Set(day(5, 4, 0))
+	if _, err := f.store.CancelOverride(ctx, "primary", top.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.who(day(5, 4, 0)); got != "linus" {
+		t.Errorf("after the override in force was removed %s is on call, want linus", got)
+	}
+	on, err := f.store.OnCall(ctx, f.pool, f.ids["primary"])
+	if err != nil || !on.Since.Equal(day(5, 4, 0)) || !on.Until.Equal(day(6, 0, 0)) {
+		t.Errorf("OnCall = since %s until %s, %v; want from the removal to the end of Linus's override", on.Since, on.Until, err)
+	}
+	f.advance(day(6, 1, 0))
+	equal(t, "timeline", f.timeline(day(4, 0, 0), day(6, 0, 0)), []string{
+		"linus Jan 4 00:00..Jan 4 12:00 override",
+		"ken Jan 4 12:00..Jan 5 04:00 override",
+		"linus Jan 5 04:00..Jan 6 00:00 override",
+	})
+	// Removing the one beneath as well leaves the rotation.
+	f.override(linus, day(7, 0, 0), day(8, 0, 0))
+	under := f.override(grace, day(7, 6, 0), day(7, 12, 0))
+	if _, err := f.store.CancelOverride(ctx, "primary", under.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.who(day(7, 8, 0)); got != "linus" {
+		t.Errorf("%s is on call, want linus", got)
 	}
 }
 

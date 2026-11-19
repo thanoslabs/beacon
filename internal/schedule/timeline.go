@@ -147,8 +147,10 @@ func (s *Store) list(ctx context.Context, where string, args ...any) ([]Info, er
 // TimelineShift is a stretch of time during which one person is, was or
 // will be on call for a schedule, with overrides taken into account.
 type TimelineShift struct {
-	// User is the email address of the person on call.
+	// User is the email address of the person on call, and UserID their
+	// identifier when it is known.
 	User     string
+	UserID   string
 	StartsAt time.Time
 	EndsAt   time.Time
 	// Kind is KindRotation or KindOverride.
@@ -165,8 +167,9 @@ type TimelineShift struct {
 // order: the shifts on record for the time that has passed, and for the
 // time to come the shifts that the rotation will have and the overrides
 // that exist, by the same arithmetic that will carry them out. Where an
-// override covers the rotation, only the override is listed, so the result
-// has one person at any moment. Time in which nobody is on call is left
+// override covers the rotation, only the override is listed, and where
+// overrides overlap, only the one created last, so the result has one
+// person at any moment. Time in which nobody is on call is left
 // out.
 //
 // It returns an *Error when the period is not one, and ErrNotFound when no
@@ -193,7 +196,7 @@ func (s *Store) Timeline(ctx context.Context, name string, from, to time.Time) (
 func (s *Store) timeline(ctx context.Context, tx pgx.Tx, scheduleID string, from, to time.Time) ([]TimelineShift, error) {
 	now := s.now()
 	// The rotation on record: shifts that have ended.
-	rotation, err := recordedShifts(ctx, tx, scheduleID, KindRotation, from, to)
+	rotation, err := recordedRotation(ctx, tx, scheduleID, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -241,28 +244,9 @@ func (s *Store) timeline(ctx context.Context, tx pgx.Tx, scheduleID string, from
 			hi = r.EndsAt
 		}
 	}
-	overrides, err := recordedShifts(ctx, tx, scheduleID, KindOverride, lo, hi)
+	overrides, err := overrideLayers(ctx, tx, scheduleID, lo, hi, now)
 	if err != nil {
 		return nil, err
-	}
-	// And the overrides whose shift has not been closed: in force, to come,
-	// or over without the worker having recorded it yet.
-	rows, err := tx.Query(ctx, `
-		SELECT u.email, o.starts_at, o.ends_at, o.id::text FROM schedule_overrides o JOIN users u ON u.id = o.user_id
-		WHERE o.schedule_id = $1 AND o.cancelled_at IS NULL AND o.starts_at < $3 AND o.ends_at > $2
-			AND NOT EXISTS (SELECT 1 FROM shifts f WHERE f.override_id = o.id AND f.ends_at IS NOT NULL)
-		ORDER BY o.starts_at`, scheduleID, lo, hi)
-	if err != nil {
-		return nil, fmt.Errorf("read overrides: %w", err)
-	}
-	f := TimelineShift{Kind: KindOverride}
-	_, err = pgx.ForEachRow(rows, []any{&f.User, &f.StartsAt, &f.EndsAt, &f.OverrideID}, func() error {
-		f.Planned = f.EndsAt.After(now)
-		overrides = append(overrides, f)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("read overrides: %w", err)
 	}
 
 	var out []TimelineShift
@@ -276,14 +260,14 @@ func (s *Store) timeline(ctx context.Context, tx pgx.Tx, scheduleID string, from
 	return out, nil
 }
 
-// recordedShifts returns the shifts of one kind that have ended and overlap
+// recordedRotation returns the rotation shifts that have ended and overlap
 // a period.
-func recordedShifts(ctx context.Context, tx pgx.Tx, scheduleID, kind string, from, to time.Time) ([]TimelineShift, error) {
+func recordedRotation(ctx context.Context, tx pgx.Tx, scheduleID string, from, to time.Time) ([]TimelineShift, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT u.email, f.starts_at, f.ends_at, f.kind, COALESCE(f.override_id::text, '')
 		FROM shifts f JOIN users u ON u.id = f.user_id
 		WHERE f.schedule_id = $1 AND f.kind = $2 AND f.ends_at IS NOT NULL AND f.starts_at < $4 AND f.ends_at > $3
-		ORDER BY f.starts_at, f.id`, scheduleID, kind, from, to)
+		ORDER BY f.starts_at, f.id`, scheduleID, KindRotation, from, to)
 	if err != nil {
 		return nil, fmt.Errorf("read shifts: %w", err)
 	}

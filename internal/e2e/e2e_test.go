@@ -1696,8 +1696,20 @@ func TestScheduleRotation(t *testing.T) {
 	if upcoming, _ := timeline["shifts"].([]any); code != http.StatusOK || len(upcoming) < 10 || upcoming[0].(map[string]any)["user"] != "grace@example.com" || upcoming[1].(map[string]any)["user"] != "ada@example.com" {
 		t.Errorf("GET shifts = %d %v", code, timeline)
 	}
-	if code, body := b.api(admin, "POST", "/api/v1/schedules/primary/overrides", "", `{"user": "ada@example.com", "duration": "30m"}`); code != http.StatusConflict {
-		t.Errorf("an overlapping override = %d %v, want 409", code, body)
+	// A second override over the same time lies on top of the first: Ada
+	// takes the next half hour back. Removing hers reveals Grace's.
+	code, top := b.api(admin, "POST", "/api/v1/schedules/primary/overrides", "", `{"user": "ada@example.com", "duration": "30m"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("an overlapping override = %d %v, want 201", code, top)
+	}
+	if on := onCallNow("/api/v1/schedules/primary"); on["user"] != "ada@example.com" || on["override"] == nil {
+		t.Errorf("on call under two overrides: %v, want the one created last", on)
+	}
+	if code, body := b.api(member, "DELETE", "/api/v1/schedules/primary/overrides/"+top["id"].(string), "", ""); code != http.StatusNoContent {
+		t.Errorf("remove the override on top = %d %v, want 204", code, body)
+	}
+	if on := onCallNow("/api/v1/schedules/primary"); on["user"] != "grace@example.com" {
+		t.Errorf("on call after the override on top was removed: %v, want Grace again", on)
 	}
 	if code, body := b.api(admin, "DELETE", "/api/v1/schedules/primary/overrides/"+override["id"].(string), "", ""); code != http.StatusNoContent {
 		t.Errorf("remove override = %d %v, want 204", code, body)

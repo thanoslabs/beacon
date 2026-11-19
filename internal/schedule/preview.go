@@ -12,6 +12,8 @@ import (
 )
 
 // Move is a stretch of time in which a change puts someone else on call.
+// Time that an override covers never moves: the override holds whatever the
+// files say.
 type Move struct {
 	Start time.Time
 	End   time.Time
@@ -205,6 +207,40 @@ func (s *Store) preview(ctx context.Context, tx pgx.Tx, sched config.Schedule, n
 	if out.Upcoming, err = after.Project(until, known); err != nil {
 		return Preview{}, err
 	}
+	// The overrides that exist hold whatever the files say, so they are
+	// laid over both plans: time that an override covers does not move.
+	if was, err = withOverrides(ctx, tx, pos.ScheduleID, was, now); err != nil {
+		return Preview{}, err
+	}
+	if out.Upcoming, err = withOverrides(ctx, tx, pos.ScheduleID, out.Upcoming, now); err != nil {
+		return Preview{}, err
+	}
 	out.Moves = Compare(was, out.Upcoming, now, until)
+	return out, nil
+}
+
+// withOverrides lays the overrides of a schedule over a plan of its
+// rotation, and returns who is on call with them taken into account.
+func withOverrides(ctx context.Context, q querier, scheduleID string, plan []Span, now time.Time) ([]Span, error) {
+	if len(plan) == 0 {
+		return plan, nil
+	}
+	rotation := make([]TimelineShift, 0, len(plan))
+	for _, sp := range plan {
+		rotation = append(rotation, TimelineShift{User: sp.Member, StartsAt: sp.Start, EndsAt: sp.End, Kind: KindRotation})
+	}
+	layers, err := overrideLayers(ctx, q, scheduleID, plan[0].Start, plan[len(plan)-1].End, now)
+	if err != nil {
+		return nil, err
+	}
+	if len(layers) == 0 {
+		return plan, nil
+	}
+	all := append(cover(rotation, layers), layers...)
+	slices.SortStableFunc(all, func(a, b TimelineShift) int { return a.StartsAt.Compare(b.StartsAt) })
+	out := make([]Span, 0, len(all))
+	for _, shift := range all {
+		out = append(out, Span{Member: shift.User, Start: shift.StartsAt, End: shift.EndsAt, Override: shift.Kind == KindOverride})
+	}
 	return out, nil
 }
