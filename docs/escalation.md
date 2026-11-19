@@ -70,7 +70,7 @@ A target that cannot be notified is skipped. The step goes on with the others, e
 | Reason | Meaning |
 |---|---|
 | `the person has no linked account for this integration` | Beacon found no Slack account with the user's email address. See [[slack#People]]; the metric `beacon_users_without_identity` counts such users. |
-| `nobody is on call for the schedule` | No member of the rotation is a user yet, and no override is in force |
+| `the schedule has nobody on call: a gap in coverage` | No member of the rotation is a user, and no override is in force. A gap is a legitimate state: it is logged as a warning, like every skip, and never as an error. |
 | `the team has no members who are users` | |
 | `no user has this email address` | The person has never signed in |
 | `the integration does not deliver notifications` | The target names an integration of a type that Beacon cannot send through yet, such as email |

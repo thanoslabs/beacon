@@ -194,3 +194,4 @@ Beacon exposes a Prometheus `/metrics` endpoint. It covers both how Beacon is ru
 | Authentication | OAuth 2.0 and OpenID Connect first, with roles and team membership mapped from the provider's roles and groups | Access follows the organisation's existing identity provider |
 | Configuration format | YAML | It is what the Prometheus audience already uses |
 | Frontend | A separate single-page app that uses the REST API | The API is exercised by a real client from the start |
+| A schedule with nobody on call | A gap in coverage is allowed and is logged as a warning, not an error | Some teams do not want cover at all times, and a rotation whose members have not signed in yet is not a fault |

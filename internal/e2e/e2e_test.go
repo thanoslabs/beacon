@@ -1618,6 +1618,10 @@ func TestScheduleRotation(t *testing.T) {
 	if got := b.metrics("beacon_schedule_members_skipped"); got != `beacon_schedule_members_skipped{schedule="primary"} 2` {
 		t.Errorf("metric at start: %s", got)
 	}
+	// Nobody on call is a gap in coverage, which is a warning.
+	if want := `"level":"WARN","msg":"gap in coverage: the schedule has nobody on call`; !strings.Contains(logs, want) {
+		t.Errorf("the logs do not contain %s", want)
+	}
 
 	// Ada is second in the rotation and the first to be a user.
 	if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), oidctest.Ada, oidctest.Password); code != http.StatusOK {
