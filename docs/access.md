@@ -56,17 +56,20 @@ Beacon is closed by default. Every route needs a session unless it is on the sho
 |---|---|---|
 | `GET /auth/login` | Public | Starts a sign-in and sends the browser to the provider |
 | `GET /auth/callback` | Public | Where the provider sends the browser back. This is the redirect URI. |
+| `GET /auth/methods` | Public | Which ways to sign in exist, for a sign-in page: `{"oidc": true, "bootstrap_admin": false}` |
 | `POST /auth/logout` | Member | Ends the session. Answers `204`. |
 | `GET /api/v1/me` | Member | Who is signed in: `id`, `email`, `display_name`, `role` and `session_expires_at` |
 | `GET /api/v1/me/identities` | Member | The chat accounts linked to whoever is signed in; see [Chat accounts](#chat-accounts) |
 | `POST /api/v1/config/reload` | Admin | Reloads the configuration; see [[configuration#Reload without a restart]] |
 | `GET /api/v1/tokens`, `POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | Admin | Lists, creates and revokes [API tokens](#api-tokens) |
-| `GET /api/v1/silences`, `POST /api/v1/silences`, `GET /api/v1/silences/<id>`, `DELETE /api/v1/silences/<id>` | Member | Lists, creates, reads and expires [[silences]] |
+| The routes of alerts and alert groups | Member | Lists, reads and acts on alerts; see [[api#Alerts]] |
+| `GET` on sources, integrations, escalation policies, routing, teams and users | Member | What the configuration defines, for reading, and the users; see [[api#What the configuration defines]] |
+| `GET /api/v1/silences`, `POST /api/v1/silences`, `POST /api/v1/silences/preview`, `GET /api/v1/silences/<id>`, `DELETE /api/v1/silences/<id>` | Member | Lists, creates, previews, reads and expires [[silences]] |
 | `GET /api/v1/schedules`, `GET /api/v1/schedules/<name>`, `GET /api/v1/schedules/<name>/shifts`, `GET /api/v1/teams/<name>/on-call` | Member | Schedules, who is on call now and over a period; see [[schedules#Who is on call]] |
 | `GET /api/v1/schedules/<name>/overrides`, `POST /api/v1/schedules/<name>/overrides`, `DELETE /api/v1/schedules/<name>/overrides/<id>` | Member | Lists, creates and removes the overrides of a schedule; see [[schedules#Overrides]] |
 | `POST /auth/bootstrap` | Public | Signs the [bootstrap admin](#bootstrap-admin) in. The password is checked and the attempts are bounded; `404` unless the account is enabled. |
 | `POST /api/v1/ingest/<source>` | Public | Receives alerts. The source's own token is checked; see [[webhook]]. |
-| `POST /api/v1/integrations/<name>/interactions` | Public | Receives button presses from Slack. Slack's signature is checked; see [[slack]]. |
+| `POST /api/v1/integrations/<name>/interactions` | Public | Receives button presses from Slack and from Discord. The service's signature is checked; see [[slack]] and [[discord]]. |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Public | Probes and metrics, for machines that have no session |
 
 "Member" means anyone who is signed in or presents an API token, with either role. "Admin" needs the admin role; a member gets `403`.
@@ -90,7 +93,7 @@ curl -X POST https://beacon.example.com/api/v1/tokens \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"name": "deploy-pipeline", "role": "member", "expires_in": "90d"}'
 
-# List. Shows names, roles and times, never the tokens.
+# List. Shows names, roles and times, never the tokens. Paged with limit and cursor.
 curl -H "Authorization: Bearer $ADMIN_TOKEN" https://beacon.example.com/api/v1/tokens
 
 # Revoke. The token stops working at once.

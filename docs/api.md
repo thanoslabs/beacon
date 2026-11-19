@@ -49,7 +49,7 @@ Every answer carries `X-Request-Id`, which is also on each log record of the req
 {"alerts": [{"id": "…"}, {"id": "…"}], "next_cursor": "eyJ0IjoiMjAyNi0xMi0wMVQxMDoxMjowMFoiLCJpZCI6IuKApiJ9"}
 ```
 
-A list that can grow without bound is **paged**. It takes `limit`, 50 unless given and 200 at most, and answers `next_cursor` when there is more: send it back as `cursor`, with the same filters, for the next page. A cursor is opaque, and a list is complete when its answer has no `next_cursor`. Paging does not skip or repeat entries when the list changes between pages. The alerts and their timelines are paged today. Lists of what the configuration defines are as long as the files and are answered whole.
+A list that can grow without bound is **paged**. It takes `limit`, 50 unless given and 200 at most, and answers `next_cursor` when there is more: send it back as `cursor`, with the same filters, for the next page. A cursor is opaque, and a list is complete when its answer has no `next_cursor`. Alerts, their timelines and users continue from a position in their order, so a page never skips or repeats an entry when the list changes in between. Silences, overrides and tokens are short lists that Beacon reads whole (a thousand entries at most) and pages by position, so an entry can shift between two pages when the list changes. Lists of what the configuration defines are as long as the files and are answered whole, without `next_cursor`.
 
 **Filters** are query parameters. A filter that takes several values takes them repeated or separated by commas: `?status=firing&status=acknowledged` and `?status=firing,acknowledged` are the same. A parameter that a list does not know is refused with `400`.
 
@@ -189,11 +189,69 @@ Alerts are told about in groups ([[configuration#Grouping]]), and an action from
 
 `status` is `open`, or `resolved` once every alert of the group is. `alerts` holds the alerts of the group, oldest first, each as above. An action on a group is taken by every alert whose state allows it and answers the group as it is afterwards; it answers `409` only when no alert could take it.
 
+## What the configuration defines
+
+Sources, integrations, teams, schedules, escalation policies and routing are defined in the files, and the API shows the configuration that is active, to members, for reading. Each object carries `"provisioned": true`, which says that it is managed in the configuration and cannot be changed here. A list is in the order of the files; one object is read by its name, and a name that the configuration does not have answers `404`.
+
+| Route | Answers |
+|---|---|
+| `GET /api/v1/sources`, `…/<name>` | `{"sources": [...]}`: `name`, `type`, `ingest_path`, the `labels` it adds, and how it derives `severity`, with the defaults filled in |
+| `GET /api/v1/integrations`, `…/<name>` | `{"integrations": [...]}`: `name`, `type`, `interactions_path` for Slack and Discord, and `settings` |
+| `GET /api/v1/escalation-policies`, `…/<name>` | `{"escalation_policies": [...]}`: `name`, `repeat`, and `steps`, each with its `timeout` and whom it notifies |
+| `GET /api/v1/routing` | The routing block: the grouping, the `default` route, and the `rules` in the order they are tried. `404` when the configuration has none. |
+| `GET /api/v1/teams`, `…/<name>` | `{"teams": [...]}`: what the files say and who belongs now |
+| `GET /api/v1/schedules`, `…/<name>` | Schedules, with who is on call: [[schedules#Who is on call]] |
+
+**No credential is answered, and no reference to one.** The `settings` of an integration hold what is not secret:
+
+| Type | `settings` |
+|---|---|
+| `slack` | Nothing |
+| `discord` | `application_id`, `public_key` |
+| `email` | `host`, `port`, `tls`, `from`, and `authenticated`: whether Beacon signs in |
+| `webhook` | `url`, without its query and its user information, where a token may be, and `headers`: the names of the configured headers, without their values |
+
+A step's target says its `kind`, which is `schedule`, `team`, `user`, `channel` or `webhook`, and names what it is; the other names are `null`:
+
+```json
+{"name": "platform-default", "repeat": 1, "provisioned": true, "steps": [
+  {"timeout": "5m", "notify": [
+    {"kind": "schedule", "schedule": "platform-primary", "team": null, "user": null, "channel": null, "integration": null, "via": []},
+    {"kind": "channel", "schedule": null, "team": null, "user": null, "channel": "C0123456789", "integration": "slack", "via": []}]}]}
+```
+
+A routing rule is answered with the grouping that applies to its alerts: its own, or the routing block's where it sets none.
+
+### Teams and users
+
+```json
+{"name": "platform", "display_name": "Platform", "groups": ["platform-engineers"], "provisioned": true,
+ "members": [{"email": "ada@example.com", "display_name": "Ada Lovelace", "origins": ["config", "group"]}],
+ "schedules": ["platform-primary"],
+ "skipped_members": ["grace@example.com"]}
+```
+
+- `members` are the users who belong to the team now. `origins` says why: `config` for the `members` list of the files, `group` for an identity provider group ([[configuration#Team membership]]).
+- **`skipped_members` is answered to admins only**: the addresses in the files that no user has, because the person has not signed in yet. For a member the field is left out.
+- `schedules` are the names of the schedules the team owns.
+
+`GET /api/v1/users` lists the users, by email address, paged, with the filters `team` and `role`:
+
+```json
+{"users": [{"id": "7a0d…", "email": "ada@example.com", "display_name": "Ada Lovelace", "role": "admin", "disabled": false,
+            "created_at": "2026-11-02T09:00:00Z", "last_sign_in_at": "2026-12-01T08:30:00Z", "teams": ["platform"]}]}
+```
+
+Users are created by signing in and cannot be changed through the API.
+
+`GET /auth/methods` needs no credential and says which ways to sign in exist, for a sign-in page: `{"oidc": true, "bootstrap_admin": false}`.
+
 ## Routes
 
 | Routes | Described in |
 |---|---|
 | `/api/v1/alerts`, `/api/v1/alert-groups` | This page |
+| `/api/v1/sources`, `/api/v1/integrations`, `/api/v1/escalation-policies`, `/api/v1/routing`, `/api/v1/teams`, `/api/v1/users` | This page |
 | `/api/v1/silences` | [[silences#API]] |
 | `/api/v1/schedules`, `/api/v1/teams/<name>/on-call` | [[schedules#Who is on call]], [[schedules#Overrides]] |
 | `/api/v1/me`, `/api/v1/me/identities` | [[access]], [[access#Chat accounts]] |

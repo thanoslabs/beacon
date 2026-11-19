@@ -71,8 +71,8 @@ func (h *Alerts) Routes() []access.Route {
 	return routes
 }
 
-// alertBody is an alert, as the API answers.
-type alertBody struct {
+// AlertBody is an alert, as the API answers.
+type AlertBody struct {
 	ID          string            `json:"id"`
 	GroupID     string            `json:"group_id"`
 	Source      string            `json:"source"`
@@ -129,8 +129,9 @@ func actionsOf(status alert.Status) []alert.Action {
 	return out
 }
 
-func alertOf(v alert.View) alertBody {
-	return alertBody{
+// AlertOf returns an alert as the API answers it.
+func AlertOf(v alert.View) AlertBody {
+	return AlertBody{
 		ID: v.ID, GroupID: v.GroupID, Source: v.Source, Fingerprint: v.Fingerprint, Status: v.Status, Severity: v.Severity,
 		Labels: nonNil(v.Labels), Annotations: nonNil(v.Annotations), Links: nonNil(v.Links),
 		Team: optional(v.Team), Service: optional(v.Service), RoutingRule: optional(v.RoutingRule),
@@ -217,16 +218,16 @@ func (h *Alerts) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body := struct {
-		Alerts     []alertBody `json:"alerts"`
+		Alerts     []AlertBody `json:"alerts"`
 		NextCursor string      `json:"next_cursor,omitempty"`
-	}{Alerts: make([]alertBody, 0, min(len(views), limit))}
+	}{Alerts: make([]AlertBody, 0, min(len(views), limit))}
 	for i, v := range views {
 		if i == limit {
 			last := views[limit-1]
 			body.NextCursor = Cursor(alertCursor{StartedAt: last.StartedAt, ID: last.ID})
 			break
 		}
-		body.Alerts = append(body.Alerts, alertOf(v))
+		body.Alerts = append(body.Alerts, AlertOf(v))
 	}
 	Write(h.logger, w, r, http.StatusOK, body)
 }
@@ -241,7 +242,7 @@ func (h *Alerts) get(w http.ResponseWriter, r *http.Request) {
 		Internal(h.logger, w, r, "read alert", err)
 		return
 	}
-	Write(h.logger, w, r, http.StatusOK, alertOf(v))
+	Write(h.logger, w, r, http.StatusOK, AlertOf(v))
 }
 
 // eventBody is an entry of a timeline, as the API answers.
@@ -342,7 +343,7 @@ type groupBody struct {
 	// not been yet.
 	NotifiedAt *time.Time  `json:"notified_at"`
 	ResolvedAt *time.Time  `json:"resolved_at"`
-	Alerts     []alertBody `json:"alerts"`
+	Alerts     []AlertBody `json:"alerts"`
 	// Actions are what can be done to at least one alert of the group.
 	Actions []alert.Action `json:"actions"`
 }
@@ -359,11 +360,11 @@ func (h *Alerts) groupOf(ctx context.Context, id string) (groupBody, error) {
 	body := groupBody{
 		ID: g.ID, Status: g.Status, Labels: nonNil(g.Labels), Team: optional(g.Team), RoutingRule: optional(g.RoutingRule),
 		EscalationPolicy: optional(g.EscalationPolicy), CreatedAt: g.CreatedAt.UTC(), NotifiedAt: utc(g.NotifiedAt), ResolvedAt: utc(g.ResolvedAt),
-		Alerts: make([]alertBody, 0, len(views)), Actions: []alert.Action{},
+		Alerts: make([]AlertBody, 0, len(views)), Actions: []alert.Action{},
 	}
 	allowed := map[alert.Action]bool{}
 	for _, v := range views {
-		a := alertOf(v)
+		a := AlertOf(v)
 		body.Alerts = append(body.Alerts, a)
 		for _, action := range a.Actions {
 			allowed[action] = true
@@ -520,6 +521,6 @@ func (h *Alerts) act(action alert.Action, group bool) http.Handler {
 			Internal(h.logger, w, r, "read alert", err)
 			return
 		}
-		Write(h.logger, w, r, http.StatusOK, alertOf(v))
+		Write(h.logger, w, r, http.StatusOK, AlertOf(v))
 	})
 }

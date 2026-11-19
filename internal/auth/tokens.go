@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/thanoslabs/beacon/internal/access"
+	"github.com/thanoslabs/beacon/internal/api"
 	"github.com/thanoslabs/beacon/internal/config"
 )
 
@@ -176,10 +177,15 @@ func (h *Handler) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if tokens == nil {
-		tokens = []Token{}
+	page, next, field, problem, ok := api.Slice(tokens, r.URL.Query())
+	if !ok {
+		h.write(w, r, http.StatusBadRequest, api.Error{Error: problem, Field: field})
+		return
 	}
-	h.write(w, r, http.StatusOK, map[string][]Token{"tokens": tokens})
+	h.write(w, r, http.StatusOK, struct {
+		Tokens     []Token `json:"tokens"`
+		NextCursor string  `json:"next_cursor,omitempty"`
+	}{page, next})
 }
 
 // createTokenRequest is the body of a request for a new token.

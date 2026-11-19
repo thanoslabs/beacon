@@ -116,3 +116,34 @@ var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 
 // IsUUID reports whether s has the form of an identifier of a row.
 func IsUUID(s string) bool { return uuidRE.MatchString(s) }
+
+// offsetCursor is where a list that is read whole continues.
+type offsetCursor struct {
+	Offset int `json:"offset"`
+}
+
+// Slice pages a list that Beacon reads whole, because it is bounded and
+// small: it returns the page that the limit and the cursor of the query ask
+// for, and the cursor of the next page, or "" when there is none. field
+// names the parameter at fault when ok is false.
+//
+// Unlike a list that continues from a position in its order, such a list can
+// shift between two pages when it changes in between.
+func Slice[T any](items []T, q url.Values) (page []T, next string, field, problem string, ok bool) {
+	limit, problem, ok := Limit(q)
+	if !ok {
+		return nil, "", "limit", problem, false
+	}
+	var c offsetCursor
+	if _, err := ParseCursor(q.Get("cursor"), &c); err != nil || c.Offset < 0 {
+		return nil, "", "cursor", ErrCursor.Error(), false
+	}
+	start := min(c.Offset, len(items))
+	end := min(start+limit, len(items))
+	if end < len(items) {
+		next = Cursor(offsetCursor{Offset: end})
+	}
+	// Never null: an empty page is an empty list.
+	page = append([]T{}, items[start:end]...)
+	return page, next, "", "", true
+}

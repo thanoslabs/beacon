@@ -29,7 +29,9 @@ import (
 //   - the ingest endpoint checks the source's own token;
 //   - the interactions endpoint checks Slack's signature, or Discord's when
 //     the integration named in the path is a Discord one;
-//   - /auth/login and /auth/callback are how a person gets a session;
+//   - /auth/login and /auth/callback are how a person gets a session, and
+//     /auth/methods says which ways to sign in exist, which is what a
+//     sign-in page shows to anyone;
 //   - /auth/bootstrap is how the bootstrap admin gets one: it checks the
 //     password and bounds the attempts, and answers 404 unless the account
 //     is enabled.
@@ -42,6 +44,7 @@ var wantRoutes = []string{
 	"admin  POST /api/v1/config/reload",
 	"public GET /auth/login",
 	"public GET /auth/callback",
+	"public GET /auth/methods",
 	"member POST /auth/logout",
 	"member GET /api/v1/me",
 	"public POST /auth/bootstrap",
@@ -58,8 +61,19 @@ var wantRoutes = []string{
 	"member POST /api/v1/alert-groups/{id}/snooze",
 	"member POST /api/v1/alerts/{id}/resolve",
 	"member POST /api/v1/alert-groups/{id}/resolve",
+	"member GET /api/v1/sources",
+	"member GET /api/v1/sources/{name}",
+	"member GET /api/v1/integrations",
+	"member GET /api/v1/integrations/{name}",
+	"member GET /api/v1/escalation-policies",
+	"member GET /api/v1/escalation-policies/{name}",
+	"member GET /api/v1/routing",
+	"member GET /api/v1/teams",
+	"member GET /api/v1/teams/{name}",
+	"member GET /api/v1/users",
 	"member GET /api/v1/silences",
 	"member POST /api/v1/silences",
+	"member POST /api/v1/silences/preview",
 	"member GET /api/v1/silences/{id}",
 	"member DELETE /api/v1/silences/{id}",
 	"member GET /api/v1/schedules",
@@ -80,7 +94,7 @@ func TestRoutes(t *testing.T) {
 	// The routes, registered as beacon serve registers them.
 	logger := slog.New(slog.DiscardHandler)
 	srv := server.New(server.Config{}, logger, nil, server.NewRegistry())
-	for _, route := range (&provisioner{auth: auth.NewHandler(logger, nil), alertsAPI: api.NewAlerts(logger, nil), silences: silence.NewHandler(logger, nil), scheduleAPI: schedule.NewHandler(logger, nil),
+	for _, route := range (&provisioner{auth: auth.NewHandler(logger, nil), alertsAPI: api.NewAlerts(logger, nil), provisionedAPI: api.NewProvisioned(logger, nil), silences: silence.NewHandler(logger, nil), scheduleAPI: schedule.NewHandler(logger, nil),
 		identityAPI: identity.NewHandler(logger, nil, nil)}).routes() {
 		srv.Handle(route)
 	}
@@ -125,10 +139,10 @@ func TestRoutes(t *testing.T) {
 			closed++
 		}
 	}
-	if closed != 30 {
-		t.Errorf("%d routes refused a stranger, want 30", closed)
+	if closed != 41 {
+		t.Errorf("%d routes refused a stranger, want 41", closed)
 	}
-	for _, probe := range []string{"GET /", "PUT /api/v1/alerts", "DELETE /api/v1/alerts/x", "GET /api/v1/alert-groups", "POST /api/v1/alerts/x/delete", "GET /api/v1/teams", "GET /api/v1/teams/x", "POST /api/v1/schedules", "DELETE /api/v1/schedules/x", "GET /api/v1/schedules/x/overrides/y", "PUT /api/v1/schedules/x/overrides", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
+	for _, probe := range []string{"GET /", "PUT /api/v1/alerts", "DELETE /api/v1/alerts/x", "GET /api/v1/alert-groups", "POST /api/v1/alerts/x/delete", "POST /api/v1/teams", "DELETE /api/v1/teams/x", "PUT /api/v1/sources/x", "POST /api/v1/integrations", "DELETE /api/v1/escalation-policies/x", "PUT /api/v1/routing", "POST /api/v1/users", "POST /api/v1/schedules", "DELETE /api/v1/schedules/x", "GET /api/v1/schedules/x/overrides/y", "PUT /api/v1/schedules/x/overrides", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
 		method, path, _ := strings.Cut(probe, " ")
 		if code, body := request(method, path); code != http.StatusUnauthorized {
 			t.Errorf("%s without a session = %d %s, want 401", probe, code, body)

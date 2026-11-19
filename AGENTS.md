@@ -51,7 +51,7 @@ Tooling:
 ├── internal/
 │   ├── access/               # Roles and the principal behind a request
 │   ├── alert/                # Alert model, state machine and timeline
-│   ├── api/                  # REST API: its conventions, and the routes of alerts
+│   ├── api/                  # REST API: its conventions, the routes of alerts, and read access to what is provisioned
 │   ├── auth/                 # Sign-in through OpenID Connect, users and sessions
 │   │   └── oidctest/         # Test helper: sign in through the Dex of compose.yaml
 │   ├── cli/                  # Subcommand dispatch and the subcommands themselves
@@ -185,6 +185,7 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Hold every credential in a `config.Secret`. In a file it is a reference, `{env: NAME}` or `{file: /path}`, never the value. It prints, logs and encodes as that reference; call `Reveal` only at the point of use. A new secret field also goes into `resolveSecrets` in `internal/config/load.go`. Add every new secret to `secretSettings` and `secretsConfig` in `internal/cli/secrets_test.go`, which checks that no secret reaches help, errors or logs. A credential that is a process setting, such as the database URL, is registered with `secretSetting`.
 - `provision.Reconcile` makes the provisioned rows match the configuration: it creates, updates and marks as removed, in one transaction under an advisory lock, and returns the row of every object. It never deletes; a removed object keeps its row for history and is revived if it returns. A new kind needs its table (with the common columns, including `provisioned`), a constant in `provision.Kinds` in dependency order, and a case in `objectsOf`.
 - Rows with `provisioned = true` belong to the files. Nothing but reconciliation may write them: an API route for a provisioned kind is read-only.
+- `api.Provisioned` answers the provisioned objects from the active configuration, which the provisioner hands it (`SetConfig`), through types of its own, never by encoding a `config` type. **It answers no credential and no reference to one**: a new field of an integration is added to `settings` only when it is not a secret, and the address of a webhook goes out through `withoutSecrets`. `TestProvisionedObjectsAreReadable` reads every route with every secret set.
 
 ### Sign-in and sessions
 
