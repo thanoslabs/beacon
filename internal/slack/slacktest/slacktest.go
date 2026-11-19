@@ -65,7 +65,9 @@ type Server struct {
 
 	mu sync.Mutex
 	// users maps the email address of each member to their user ID.
-	users    map[string]string
+	users map[string]string
+	// profiles maps the user ID of each member to their profile.
+	profiles map[string]Profile
 	channels map[string]string
 	messages map[string]*Message
 	order    []string
@@ -84,6 +86,7 @@ func New(t testing.TB, token string) *Server {
 	s := &Server{
 		token:    token,
 		users:    map[string]string{},
+		profiles: map[string]Profile{},
 		channels: map[string]string{"alerts": "C0ALERTS", "C0ALERTS": "C0ALERTS"},
 		messages: map[string]*Message{},
 		failures: map[string][]Failure{},
@@ -108,6 +111,23 @@ func (s *Server) AddUser(email, id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.users[strings.ToLower(email)] = id
+}
+
+// Profile is what a member is called in the workspace. Slack guarantees
+// none of the fields.
+type Profile struct {
+	DisplayName string
+	RealName    string
+	Handle      string
+}
+
+// SetProfile gives the workspace a member with a user ID and a profile, or
+// changes the profile of one it has. A member needs no email address to
+// have a profile: users.info finds them by ID.
+func (s *Server) SetProfile(id string, p Profile) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.profiles[id] = p
 }
 
 // RemoveUser takes a member out of the workspace, as deactivating them does.
@@ -171,6 +191,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	if method == "users.lookupByEmail" {
 		body = map[string]any{"email": lookupEmail(r, raw)}
 	}
+	// So is users.info.
+	if method == "users.info" {
+		body = map[string]any{"user": r.URL.Query().Get("user")}
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -198,6 +222,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case method == "users.lookupByEmail" && r.Header.Get("Authorization") == "Bearer "+s.token:
 		reply(w, s.lookupByEmail(r, body))
+	case method == "users.info" && r.Header.Get("Authorization") == "Bearer "+s.token:
+		reply(w, s.info(r, body))
 	case r.Method != http.MethodPost:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	case r.Header.Get("Authorization") != "Bearer "+s.token:
@@ -243,6 +269,22 @@ func (s *Server) lookupByEmail(r *http.Request, body map[string]any) map[string]
 	}
 	return map[string]any{"ok": true, "user": map[string]any{
 		"id": id, "team_id": "T0FAKE", "deleted": false, "is_bot": false, "profile": map[string]any{"email": email},
+	}}
+}
+
+// info answers users.info: the member with the user ID, or user_not_found.
+func (s *Server) info(r *http.Request, body map[string]any) map[string]any {
+	id, _ := body["user"].(string)
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		return map[string]any{"ok": false, "error": "invalid_post_type"}
+	}
+	p, known := s.profiles[id]
+	if !known && !s.member(id) {
+		return map[string]any{"ok": false, "error": "user_not_found"}
+	}
+	return map[string]any{"ok": true, "user": map[string]any{
+		"id": id, "team_id": "T0FAKE", "name": p.Handle, "real_name": p.RealName, "deleted": false, "is_bot": false,
+		"profile": map[string]any{"display_name": p.DisplayName, "real_name": p.RealName},
 	}}
 }
 

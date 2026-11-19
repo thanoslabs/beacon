@@ -391,6 +391,7 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	ids := make(map[string]string, len(cfg.Integrations))
 	channels := make(map[string]notify.Channel, len(cfg.Integrations))
 	signingSecrets := make(map[string]config.Secret, len(cfg.Integrations))
+	clients := make(map[string]*slack.Client, len(cfg.Integrations))
 	// The chat services in which people have accounts. Slack can be asked
 	// for an account by email address; in Discord people link theirs.
 	var chat []identity.Integration
@@ -407,6 +408,7 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 		client := slack.NewClient(p.slackAPIURL, i.Slack.BotToken)
 		channels[integrations[i.Name]] = slack.NewChannel(client)
 		signingSecrets[i.Name] = i.Slack.SigningSecret
+		clients[i.Name] = client
 		chat = append(chat, identity.Integration{ID: integrations[i.Name], Name: i.Name, Provider: identity.ProviderSlack, Lookup: client})
 		p.logger.InfoContext(ctx, "integration configured", slog.String("integration", i.Name), slog.String("type", i.Type),
 			slog.String("interactions_path", strings.Replace(slack.InteractionsPath, "{name}", i.Name, 1)))
@@ -418,13 +420,19 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	var direct []notify.Via
 	for _, i := range cfg.Integrations {
 		if _, delivers := ids[i.Name]; delivers && i.Type == config.IntegrationTypeSlack {
-			direct = append(direct, notify.Via{IntegrationID: ids[i.Name], Name: i.Name})
+			direct = append(direct, notify.Via{IntegrationID: ids[i.Name], Name: i.Name, Provider: i.Type})
 		}
 	}
 	// via returns the integration with a name as a step uses it. One that
 	// does not deliver yet is kept: the step then records that it skipped
 	// it, which is better than leaving it out without a trace.
-	via := func(name string) notify.Via { return notify.Via{IntegrationID: integrations[name], Name: name} }
+	types := map[string]string{}
+	for _, i := range cfg.Integrations {
+		types[i.Name] = i.Type
+	}
+	via := func(name string) notify.Via {
+		return notify.Via{IntegrationID: integrations[name], Name: name, Provider: types[name]}
+	}
 
 	byID := make(map[string]notify.Policy, len(cfg.EscalationPolicies))
 	notifies := map[string]bool{}
@@ -472,6 +480,18 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	p.pipeline.SetChannels(channels)
 	p.pipeline.SetPolicies(byID)
 	p.interactions.SetSecrets(signingSecrets)
+	p.interactions.SetClients(clients)
+	// Acknowledging from Slack needs a Slack account that is linked to a
+	// user, and a person becomes a user by signing in through the identity
+	// provider. The bootstrap admin has no address to link by.
+	signIn := ""
+	if cfg.Auth != nil && cfg.Auth.OIDC != nil {
+		signIn = cfg.Auth.PublicURL
+	}
+	p.interactions.SetSignInURL(signIn)
+	if len(clients) > 0 && signIn == "" {
+		p.logger.WarnContext(ctx, "nobody can acknowledge or snooze from Slack: that needs a Slack account linked to a Beacon user, and without an identity provider (auth.oidc) there are no users to link; alerts can still be resolved from Slack")
+	}
 	p.linker.SetIntegrations(chat)
 	// The new integrations are asked about their users at once.
 	p.linker.Kick()
