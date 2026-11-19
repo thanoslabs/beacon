@@ -186,7 +186,7 @@ routing:
 		t.Errorf("a generic payload to a grafana source = %d %v, want 400 naming alerts", code, body)
 	}
 	logs := srv.logs.String()
-	for _, want := range []string{"this type of integration does not deliver yet", "alerts are stored but nobody is notified"} {
+	for _, want := range []string{"this type of integration does not deliver yet", "this escalation policy can notify nobody"} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("logs do not contain %q:\n%s", want, logs)
 		}

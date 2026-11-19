@@ -40,8 +40,8 @@ func walk(t *testing.T, d Definition, start time.Time, n int) []time.Time {
 	var out []time.Time
 	for range n {
 		out = append(out, s.NextHandoff.In(loc))
-		if s, err = s.Handoff(everyone); err != nil {
-			t.Fatalf("Handoff: %v", err)
+		if s, _, err = s.Next(everyone); err != nil {
+			t.Fatalf("Next: %v", err)
 		}
 	}
 	return out
@@ -170,7 +170,7 @@ func TestHandoffsNeverDriftOrOverlap(t *testing.T) {
 			}
 			skipped := 0
 			for range 3 * 365 / def.ShiftDays {
-				next, err := s.Handoff(everyone)
+				next, _, err := s.Next(everyone)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -243,7 +243,7 @@ func TestRotationOrder(t *testing.T) {
 		}
 		out := []string{s.Member}
 		for range n {
-			if s, err = s.Handoff(known); err != nil {
+			if s, _, err = s.Next(known); err != nil {
 				t.Fatal(err)
 			}
 			out = append(out, s.Member)

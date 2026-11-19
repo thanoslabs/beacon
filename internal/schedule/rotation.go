@@ -183,8 +183,18 @@ func (r rota) next(start time.Time) time.Time {
 	}
 }
 
+// after returns the first handoff later than t, however soon that is.
+func (r rota) after(t time.Time) time.Time {
+	y, m, d := t.In(r.loc).Date()
+	for day := d; ; day++ {
+		if h, ok := r.on(y, m, day); ok && h.After(t) {
+			return h
+		}
+	}
+}
+
 // State is where a rotation is: who is on call under it, since when and
-// until when.
+// until when, and the change of definition that is waiting, if any.
 type State struct {
 	// Member is the email address of the person on call, or empty when no
 	// member of the rotation is a user.
@@ -195,6 +205,10 @@ type State struct {
 	NextHandoff time.Time
 	// Definition is the rotation in force.
 	Definition Definition
+	// Pending is a changed rotation that has not taken over yet, or nil.
+	Pending *Definition
+	// PendingAt is when Pending takes over. Nil means at the next handoff.
+	PendingAt *time.Time
 }
 
 // Start returns the state of a rotation that begins at now: the first member
@@ -208,21 +222,127 @@ func Start(d Definition, now time.Time, known func(email string) bool) (State, e
 	return State{Member: successor(d.Members, d.Members, "", known), ShiftStart: now, NextHandoff: r.next(now), Definition: d}, nil
 }
 
-// Handoff returns the state after the handoff that is due at s.NextHandoff:
-// the member after the one on call takes over, and members who are not users
-// are passed over.
-func (s State) Handoff(known func(email string) bool) (State, error) {
-	r, err := s.Definition.compile()
-	if err != nil {
-		return State{}, err
+// WithDefinition returns the state once the files define the rotation as d,
+// read at now. This is the whole of what a change in the files does at the
+// moment it is applied: it never moves the shift in progress.
+//
+//   - When d is the rotation in force, nothing is pending. That also takes
+//     back a change that was waiting.
+//   - Otherwise d is pending. It takes over at the next handoff, or at
+//     effectiveFrom when that is given. A date that has passed means now.
+func (s State) WithDefinition(d Definition, effectiveFrom *time.Time, now time.Time) State {
+	s.Pending, s.PendingAt = nil, nil
+	if d.Equal(s.Definition) {
+		return s
 	}
-	at := s.NextHandoff
-	return State{
-		Member:      successor(s.Definition.Members, s.Definition.Members, s.Member, known),
-		ShiftStart:  at,
-		NextHandoff: r.next(at),
-		Definition:  s.Definition,
-	}, nil
+	s.Pending = &d
+	if effectiveFrom != nil {
+		at := *effectiveFrom
+		if at.Before(now) {
+			at = now
+		}
+		s.PendingAt = &at
+	}
+	return s
+}
+
+// Due returns when the state next changes: at the next handoff, or sooner
+// when a pending rotation takes over at a stated time before it.
+func (s State) Due() time.Time {
+	if s.Pending != nil && s.PendingAt != nil && s.PendingAt.Before(s.NextHandoff) {
+		return *s.PendingAt
+	}
+	return s.NextHandoff
+}
+
+// takeover returns when the pending rotation takes over.
+func (s State) takeover() time.Time {
+	if s.PendingAt != nil {
+		return *s.PendingAt
+	}
+	return s.NextHandoff
+}
+
+// Next returns the state after the change that is due at s.Due(), and
+// whether that change ended the shift in progress.
+//
+// With nothing pending, or a pending rotation whose time has not come, it is
+// an ordinary handoff: the member after the one on call takes over, and
+// members who are not users are passed over.
+//
+// A pending rotation takes over in one of two ways, and neither takes a
+// shift away from the person who has it:
+//
+//   - At a handoff, which is the rule unless a time is stated. The handoff
+//     happens as it would have, and the person who takes over is the one who
+//     follows in the new order. Their shift ends at the first handoff of the
+//     new rotation that leaves them a full shift.
+//   - At a stated time in the middle of a shift. Whoever is on call stays on
+//     call, and their shift ends at the first handoff of the new rotation
+//     after that time. Only when the new rotation no longer has them does a
+//     shift end then, and the person who follows takes the rest of it.
+func (s State) Next(known func(email string) bool) (next State, shiftEnded bool, err error) {
+	at := s.Due()
+	if s.Pending == nil || (s.PendingAt != nil && s.PendingAt.After(at)) {
+		r, err := s.Definition.compile()
+		if err != nil {
+			return State{}, false, err
+		}
+		s.Member = successor(s.Definition.Members, s.Definition.Members, s.Member, known)
+		s.ShiftStart, s.NextHandoff = at, r.next(at)
+		return s, true, nil
+	}
+
+	old, d := s.Definition, *s.Pending
+	r, err := d.compile()
+	if err != nil {
+		return State{}, false, err
+	}
+	next = State{Member: s.Member, ShiftStart: s.ShiftStart, Definition: d}
+	switch {
+	case at.Equal(s.NextHandoff):
+		next.Member = successor(old.Members, d.Members, s.Member, known)
+		next.ShiftStart, next.NextHandoff, shiftEnded = at, r.next(at), true
+	case s.Member != "" && slices.Contains(d.Members, s.Member):
+		next.NextHandoff = r.after(at)
+	default:
+		next.Member = successor(old.Members, d.Members, s.Member, known)
+		next.ShiftStart, next.NextHandoff, shiftEnded = at, r.after(at), true
+	}
+	return next, shiftEnded, nil
+}
+
+// Span is a stretch of time during which one person is on call.
+type Span struct {
+	// Member is an email address, or empty when nobody is on call.
+	Member string
+	Start  time.Time
+	End    time.Time
+}
+
+// maxProjected bounds how many shifts Project works out.
+const maxProjected = 5000
+
+// Project returns the shifts the rotation will have from the one in
+// progress until the given time, if nothing but time changes: the same
+// arithmetic that the store carries out, run ahead. The last shift may end
+// after until.
+func (s State) Project(until time.Time, known func(email string) bool) ([]Span, error) {
+	var out []Span
+	for range maxProjected {
+		next, ended, err := s.Next(known)
+		if err != nil {
+			return nil, err
+		}
+		if ended {
+			out = append(out, Span{Member: s.Member, Start: s.ShiftStart, End: next.ShiftStart})
+		}
+		if !next.ShiftStart.Before(until) && ended {
+			return out, nil
+		}
+		s = next
+	}
+	return nil, fmt.Errorf("more than %d shifts lie before %s", maxProjected, until.Format(time.RFC3339))
 }
 
 // successor returns who follows current in the order of next, among the
