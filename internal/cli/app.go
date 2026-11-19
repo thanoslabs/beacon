@@ -107,6 +107,8 @@ func (p *provisioner) routes() []access.Route {
 		{Pattern: "POST " + slack.InteractionsPath, Level: access.Public, Handler: http.HandlerFunc(p.handleInteractions)},
 		{Pattern: "POST " + ReloadPath, Level: access.Admin, Handler: http.HandlerFunc(p.handleReload)},
 	}
+	// The description of the API is the same for everyone.
+	routes = append(routes, api.OpenAPIRoutes()...)
 	routes = append(routes, p.auth.Routes()...)
 	// Members see alerts and respond to them.
 	routes = append(routes, p.alertsAPI.Routes()...)

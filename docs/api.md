@@ -6,6 +6,15 @@ date: 2026-11-19
 
 Beacon has one REST API, under `/api/v1`. The web interface will be built on it, and automation uses the same routes with an API token. This page describes how the API behaves as a whole, and the routes of alerts. The routes of other things are described on the pages about those things; [Routes](#routes) lists them.
 
+## OpenAPI description
+
+The API is described in OpenAPI 3.0: every route, who may call it, its parameters and the shape of every answer.
+
+- A running Beacon serves it at `GET /api/v1/openapi.json` and `GET /api/v1/openapi.yaml`, without a credential. It describes the version that is running.
+- It is published with this documentation as [openapi.yaml](openapi.yaml), and [[api-reference]] lists every route from it.
+
+The description is written by hand and held to the server by tests, so it does not drift: a route that is not described, or a described route that does not exist, fails the build, and so does an answer of the real server that has a field the description lacks, or lacks one it requires. Each operation carries `x-beacon-access`, which is `public`, `member` or `admin`.
+
 ## Who may call it
 
 Every route needs a credential, except the few that [[access#Who may use what]] lists as open. There are two:
@@ -53,7 +62,7 @@ A list that can grow without bound is **paged**. It takes `limit`, 50 unless giv
 
 **Filters** are query parameters. A filter that takes several values takes them repeated or separated by commas: `?status=firing&status=acknowledged` and `?status=firing,acknowledged` are the same. A parameter that a list does not know is refused with `400`.
 
-**Times** are RFC 3339 in UTC, such as `2026-12-01T10:12:00Z`. A time in a request may be in any zone. **Durations** are written as in the configuration: `30m`, `2h`, `1d`, `1w`.
+**Times** are RFC 3339 in UTC, such as `2026-12-01T10:12:00Z`, sometimes with fractions of a second. A time in a request may be in any zone. **Durations** are written as in the configuration: `30m`, `2h`, `1d`, `1w`.
 
 **Absent values** are `null`, or left out where a page says so. They are never empty strings. Arrays and objects are never `null`.
 
@@ -257,5 +266,6 @@ Users are created by signing in and cannot be changed through the API.
 | `/api/v1/me`, `/api/v1/me/identities` | [[access]], [[access#Chat accounts]] |
 | `/api/v1/tokens` | [[access#API tokens]] |
 | `/api/v1/config/reload` | [[configuration#Reload without a restart]] |
+| Every route, in one table | [[api-reference]] |
 | `/api/v1/ingest/<source>` | [[webhook]], [[alertmanager]], [[grafana]]: how alerts come in, with a source's own token |
 | `/api/v1/integrations/<name>/interactions` | [[slack#Request URL]], [[discord#Interactions endpoint]]: what chat services send |
