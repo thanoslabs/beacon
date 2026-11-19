@@ -96,7 +96,7 @@ export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmo
 ./bin/beacon hash-password      # hash a password for the bootstrap admin
 ```
 
-The server answers on these endpoints; the [API page](docs/api.md) describes how they behave as a whole. Everything that is not listed as open in the [access page](docs/access.md) needs a session, and an address that does not exist answers `401` like one that does:
+The server answers on these endpoints; the [API page](docs/api.md) describes how they behave as a whole, and the [API reference](docs/api-reference.md) lists every route from the OpenAPI description. Everything that is not listed as open in the [access page](docs/access.md) needs a session, and an address that does not exist answers `401` like one that does:
 
 | Endpoint | Purpose |
 |---|---|
@@ -108,6 +108,7 @@ The server answers on these endpoints; the [API page](docs/api.md) describes how
 | `GET /api/v1/alerts`, `GET /api/v1/alerts/<id>`, `GET /api/v1/alerts/<id>/timeline`, `POST /api/v1/alerts/<id>/acknowledge`, `.../snooze`, `.../resolve`, and the same under `/api/v1/alert-groups/<id>` | Alerts: list with filters, read, and act on one alert or on a whole group. Needs a session or a token, with either role. See the [API page](docs/api.md#alerts). |
 | `GET /api/v1/sources`, `/api/v1/integrations`, `/api/v1/escalation-policies`, `/api/v1/routing`, `/api/v1/teams`, each also by `/<name>` except routing, and `GET /api/v1/users` | What the configuration defines, for reading, without credentials, and the users. Needs a session or a token, with either role. See the [API page](docs/api.md#what-the-configuration-defines). |
 | `GET /auth/methods` | Which ways to sign in exist. Open. |
+| `GET /api/v1/openapi.json`, `GET /api/v1/openapi.yaml` | The [OpenAPI description](docs/api.md#openapi-description) of the API. Open. |
 | `POST /api/v1/config/reload` | Reloads the configuration. Needs the admin role. |
 | `GET`, `POST /api/v1/tokens`, `DELETE /api/v1/tokens/<id>` | API tokens for automation. Needs the admin role. |
 | `GET`, `POST /api/v1/silences`, `POST /api/v1/silences/preview`, `GET`, `DELETE /api/v1/silences/<id>` | Silences, and which open alerts one would match. Needs a session or a token, with either role. See the [silences page](docs/silences.md). |

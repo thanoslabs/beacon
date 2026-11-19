@@ -70,6 +70,7 @@ Beacon is closed by default. Every route needs a session unless it is on the sho
 | `POST /auth/bootstrap` | Public | Signs the [bootstrap admin](#bootstrap-admin) in. The password is checked and the attempts are bounded; `404` unless the account is enabled. |
 | `POST /api/v1/ingest/<source>` | Public | Receives alerts. The source's own token is checked; see [[webhook]]. |
 | `POST /api/v1/integrations/<name>/interactions` | Public | Receives button presses from Slack and from Discord. The service's signature is checked; see [[slack]] and [[discord]]. |
+| `GET /api/v1/openapi.json`, `GET /api/v1/openapi.yaml` | Public | The OpenAPI description of the API; see [[api#OpenAPI description]] |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Public | Probes and metrics, for machines that have no session |
 
 "Member" means anyone who is signed in or presents an API token, with either role. "Admin" needs the admin role; a member gets `403`.

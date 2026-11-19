@@ -404,6 +404,7 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	body := me{ID: p.UserID, TokenID: p.TokenID, Email: p.Email, DisplayName: p.Name, Role: p.Role}
 	if p.TokenID == "" {
 		if _, expires, err := h.session(r); err == nil {
+			expires = expires.UTC()
 			body.SessionExpiresAt = &expires
 		}
 	}

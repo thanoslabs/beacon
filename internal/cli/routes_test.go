@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/thanoslabs/beacon/internal/api"
+	"github.com/thanoslabs/beacon/internal/api/apitest"
 	"github.com/thanoslabs/beacon/internal/auth"
 	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/postgres/postgrestest"
@@ -32,6 +33,8 @@ import (
 //   - /auth/login and /auth/callback are how a person gets a session, and
 //     /auth/methods says which ways to sign in exist, which is what a
 //     sign-in page shows to anyone;
+//   - the OpenAPI description says what is in the repository of an
+//     open-source project, about no install in particular;
 //   - /auth/bootstrap is how the bootstrap admin gets one: it checks the
 //     password and bounds the attempts, and answers 404 unless the account
 //     is enabled.
@@ -42,6 +45,8 @@ var wantRoutes = []string{
 	"public POST /api/v1/ingest/{source}",
 	"public POST /api/v1/integrations/{name}/interactions",
 	"admin  POST /api/v1/config/reload",
+	"public GET /api/v1/openapi.json",
+	"public GET /api/v1/openapi.yaml",
 	"public GET /auth/login",
 	"public GET /auth/callback",
 	"public GET /auth/methods",
@@ -104,6 +109,34 @@ func TestRoutes(t *testing.T) {
 	}
 	if strings.Join(got, "\n") != strings.Join(wantRoutes, "\n") {
 		t.Fatalf("routes:\n%s\n\nwant:\n%s", strings.Join(got, "\n"), strings.Join(wantRoutes, "\n"))
+	}
+
+	// The OpenAPI description has the same routes, with the same levels: a
+	// route cannot be added without being described, and the description
+	// cannot promise a route that does not exist.
+	spec := apitest.Load(t)
+	described := map[string]string{}
+	for _, op := range spec.Operations() {
+		described[op.Key()] = op.Access
+		if op.Public != (op.Access == "public") {
+			t.Errorf("the description of %s says x-beacon-access %q, and its security says otherwise: a public route has security: [] and no other has", op.Key(), op.Access)
+		}
+		if op.Summary == "" || op.Tag == "" {
+			t.Errorf("the description of %s has no summary or no tag", op.Key())
+		}
+	}
+	for _, route := range wantRoutes {
+		fields := strings.Fields(route)
+		key := fields[1] + " " + fields[2]
+		if access, ok := described[key]; !ok {
+			t.Errorf("%s is not in the OpenAPI description (internal/api/openapi.yaml)", key)
+		} else if access != fields[0] {
+			t.Errorf("the OpenAPI description says that %s is open to %q, and the routes say %q", key, access, fields[0])
+		}
+		delete(described, key)
+	}
+	for key := range described {
+		t.Errorf("the OpenAPI description has %s, which is not a route", key)
 	}
 
 	// Against a running server, nobody is signed in. Every route that is
