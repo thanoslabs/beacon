@@ -53,5 +53,8 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
     restoreMocks: true,
+    // The same zone on every machine, one with clock changes, so that what
+    // the tests say about days and weeks does not depend on where they run.
+    env: { TZ: "America/Toronto" },
   },
 });

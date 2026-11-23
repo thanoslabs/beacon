@@ -27,6 +27,9 @@ staticClients:
       # A Beacon run by hand on port 18080, and the address the tests use.
       - http://127.0.0.1:18080/auth/callback
       - http://localhost:18080/auth/callback
+      # The development server of the web interface (npm run dev, in web/),
+      # which passes sign-in on to a Beacon behind it.
+      - http://127.0.0.1:5173/auth/callback
 
 enablePasswordDB: true
 

@@ -12,9 +12,31 @@ interface NavItem {
 interface NavSection {
   heading: string;
   items: NavItem[];
+  adminOnly?: boolean;
 }
 
-const sections: NavSection[] = [{ heading: "You", items: [{ to: "/account", label: "Account" }] }];
+const sections: NavSection[] = [
+  {
+    heading: "Respond",
+    items: [
+      { to: "/alerts", label: "Alerts" },
+      { to: "/on-call", label: "On call" },
+      { to: "/silences", label: "Silences" },
+    ],
+  },
+  {
+    heading: "Configuration",
+    items: [
+      { to: "/escalation-policies", label: "Escalation policies" },
+      { to: "/routing", label: "Routing" },
+      { to: "/teams", label: "Teams" },
+      { to: "/integrations", label: "Sources and integrations" },
+    ],
+  },
+  { heading: "You", items: [{ to: "/account", label: "Account" }] },
+  // Offered to admins only. The API refuses a member whatever the app shows.
+  { heading: "Administration", adminOnly: true, items: [{ to: "/tokens", label: "API tokens" }] },
+];
 
 /** The frame around every page behind the sign-in. */
 export function Layout() {
@@ -63,7 +85,9 @@ export function Layout() {
           Menu
         </button>
         <nav className="nav" id="navigation" aria-label="Main">
-          {sections.map((section) => (
+          {sections
+            .filter((section) => !section.adminOnly || me.role === "admin")
+            .map((section) => (
             <div key={section.heading}>
               <h2 className="nav-heading">{section.heading}</h2>
               <ul>

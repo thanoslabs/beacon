@@ -157,7 +157,7 @@ func newClient() *http.Client {
 // answer can repeat one.
 func (c *Channel) Send(ctx context.Context, m notify.Message) (string, error) {
 	now := c.now()
-	body, err := json.Marshal(build(m, now, c.alertURL))
+	body, err := json.Marshal(build(m, now, c.alertURL, c.alertPage))
 	if err != nil {
 		return "", notify.Permanent(fmt.Errorf("webhook: encode the payload: %w", err))
 	}
@@ -222,4 +222,13 @@ func (c *Channel) alertURL(id string) string {
 		return ""
 	}
 	return c.publicURL + "/api/v1/alerts/" + url.PathEscape(id)
+}
+
+// alertPage returns the address of an alert's page in the web interface, or
+// nothing when Beacon does not know its own address.
+func (c *Channel) alertPage(id string) string {
+	if c.publicURL == "" || id == "" {
+		return ""
+	}
+	return c.publicURL + "/alerts/" + url.PathEscape(id)
 }

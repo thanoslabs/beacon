@@ -28,3 +28,27 @@ export function formatDateTime(value: string | Date, { timeZone, locale }: ZoneO
 export function viewerZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
+
+/**
+ * How long ago, or how far ahead: "3 min ago", "in 2 hr". Under a minute is
+ * "just now", so that a page that is watched does not count seconds.
+ */
+export function formatRelative(value: string | Date, now: Date, locale?: string): string {
+  const date = typeof value === "string" ? new Date(value) : value;
+  const seconds = Math.round((date.getTime() - now.getTime()) / 1000);
+  if (Number.isNaN(seconds)) {
+    return "unknown time";
+  }
+  const size = Math.abs(seconds);
+  if (size < 60) {
+    return seconds > 0 ? "in under a minute" : "just now";
+  }
+  const format = new Intl.RelativeTimeFormat(locale, { numeric: "always", style: "short" });
+  if (size < 3600) {
+    return format.format(Math.trunc(seconds / 60), "minute");
+  }
+  if (size < 86_400) {
+    return format.format(Math.trunc(seconds / 3600), "hour");
+  }
+  return format.format(Math.trunc(seconds / 86_400), "day");
+}

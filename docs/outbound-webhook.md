@@ -104,7 +104,8 @@ This is version `1`. Fields may be added to it without a new version, so **a rec
       "service": "postgres",
       "started_at": "2026-03-01T12:00:00Z",
       "acknowledged_at": "2026-03-01T12:01:00Z",
-      "url": "https://beacon.example.com/api/v1/alerts/9b2d6c1e-0a4f-4a57-8a0c-5f3c7d2e1b90"
+      "url": "https://beacon.example.com/api/v1/alerts/9b2d6c1e-0a4f-4a57-8a0c-5f3c7d2e1b90",
+      "web_url": "https://beacon.example.com/alerts/9b2d6c1e-0a4f-4a57-8a0c-5f3c7d2e1b90"
     }
   ],
   "alerts_omitted": 0,
@@ -138,7 +139,8 @@ This is version `1`. Fields may be added to it without a new version, so **a rec
 | `alerts[].service` | string | The service routing gave the alert. Absent when it has none. |
 | `alerts[].started_at` | time | When the alert began to fire |
 | `alerts[].acknowledged_at`, `alerts[].snoozed_until`, `alerts[].resolved_at` | time | Absent unless the alert is in that state |
-| `alerts[].url` | string | The alert in Beacon's API. Absent when Beacon does not know its own address (`auth.public_url`). |
+| `alerts[].url` | string | The alert in Beacon's API ([[api#Alerts]]), for a program that reads it with an API token. Absent when Beacon does not know its own address (`auth.public_url`). |
+| `alerts[].web_url` | string | The page of the alert in the [[web|web interface]], for a person: the link to put into a ticket or a message. Absent like `url`. Added to version 1 when the web interface arrived; `url` kept its meaning. |
 | `last_change` | object | The latest state change of the alert the group's status is taken from: its `type` (`fired`, `acknowledged`, `snoozed`, `snooze_ended` or `resolved`), when, and who: `actor_type` is `user`, `api_token`, `source` or `system`, and `actor_name` a person's name, `the source` or `Beacon`. Absent when the timeline has none. |
 | `paged` | array | The people the escalation policy has paged so far, or meant to. `not_connected` lists the chat services in which a person has no linked account ([[escalation#Who is skipped]]). |
 

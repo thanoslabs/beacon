@@ -4,7 +4,7 @@ tags: [api, reference]
 date: 2026-11-19
 ---
 
-Beacon has one REST API, under `/api/v1`. The web interface will be built on it, and automation uses the same routes with an API token. This page describes how the API behaves as a whole, and the routes of alerts. The routes of other things are described on the pages about those things; [Routes](#routes) lists them.
+Beacon has one REST API, under `/api/v1`. The [[web|web interface]] is built on it, and automation uses the same routes with an API token. This page describes how the API behaves as a whole, and the routes of alerts. The routes of other things are described on the pages about those things; [Routes](#routes) lists them.
 
 ## OpenAPI description
 

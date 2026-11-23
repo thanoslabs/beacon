@@ -4,7 +4,7 @@ tags: [processing, reference]
 date: 2026-11-18
 ---
 
-A silence keeps Beacon quiet about the alerts that match some labels, for a period: during planned work, or while a known problem is being fixed. Silences are runtime state. People create and end them through the API; they are not part of the configuration files.
+A silence keeps Beacon quiet about the alerts that match some labels, for a period: during planned work, or while a known problem is being fixed. Silences are runtime state. People create and end them in the [[web#Silences|web interface]] or through the API; they are not part of the configuration files.
 
 A silenced alert is still received, stored and shown with its timeline. It is only kept out of notifications.
 
