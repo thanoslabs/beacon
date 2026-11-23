@@ -29,6 +29,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/schedule"
 	"github.com/thanoslabs/beacon/internal/silence"
 	"github.com/thanoslabs/beacon/internal/slack"
+	"github.com/thanoslabs/beacon/internal/web"
 	"github.com/thanoslabs/beacon/internal/webhook"
 )
 
@@ -71,6 +72,8 @@ type provisioner struct {
 	identities     *identity.Store
 	identityAPI    *identity.Handler
 	linker         *identity.Linker
+	// web serves the web interface, to every address that is not the API's.
+	web http.Handler
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -119,7 +122,12 @@ func (p *provisioner) routes() []access.Route {
 	// So are the overrides of schedules.
 	routes = append(routes, p.scheduleAPI.Routes()...)
 	// A person sees their own chat accounts.
-	return append(routes, p.identityAPI.Routes()...)
+	routes = append(routes, p.identityAPI.Routes()...)
+	// The web interface: every GET that no route above takes. It is the same
+	// files for everyone, and shows nothing until the API has answered a
+	// session. The handler gives the addresses of the API back to the
+	// server, which refuses them as before.
+	return append(routes, access.Route{Pattern: web.Pattern, Level: access.Public, Handler: p.web})
 }
 
 // handleInteractions hands what a chat service sends about the integration

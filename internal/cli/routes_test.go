@@ -16,6 +16,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/schedule"
 	"github.com/thanoslabs/beacon/internal/server"
 	"github.com/thanoslabs/beacon/internal/silence"
+	"github.com/thanoslabs/beacon/internal/web"
 )
 
 // wantRoutes is every route of beacon serve and who may use it. It is
@@ -37,7 +38,15 @@ import (
 //     open-source project, about no install in particular;
 //   - /auth/bootstrap is how the bootstrap admin gets one: it checks the
 //     password and bounds the attempts, and answers 404 unless the account
-//     is enabled.
+//     is enabled;
+//   - "GET /" is the web interface, at every address that no route above
+//     takes: one page and its scripts and styles, the same for everyone and
+//     published with the project, which hold nothing of an install. A
+//     stranger gets the sign-in page; everything it then shows is asked of
+//     the API, which refuses a stranger as before. The handler never answers
+//     an address under /api/ or /auth/ itself: those fall through to what
+//     the server says to an address that is no route, so a mistyped API
+//     address is still 401 and JSON, never a page.
 var wantRoutes = []string{
 	"public GET /healthz",
 	"public GET /readyz",
@@ -91,7 +100,12 @@ var wantRoutes = []string{
 	"member GET /api/v1/me/identities",
 	"member POST /api/v1/me/identities/{integration}/link-code",
 	"member DELETE /api/v1/me/identities/{integration}",
+	"public GET /",
 }
+
+// notAPI are the routes that the OpenAPI description leaves out, because
+// they are not part of the API: the web interface is pages for a browser.
+var notAPI = map[string]bool{"GET /": true}
 
 var pathParamRE = regexp.MustCompile(`\{[a-z]+\}`)
 
@@ -100,7 +114,7 @@ func TestRoutes(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	srv := server.New(server.Config{}, logger, nil, server.NewRegistry())
 	for _, route := range (&provisioner{auth: auth.NewHandler(logger, nil), alertsAPI: api.NewAlerts(logger, nil), provisionedAPI: api.NewProvisioned(logger, nil), silences: silence.NewHandler(logger, nil), scheduleAPI: schedule.NewHandler(logger, nil),
-		identityAPI: identity.NewHandler(logger, nil, nil)}).routes() {
+		identityAPI: identity.NewHandler(logger, nil, nil), web: http.NotFoundHandler()}).routes() {
 		srv.Handle(route)
 	}
 	var got []string
@@ -128,6 +142,12 @@ func TestRoutes(t *testing.T) {
 	for _, route := range wantRoutes {
 		fields := strings.Fields(route)
 		key := fields[1] + " " + fields[2]
+		if notAPI[key] {
+			if _, ok := described[key]; ok {
+				t.Errorf("the OpenAPI description has %s, which is not part of the API", key)
+			}
+			continue
+		}
 		if access, ok := described[key]; !ok {
 			t.Errorf("%s is not in the OpenAPI description (internal/api/openapi.yaml)", key)
 		} else if access != fields[0] {
@@ -175,10 +195,38 @@ func TestRoutes(t *testing.T) {
 	if closed != 41 {
 		t.Errorf("%d routes refused a stranger, want 41", closed)
 	}
-	for _, probe := range []string{"GET /", "PUT /api/v1/alerts", "DELETE /api/v1/alerts/x", "GET /api/v1/alert-groups", "POST /api/v1/alerts/x/delete", "POST /api/v1/teams", "DELETE /api/v1/teams/x", "PUT /api/v1/sources/x", "POST /api/v1/integrations", "DELETE /api/v1/escalation-policies/x", "PUT /api/v1/routing", "POST /api/v1/users", "POST /api/v1/schedules", "DELETE /api/v1/schedules/x", "GET /api/v1/schedules/x/overrides/y", "PUT /api/v1/schedules/x/overrides", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload", "GET /admin"} {
+	for _, probe := range []string{"PUT /api/v1/alerts", "DELETE /api/v1/alerts/x", "GET /api/v1/alert-groups", "POST /api/v1/alerts/x/delete", "POST /api/v1/teams", "DELETE /api/v1/teams/x", "PUT /api/v1/sources/x", "POST /api/v1/integrations", "DELETE /api/v1/escalation-policies/x", "PUT /api/v1/routing", "POST /api/v1/users", "POST /api/v1/schedules", "DELETE /api/v1/schedules/x", "GET /api/v1/schedules/x/overrides/y", "PUT /api/v1/schedules/x/overrides", "PUT /api/v1/tokens", "DELETE /api/v1/me", "GET /auth/logout", "PUT /healthz", "GET /api/v1/config/reload",
+		// The web interface takes every other GET, and must leave these to
+		// the server: addresses of the API and of sign-in that are no
+		// route, whatever they look like.
+		"GET /api", "GET /api/", "GET /api/v1", "GET /api/v1/no-such-thing", "GET /api/v2/alerts", "GET /api/v1/alerts/x/y", "HEAD /api/v1/no-such-thing", "GET /auth", "GET /auth/", "GET /auth/no-such-thing", "GET /api/v1/../v1/no-such-thing", "GET /api//v1/alerts/x/y",
+		// And it takes only GET: nothing can be sent to a page.
+		"POST /", "PUT /alerts", "DELETE /admin", "POST /index.html", "POST /assets/index.js"} {
 		method, path, _ := strings.Cut(probe, " ")
-		if code, body := request(method, path); code != http.StatusUnauthorized {
+		code, body := request(method, path)
+		if code != http.StatusUnauthorized {
 			t.Errorf("%s without a session = %d %s, want 401", probe, code, body)
+		}
+		if strings.Contains(body, "<") {
+			t.Errorf("%s was answered with a page: %s", probe, body)
+		}
+	}
+
+	// A stranger does get the web interface, at every other address: the
+	// page, or the notice of a binary that was built without it. Neither
+	// holds anything of this install.
+	for _, path := range []string{"/", "/alerts", "/admin", "/no-such-page", "/apiary"} {
+		resp, err := http.Get(running.baseURL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page, _ := io.ReadAll(resp.Body)
+		resp.Body.Close() //nolint:errcheck,gosec // test cleanup
+		if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") || !strings.Contains(string(page), "<html") {
+			t.Errorf("GET %s = %d %s %q, want the web interface", path, resp.StatusCode, resp.Header.Get("Content-Type"), page)
+		}
+		if resp.Header.Get("Content-Security-Policy") != web.ContentSecurityPolicy || resp.Header.Get("X-Frame-Options") != "DENY" || resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("GET %s lacks the headers of the web interface: %v", path, resp.Header)
 		}
 	}
 }
