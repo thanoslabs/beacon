@@ -28,10 +28,10 @@ The page offers the ways to sign in that the configuration has ([[access]]): the
 | Alerts | The alerts, newest first, with filters for state, severity and team, and the buttons to acknowledge, snooze and resolve |
 | An alert | What it says (labels, annotations, links), what routing decided for it, its group, and its timeline, with the same buttons |
 | On call | Who is on call now, for every schedule, team by team |
-| A schedule | Who is on call, the shifts of four weeks at a time, past and to come, and the rotation as the files define it |
+| A schedule | Who is on call, the shifts of four weeks at a time, past and to come, its overrides, with the ways to add and remove one, and the rotation as the files define it |
 | Account | Who you are signed in as, your role, and until when the session lasts |
 
-The pages for overrides, silences and the rest of what the configuration defines follow; this page grows with them.
+The pages for silences and the rest of what the configuration defines follow; this page grows with them.
 
 What the configuration files define is read-only in the app, as in the API: it is changed in the files ([[configuration]]).
 
@@ -65,6 +65,16 @@ The page of a schedule shows four weeks at a time, starting with last week: a ba
 **Times are in the time zone of your device**, like everywhere in the app. A rotation hands over in the zone its schedule names, so the page states that zone, and a handoff at 09:00 in London is shown at 04:00 to someone in Toronto.
 
 The **rotation** is shown as the files define it, with the members in order, and is marked as managed in the configuration files: it cannot be changed here. When the files hold a changed rotation that has not taken over yet, the page shows it too, with the moment it takes over ([[schedules#Changing a schedule]]).
+
+### Overrides
+
+An override puts someone on call for a period in place of whoever the rotation has ([[schedules#Overrides]]). The page of a schedule lists the overrides in force and to come, with who covers, when, why and who added each.
+
+![Adding an override](images/web/override-light.png)
+
+**Add an override** asks who covers, when it ends, and optionally when it starts (now, when left empty) and why. The times are typed in the zone of your device. Beacon checks the request, and what it refuses is said in the dialog, at the field at fault. **Remove** asks first, because it changes who is on call: an override in force ends at once, and whoever is beneath takes over, an earlier override or else the rotation.
+
+Members and admins alike add and remove overrides, for themselves and for others. Who is on call, the calendar and the on-call page follow at once.
 
 ## Look and use
 
