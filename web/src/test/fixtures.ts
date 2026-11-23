@@ -59,3 +59,39 @@ export const teams = {
     { name: "payments", display_name: "Payments", groups: [], members: [], schedules: [], provisioned: true },
   ],
 };
+
+type Schedule = Schemas["Schedule"];
+type Shift = Schemas["Shift"];
+type User = Schemas["User"];
+
+export function userOf(email: string, name: string, over: Partial<User> = {}): User {
+  return {
+    id: `7a0d0000-0000-4000-8000-${String(next++).padStart(12, "0")}`,
+    email,
+    display_name: name,
+    role: "member",
+    disabled: false,
+    created_at: "2026-11-02T09:00:00Z",
+    last_sign_in_at: "2026-12-01T08:30:00Z",
+    teams: ["platform"],
+    ...over,
+  };
+}
+
+export const users = { users: [userOf("ada@example.com", "Ada Example", { role: "admin" }), userOf("grace@example.com", "Grace Example")] };
+
+export function scheduleOf(over: Partial<Schedule> = {}): Schedule {
+  const name = over.name ?? "platform-primary";
+  return {
+    name,
+    team: "platform",
+    rotation: { time_zone: "Europe/London", members: ["ada@example.com", "grace@example.com"], shift_length: "1w", handoff_time: "09:00", handoff_day: "monday" },
+    next_handoff: "2026-12-07T09:00:00Z",
+    on_call: { schedule: name, user: "ada@example.com", since: "2026-11-30T09:00:00Z", until: "2026-12-07T09:00:00Z", rotation_user: "ada@example.com" },
+    ...over,
+  };
+}
+
+export function shiftOf(user: string, starts_at: string, ends_at: string, over: Partial<Shift> = {}): Shift {
+  return { user, starts_at, ends_at, kind: "rotation", planned: false, ...over };
+}

@@ -6,6 +6,8 @@ import { Account } from "../pages/Account";
 import { AlertDetail } from "../pages/alerts/AlertDetail";
 import { AlertList } from "../pages/alerts/AlertList";
 import { Login } from "../pages/Login";
+import { OnCall } from "../pages/schedules/OnCall";
+import { SchedulePage } from "../pages/schedules/SchedulePage";
 import { NotFound } from "../pages/NotFound";
 import { Layout } from "./Layout";
 import { SessionProvider, forgetSession, useMeQuery } from "./session";
@@ -56,6 +58,8 @@ export function App() {
           <Route index element={<Navigate to={homePath} replace />} />
           <Route path="alerts" element={<AlertList />} />
           <Route path="alerts/:id" element={<AlertDetail />} />
+          <Route path="on-call" element={<OnCall />} />
+          <Route path="schedules/:name" element={<SchedulePage />} />
           <Route path="account" element={<Account />} />
           <Route path="*" element={<NotFound />} />
         </Route>

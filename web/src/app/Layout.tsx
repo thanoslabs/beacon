@@ -15,7 +15,13 @@ interface NavSection {
 }
 
 const sections: NavSection[] = [
-  { heading: "Respond", items: [{ to: "/alerts", label: "Alerts" }] },
+  {
+    heading: "Respond",
+    items: [
+      { to: "/alerts", label: "Alerts" },
+      { to: "/on-call", label: "On call" },
+    ],
+  },
   { heading: "You", items: [{ to: "/account", label: "Account" }] },
 ];
 
