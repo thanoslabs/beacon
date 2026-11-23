@@ -16,21 +16,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
+      # Committed files that are sensitive by name (environment files,
+      # private keys, key stores) and private key material in any text file.
       - name: Check for sensitive files
-        run: |
-          # Fail if .env, secrets, or private keys are committed
-          if git grep -l "\.env\|PRIVATE_KEY\|AWS_SECRET" --cached 2>/dev/null; then
-            echo "Error: sensitive files committed"
-            exit 1
-          fi
+        run: .github/scripts/check-sensitive-files.sh
 
+      # Every document of every committed YAML file must parse.
       - name: Validate YAML files
-        run: |
-          for f in $(find . -name "*.yaml" -o -name "*.yml" 2>/dev/null | grep -v node_modules); do
-            python3 -c "import yaml, sys; yaml.safe_load(open('$f'))" 2>/dev/null || echo "Invalid YAML: $f"
-          done
+        run: .github/scripts/check-yaml.sh
+
+      # Both checks pass on a clean tree, which says little by itself: this
+      # adds one offending file at a time to a copy and expects a failure.
+      - name: Check that the two checks above can fail
+        run: .github/scripts/test-checks.sh
 
   go:
     runs-on: ubuntu-latest
