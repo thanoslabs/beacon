@@ -11,12 +11,14 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:beacon": "node e2e/serve.mjs --dev",
     "build": "tsc --build && vite build",
     "typecheck": "tsc --build",
     "lint": "eslint .",
     "test": "vitest run",
     "generate": "openapi-typescript ../internal/api/openapi.yaml --output src/api/schema.d.ts",
-    "generate:check": "openapi-typescript ../internal/api/openapi.yaml --output src/api/schema.d.ts --check"
+    "generate:check": "openapi-typescript ../internal/api/openapi.yaml --output src/api/schema.d.ts --check",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "@tanstack/react-query": "5.108.4",

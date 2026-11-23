@@ -1,0 +1,77 @@
+# The configuration of the Beacon that the browser tests run against (see
+# ../serve.mjs). It signs people in through the Dex of compose.yaml, whose
+# users are in dev/dex/config.yaml, and sends email to the Mailpit there,
+# which delivers nothing. Every value here is public and for tests only.
+
+sources:
+  - name: default
+    type: webhook
+    token: {env: BEACON_SOURCE_TOKEN}
+
+integrations:
+  - name: email
+    type: email
+    email:
+      host: 127.0.0.1
+      port: 1025
+      tls: none
+      username: beacon
+      password: {env: BEACON_SMTP_PASSWORD}
+      from: beacon@example.invalid
+
+teams:
+  - name: platform
+    display_name: Platform
+    groups: [platform-engineers]
+    # hopper never signs in: a listed member that is no user.
+    members: [ada@example.com, hopper@example.com]
+
+schedules:
+  - name: platform-primary
+    team: platform
+    time_zone: Europe/London
+    rotation:
+      members: [ada@example.com, grace@example.com]
+      shift_length: 1w
+      handoff: {day: monday, time: "09:00"}
+
+escalation_policies:
+  - name: platform
+    repeat: 1
+    steps:
+      - notify:
+          - schedule: platform-primary
+        timeout: 5m
+      - notify:
+          - team: platform
+          - channel: oncall@example.invalid
+            integration: email
+        timeout: 10m
+
+routing:
+  group_by: [alertname]
+  # A notification follows a delivery at once, so the tests wait for little.
+  group_wait: 0s
+  group_interval: 1s
+  default:
+    team: platform
+    escalation_policy: platform
+  rules:
+    - name: database
+      match: {service: postgres}
+      match_re: {severity: "critical|page"}
+      team: platform
+      service: postgres
+      escalation_policy: platform
+
+auth:
+  public_url: http://127.0.0.1:18080
+  session_lifetime: 1h
+  oidc:
+    issuer: http://127.0.0.1:5556/dex
+    client_id: beacon
+    client_secret: {env: BEACON_OIDC_CLIENT_SECRET}
+    scopes: [openid, profile, email, groups]
+  roles:
+    admin: [beacon-admins]
+    member: [platform-engineers]
