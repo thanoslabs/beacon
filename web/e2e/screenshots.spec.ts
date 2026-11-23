@@ -115,4 +115,14 @@ test.describe("screenshots", () => {
     await capture(page, "silence-new");
     await signOut(page);
   });
+
+  test("what the configuration defines", async ({ page }) => {
+    await signIn(page, "ada");
+    for (const [path, name] of [["/escalation-policies", "escalation-policies"], ["/routing", "routing"], ["/teams", "teams"], ["/integrations", "integrations"]] as const) {
+      await page.goto(path);
+      await expect(page.getByRole("main").locator(".card").first()).toBeVisible();
+      await capture(page, name);
+    }
+    await signOut(page);
+  });
 });
