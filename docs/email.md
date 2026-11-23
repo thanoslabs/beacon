@@ -60,7 +60,7 @@ routing:
 
 ### The link to the alert
 
-A message links to the alert in Beacon when Beacon knows its own address, which is `auth.public_url` ([[access]]). Without it, the log says at start that emails will carry no such link. The link leads to the alert in Beacon's API ([[api#Alerts]]), which shows it to someone who is signed in; the web interface will take its place when it exists.
+A message links to the alert in Beacon when Beacon knows its own address, which is `auth.public_url` ([[access]]). Without it, the log says at start that emails will carry no such link. The link leads to the page of the alert in the [[web|web interface]], which asks someone who is not signed in to sign in and then shows the alert. Following the link changes nothing: acknowledging, snoozing and resolving are buttons on that page.
 
 ## The message
 
