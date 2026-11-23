@@ -110,6 +110,49 @@ jobs:
       - name: Build
         run: npm run build
 
+  # A real browser against the real binary, with the web interface embedded
+  # in it: sign-in through Dex and everything a person does in the app, and
+  # an accessibility check of each view.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5.2.9
+
+      - name: Build the web interface
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Beacon
+        run: go build -o bin/beacon ./cmd/beacon
+
+      - name: Start Postgres, Dex and Mailpit
+        run: docker compose up --detach --wait postgres dex mailpit
+
+      # The browser's version is fixed by the version of the test package.
+      - name: Install the browser
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Test in the browser
+        working-directory: web
+        run: npx playwright test
+
+      - name: Keep the report of a failure
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: browser-test-report
+          path: |
+            web/playwright-report
+            web/test-results
+          retention-days: 7
+
   docker:
     runs-on: ubuntu-latest
     steps:

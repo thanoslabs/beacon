@@ -125,6 +125,17 @@
       ]
     },
     {
+      "description": "The browser of the browser tests comes with this package, so the two always change together.",
+      "matchDatasources": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "@playwright/test",
+        "@axe-core/playwright"
+      ],
+      "groupName": "browser tests"
+    },
+    {
       "matchUpdateTypes": [
         "major"
       ],
