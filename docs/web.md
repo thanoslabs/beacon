@@ -27,9 +27,11 @@ The page offers the ways to sign in that the configuration has ([[access]]): the
 |---|---|
 | Alerts | The alerts, newest first, with filters for state, severity and team, and the buttons to acknowledge, snooze and resolve |
 | An alert | What it says (labels, annotations, links), what routing decided for it, its group, and its timeline, with the same buttons |
+| On call | Who is on call now, for every schedule, team by team |
+| A schedule | Who is on call, the shifts of four weeks at a time, past and to come, and the rotation as the files define it |
 | Account | Who you are signed in as, your role, and until when the session lasts |
 
-The pages for schedules, silences and what the configuration defines follow; this page grows with them.
+The pages for overrides, silences and the rest of what the configuration defines follow; this page grows with them.
 
 What the configuration files define is read-only in the app, as in the API: it is changed in the files ([[configuration]]).
 
@@ -49,6 +51,20 @@ The page of an alert has its timeline: when it fired, each escalation step with 
 > Labels, annotations and links are written by whoever can send alerts to Beacon. The app shows them as text, never as markup, and makes a link of an address only when it is an `http` or `https` address.
 
 Acting on a whole group at once is in chat and in the API ([[api#Groups]]); the app acts on one alert at a time.
+
+## On call and schedules
+
+![Who is on call](images/web/on-call-light.png)
+
+**On call** answers who is on call now ([[schedules#Who is on call]]) for every schedule, under the team that owns it: the person, until when, and, during an override, for whom they cover and why. It marks the schedules on which it is you. A schedule with nobody on call says so; that is a gap in coverage, not a fault ([[schedules]]).
+
+![The page of a schedule](images/web/schedule-light.png)
+
+The page of a schedule shows four weeks at a time, starting with last week: a bar for each week and, below, the same shifts as a list. Shifts that are over come from the record and are never recomputed; the rest is the plan as the rotation and the overrides stand now. **Earlier** and **Later** move by four weeks, and the week is part of the address.
+
+**Times are in the time zone of your device**, like everywhere in the app. A rotation hands over in the zone its schedule names, so the page states that zone, and a handoff at 09:00 in London is shown at 04:00 to someone in Toronto.
+
+The **rotation** is shown as the files define it, with the members in order, and is marked as managed in the configuration files: it cannot be changed here. When the files hold a changed rotation that has not taken over yet, the page shows it too, with the moment it takes over ([[schedules#Changing a schedule]]).
 
 ## Look and use
 
