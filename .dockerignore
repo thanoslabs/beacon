@@ -4,3 +4,11 @@
 !go.sum
 !cmd/
 !internal/
+!web/
+# The image builds the web interface itself: what a checkout has built or
+# installed stays out.
+internal/web/dist/*
+!internal/web/dist/.gitkeep
+web/node_modules/
+web/test-results/
+web/playwright-report/

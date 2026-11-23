@@ -98,9 +98,7 @@ func New(cfg Config, logger *slog.Logger, db Pinger, registry *prometheus.Regist
 	// Everything else is denied by default: a path that no route matches
 	// answers 401 to a stranger, like a route that exists, and 404 only to
 	// someone who is signed in.
-	s.mux.Handle("/", s.guard.Wrap(access.Route{Level: access.Member, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.writeJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
-	})}))
+	s.mux.Handle("/", s.NotFound())
 
 	quiet := map[string]bool{PathLiveness: true, PathReadiness: true, PathMetrics: true}
 	// Outermost first: the identifier exists before anything is logged, and
@@ -126,6 +124,16 @@ func New(cfg Config, logger *slog.Logger, db Pinger, registry *prometheus.Regist
 func (s *Server) Handle(route access.Route) {
 	s.routes = append(s.routes, route)
 	s.mux.Handle(route.Pattern, s.guard.Wrap(route))
+}
+
+// NotFound answers a request that no route takes: 401 to a stranger, and 404
+// only to someone who is signed in. It is what the router falls back to, and
+// what a route that takes many addresses, as the web interface does, must
+// hand the addresses of the API to.
+func (s *Server) NotFound() http.Handler {
+	return s.guard.Wrap(access.Route{Level: access.Member, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.writeJSON(w, r, http.StatusNotFound, map[string]string{"error": "not found"})
+	})})
 }
 
 // Routes lists every route that was attached, with its level.

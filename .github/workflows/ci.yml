@@ -45,6 +45,15 @@ jobs:
       - name: Check go.mod and go.sum are tidy
         run: go mod tidy -diff
 
+      # The web interface is embedded in the binary, so it is built first:
+      # the binary that is tested is then the one that is released, and
+      # TestEmbedded fails if the app is missing from it.
+      - name: Build the web interface
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
       - name: Build
         run: go build ./...
 
@@ -66,20 +75,103 @@ jobs:
           BEACON_TEST_MAILPIT_URL: http://127.0.0.1:8025
         run: go test -race ./...
 
+  # The web interface by itself: its types, its lint, its tests and its
+  # build, with the Node version pinned in .tool-versions.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5.2.9
+
+      - name: Install dependencies
+        run: npm ci
+
+      # src/api/schema.d.ts is generated from internal/api/openapi.yaml. A
+      # change to the API that was not followed by `npm run generate` fails
+      # here, and then the type check says what in the app it breaks.
+      - name: Check the generated API types are up to date
+        run: npm run generate:check
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  # A real browser against the real binary, with the web interface embedded
+  # in it: sign-in through Dex and everything a person does in the app, and
+  # an accessibility check of each view.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@v5.2.9
+
+      - name: Build the web interface
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Beacon
+        run: go build -o bin/beacon ./cmd/beacon
+
+      - name: Start Postgres, Dex and Mailpit
+        run: docker compose up --detach --wait postgres dex mailpit
+
+      # The browser's version is fixed by the version of the test package.
+      - name: Install the browser
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Test in the browser
+        working-directory: web
+        run: npx playwright test
+
+      - name: Keep the report of a failure
+        if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: browser-test-report
+          path: |
+            web/playwright-report
+            web/test-results
+          retention-days: 7
+
   docker:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v7.0.1
 
-      # The Dockerfile cannot read .tool-versions, so the Go version is
-      # written in both places. Fail if they drift apart.
-      - name: Check the Dockerfile uses the pinned Go version
+      # The Dockerfile cannot read .tool-versions, so the Go and Node
+      # versions are written in both places. Fail if they drift apart.
+      - name: Check the Dockerfile uses the pinned Go and Node versions
         run: |
           set -euo pipefail
           pinned="$(awk '$1 == "golang" { print $2 }' .tool-versions)"
           if ! grep -Eq "^FROM .*golang:${pinned//./\\.}-" Dockerfile; then
             echo "::error file=Dockerfile::The build stage must use golang:${pinned}, as pinned in .tool-versions"
+            exit 1
+          fi
+          pinned="$(awk '$1 == "nodejs" { print $2 }' .tool-versions)"
+          if ! grep -Eq "^FROM .*node:${pinned//./\\.}-" Dockerfile; then
+            echo "::error file=Dockerfile::The stage that builds the web interface must use node:${pinned}, as pinned in .tool-versions"
             exit 1
           fi
 
@@ -102,6 +194,16 @@ jobs:
           curl --fail --silent --show-error --request POST http://127.0.0.1:8080/api/v1/ingest/default \
             --header 'Authorization: Bearer ci-only-source-token-0123456789' \
             --data '{"labels": {"alertname": "CISmokeTest"}}' | grep '"result":"created"'
+          # The image has the web interface in it: the page, with the
+          # policy that keeps it to itself, and the script the page names.
+          curl --fail --silent --show-error --dump-header page-headers http://127.0.0.1:8080/alerts > page.html
+          grep '<div id="root">' page.html > /dev/null
+          grep -i "^content-security-policy: default-src 'none'" page-headers > /dev/null
+          script="$(grep -o '/assets/[^"]*\.js' page.html | head -n 1)"
+          curl --fail --silent --show-error --dump-header script-headers --output /dev/null "http://127.0.0.1:8080${script}"
+          grep -i '^cache-control: .*immutable' script-headers > /dev/null
+          # An address of the API that is no route is not answered with it.
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8080/api/v1/no-such-thing)" = "401"
           # The container must not run as root.
           test "$(docker compose exec -T beacon id -u)" != "0"
           # A termination signal must lead to a clean exit.

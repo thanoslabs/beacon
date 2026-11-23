@@ -28,6 +28,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/silence"
 	"github.com/thanoslabs/beacon/internal/slack"
 	"github.com/thanoslabs/beacon/internal/version"
+	"github.com/thanoslabs/beacon/internal/web"
 )
 
 // snoozeExpiryInterval is how often the server looks for snoozes that have run
@@ -159,6 +160,15 @@ func runServe(ctx context.Context, e env, args []string) error {
 	if err := srv.Listen(); err != nil {
 		return err
 	}
+	// The web interface is in the binary when it was built before the
+	// binary was; a build without it serves the API alone.
+	app, err := web.New(web.Dist(), srv.NotFound())
+	if err != nil {
+		return fmt.Errorf("read the embedded web interface: %w", err)
+	}
+	if !app.Built() {
+		logger.WarnContext(ctx, "this binary was built without the web interface: the API works, and a browser is told how to build it; the release image includes it")
+	}
 	alerts.Observe(pipeline.Observe)
 	prov := &provisioner{
 		logger: logger, pool: pool, path: cfgPath, getenv: e.getenv, slackAPIURL: slackAPIURL, discordAPIURL: discordAPIURL,
@@ -177,6 +187,7 @@ func runServe(ctx context.Context, e env, args []string) error {
 		identities:          identities,
 		identityAPI:         identity.NewHandler(logger, identities, linker.Integrations),
 		linker:              linker,
+		web:                 app,
 	}
 	prov.silences.SetAlerts(alerts)
 	prov.registerMetrics(registry)

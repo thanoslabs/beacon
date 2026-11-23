@@ -87,8 +87,9 @@ func Browser(t testing.TB, addr string) *http.Client {
 
 // SignIn takes the browser through a whole sign-in as the user: it opens
 // Beacon's login address, is sent to Dex, fills in Dex's form, and follows
-// the redirects back. It returns the status and body of the page the
-// browser ends on.
+// the redirects back. A completed sign-in ends on the web interface, which
+// says nothing about the person, so SignIn then asks who is signed in and
+// returns that answer. A sign-in that was refused returns the refusal.
 func SignIn(t testing.TB, browser *http.Client, email, password string) (status int, body string) {
 	t.Helper()
 	resp, err := browser.Get(PublicURL + "/auth/login")
@@ -105,7 +106,24 @@ func SignIn(t testing.TB, browser *http.Client, email, password string) (status 
 	if err != nil {
 		t.Fatalf("submit Dex's sign-in form: %v", err)
 	}
+	page = read(t, resp)
+	if landed := resp.Request.URL; landed.Host != mustParse(PublicURL).Host || landed.Path != "/" {
+		// Dex's own page again, or Beacon's refusal at the callback.
+		return resp.StatusCode, page
+	}
+	resp, err = browser.Get(PublicURL + "/api/v1/me")
+	if err != nil {
+		t.Fatalf("ask who is signed in: %v", err)
+	}
 	return resp.StatusCode, read(t, resp)
+}
+
+func mustParse(raw string) *url.URL {
+	u, err := url.Parse(raw)
+	if err != nil {
+		panic(err)
+	}
+	return u
 }
 
 func read(t testing.TB, resp *http.Response) string {

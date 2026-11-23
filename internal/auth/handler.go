@@ -21,9 +21,11 @@ import (
 const (
 	LoginPath  = "/auth/login"
 	LogoutPath = "/auth/logout"
-	// MePath answers who is signed in. It is where the browser lands after
-	// signing in, until there is a web interface to land on.
+	// MePath answers who is signed in.
 	MePath = "/api/v1/me"
+	// AppPath is where the browser lands after signing in: the web
+	// interface, which then goes to the page the person asked for.
+	AppPath = "/"
 )
 
 // Handler serves the sign-in endpoints and tells who is behind a request.
@@ -339,7 +341,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	h.logger.InfoContext(ctx, "user signed in", slog.String("user_id", u.ID), slog.String("email", u.Email),
 		slog.String("role", string(u.Role)), slog.Any("teams", g.Teams), slog.Int("groups", len(groups)), slog.Bool("first_sign_in", created))
 	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, MePath, http.StatusSeeOther)
+	http.Redirect(w, r, AppPath, http.StatusSeeOther)
 }
 
 // handleLogout ends the session.

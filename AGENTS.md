@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules run their rotations with overrides, and escalation policies page the person on call, teams and channels step by step until someone responds. The same works in Discord, where people link their accounts themselves, and alert groups are also sent as email and posted to outbound webhooks. The web interface does not exist yet. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules run their rotations with overrides, and escalation policies page the person on call, teams and channels step by step until someone responds. The same works in Discord, where people link their accounts themselves, and alert groups are also sent as email and posted to outbound webhooks. The web interface is a single-page app in `web/`, embedded in the binary; people sign in to it, act on alerts, see who is on call, arrange overrides and silences, read what the configuration defines, link their chat accounts and, as admins, manage API tokens. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -17,11 +17,13 @@ Per `docs/requirements.md`:
 - **Declarative configuration files** in YAML for provisioned objects (sources, integrations, routing, escalation policies, teams, schedule rotations), read with [go.yaml.in/yaml/v3](https://github.com/yaml/go-yaml); the database holds runtime state
 
 - **HTTP**: the standard library `net/http` server and router, `log/slog` for structured logs, and [client_golang](https://github.com/prometheus/client_golang) for `/metrics`. There is no web framework.
+- **Web interface** (`web/`): [React](https://react.dev/) and TypeScript, built by [Vite](https://vite.dev/) into `internal/web/dist` and embedded in the binary with `go:embed`. The API client is typed from the OpenAPI description ([openapi-typescript](https://openapi-ts.dev/) and its `openapi-fetch`), server state is held by [TanStack Query](https://tanstack.com/query), and pages are routed by [React Router](https://reactrouter.com/). The style sheet is written by hand; there is no component library. Tests are [Vitest](https://vitest.dev/) with Testing Library, and [Playwright](https://playwright.dev/) with axe against the real binary.
 
 Tooling:
 
 - **golangci-lint** for linting and formatting checks, configured in `.golangci.yml`
-- **Renovate** for dependency updates (managers: `asdf`, `docker-compose`, `dockerfile`, `github-actions`, `gomod`)
+- **ESLint** (with typescript-eslint) for the web interface, configured in `web/eslint.config.js`
+- **Renovate** for dependency updates (managers: `asdf`, `docker-compose`, `dockerfile`, `github-actions`, `gomod`, `npm`)
 - **GitHub Actions** for the CI, Renovate, release, and docs workflows
 - **[nebula-md](https://github.com/thanoslabs/nebula-md)** for building `docs/` into a static markdown site
 - **MIT License**
@@ -46,7 +48,7 @@ Tooling:
 │   ├── grafana/              # Provisioning of the Grafana of the Compose profile "grafana", and a rule to try it with
 │   ├── mailpit/              # The one account of the SMTP server used in development and tests
 │   └── dex/                  # Configuration of the identity provider used in development and tests
-├── docs/                     # Project documentation (markdown source for the docs site)
+├── docs/                     # Project documentation (markdown source for the docs site); images/web holds its screenshots of the web interface
 ├── examples/                 # Example configurations; a test keeps them valid
 ├── internal/
 │   ├── access/               # Roles and the principal behind a request
@@ -78,7 +80,17 @@ Tooling:
 │   ├── slack/                # Slack channel: Web API client, message rendering and button presses
 │   │   └── slacktest/        # Fake Slack for tests
 │   ├── version/              # Build version reporting
+│   ├── web/                  # Serves the web interface: the embedded build, its headers, and the fallback to the page
+│   │   └── dist/             # Where `npm run build` writes; only .gitkeep is in git
 │   └── webhook/              # Outbound webhook channel: signed JSON to an address of the operator's
+├── web/                      # The web interface: a single-page app (React, TypeScript, Vite)
+│   ├── e2e/                  # Browser tests (Playwright) against the real binary, their configuration and the script that runs Beacon for them
+│   ├── public/               # Files served beside the page as they are
+│   └── src/
+│       ├── api/              # The typed API client; schema.d.ts is generated from internal/api/openapi.yaml
+│       ├── app/              # The frame, the session, the theme and the shared pieces
+│       ├── pages/            # One file per page
+│       └── test/             # Helpers of the component tests: a fake API and a render function
 ├── .dockerignore             # Build context allow-list; add new source directories here
 ├── .golangci.yml             # golangci-lint configuration
 ├── .tool-versions            # Pinned language/tool versions (asdf/mise)
@@ -101,6 +113,7 @@ Run `mise install` first so that the pinned versions are used.
 
 | Task | Command |
 |---|---|
+| Build the web interface | `(cd web && npm ci && npm run build)`: optional for work on Go alone; without it the binary has no app and says so |
 | Build | `go build -o bin/beacon ./cmd/beacon` |
 | Run | `./bin/beacon version` (or `go run ./cmd/beacon version`) |
 | Start Postgres | `docker compose up -d --wait postgres` |
@@ -117,16 +130,22 @@ Run `mise install` first so that the pinned versions are used.
 | Fix formatting | `golangci-lint fmt ./...` |
 | Check module files | `go mod tidy -diff` |
 | Regenerate the published API description | `go test ./internal/api -run TestPublishedDescription -update` |
+| Web interface: type check, lint, unit tests | in `web/`: `npm run typecheck`, `npm run lint`, `npm test` |
+| Regenerate the API types of the web interface | in `web/`: `npm run generate` (CI runs `npm run generate:check`) |
+| Browser tests | `docker compose up -d --wait postgres dex mailpit`, build the web interface and `bin/beacon`, then in `web/`: `npx playwright install chromium` once and `npx playwright test` |
+| Work on the web interface | in `web/`: `npm run dev:beacon` (a Beacon on `127.0.0.1:18080` with the Dex users) and `npm run dev` (the app on `http://127.0.0.1:5173`) |
+| Retake the screenshots of the docs | in `web/`: `BEACON_SCREENSHOTS=1 npx playwright test screenshots`, then look at `docs/images/web` |
 | Build the image | `docker build -t beacon:dev .` |
 | Run Beacon and Postgres | `docker compose up --build -d --wait`, then `curl localhost:8080/readyz` (set `BEACON_PORT` if 8080 is taken) |
 | Run them with an Alertmanager that sends to Beacon | `BEACON_CONFIG_DIR=./examples/alertmanager docker compose --profile alertmanager up --build -d --wait` (set `BEACON_ALERTMANAGER_PORT` if 9093 is taken) |
 | Run them with a Grafana that sends to Beacon | `BEACON_CONFIG_DIR=./examples/grafana docker compose --profile grafana up --build -d --wait` (set `BEACON_GRAFANA_PORT` if 3000 is taken), then create the rule as `docs/grafana.md` shows |
 
-CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It starts Postgres, Dex and Mailpit from `compose.yaml`, so CI and development use the same versions. The tests include the end-to-end tests in `internal/e2e`. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, the non-root user and a clean exit on termination. It then starts the Alertmanager and the Grafana of the Compose profiles `alertmanager` and `grafana` and checks that an alert of each fires and resolves in Beacon.
+CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It builds the web interface before the Go code, so the binary under test has the app in it. It starts Postgres, Dex and Mailpit from `compose.yaml`, so CI and development use the same versions. The tests include the end-to-end tests in `internal/e2e`. The `web` job checks that the generated API types are fresh, then type checks, lints, tests and builds the app; the `browser` job runs the Playwright tests against the real binary. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, that the image serves the web interface, the non-root user and a clean exit on termination. It then starts the Alertmanager and the Grafana of the Compose profiles `alertmanager` and `grafana` and checks that an alert of each fires and resolves in Beacon.
 
 ### Container image
 
-- The Go version appears in `.tool-versions` and in the `Dockerfile` build stage. Change both together; CI fails when they differ, and Renovate groups them as "go toolchain".
+- The Go version appears in `.tool-versions` and in the `Dockerfile` build stage. Change both together; CI fails when they differ, and Renovate groups them as "go toolchain". The same holds for the Node version and the stage that builds the web interface ("node toolchain").
+- The stage that builds the web interface runs on the build platform, like the Go build stage: what it builds is the same for every platform. The Go stage refuses to go on without `internal/web/dist/index.html`, so an image without the app cannot be built.
 - `.dockerignore` excludes everything except what the `Dockerfile` copies. A new top-level source directory must be added to both files.
 - The final stage has no `RUN` step, so building for another platform needs no emulation. Keep it that way, or add QEMU to the release workflow.
 - The image runs as the numeric user `65532`. Do not write to the container file system at runtime.
@@ -146,6 +165,28 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Log with the `slog` methods that take a context (`InfoContext` and so on) inside request handling, so the record carries `request_id`.
 - Register metrics on the registry from `server.NewRegistry()`, not the global default. Keep label values to bounded sets (see the cardinality warning in `docs/requirements.md`).
 - The process must stay stateless: anything that has to survive a restart or be seen by another replica goes in Postgres, never in memory or on local disk.
+
+### Web interface
+
+- `web/` is the app and `internal/web` serves it. `npm run build` writes into `internal/web/dist`, which `go:embed` takes into the binary. **Go must build and test without Node**: only `dist/.gitkeep` is in git, a binary without the app says so (in the log and to a browser), and no Go test may need the built app except `TestEmbedded`, which is skipped without it and fails in CI. `docs/web.md` is the guide; keep it true, and retake its screenshots when a page changes.
+- **The route of the app is public and takes every `GET` that no other route takes** (`web.Pattern`). That is safe only while two things hold, and `TestRoutes` and `internal/web/web_test.go` check both. The files hold nothing of an install: never render configuration, a version that matters, or anything from the database into the page; the app asks the API. And `web.Reserved` gives every address under `/api` and `/auth` back to the server, so an unknown API address is `401` and JSON, never the page.
+- Every answer of the handler carries `web.ContentSecurityPolicy` and the other headers. The policy allows nothing inline and no other host: do not loosen it for a library; choose a library that needs no inline script or style, and serve fonts and images from the binary. Files under `assets/` have a hash in their name and are immutable; the page is `no-cache`.
+- **Alert text is attacker-controlled**: labels, annotations and links are written by whoever can send an alert. Render them as text, only ever through JSX; ESLint refuses `dangerouslySetInnerHTML` and `innerHTML`. A link from an alert is an `<a>` only when its scheme is `http` or `https`.
+- **The session is the cookie, and nothing else.** No token, and nothing that stands for the session, goes into `localStorage`, `sessionStorage` or a readable cookie. The browser's storage holds the theme and, during a sign-in, the path to return to (`takeReturnTo` accepts only a path of the app).
+- The app calls the API only through `api` in `web/src/api/client.ts`, typed from `web/src/api/schema.d.ts`, which is generated: change `internal/api/openapi.yaml`, run `npm run generate`, commit both. Never edit the generated file or write a type of an answer by hand. `unwrap` turns an answer into its body or an `ApiError` with the API's own message, and a `401` from any route but `/api/v1/me` puts the sign-in page back.
+- The app decides what to *offer* by the role (`useIsAdmin`); what a person may *do* is decided by the API. Never rely on a hidden button, and when a view is for admins, a test must show that a member neither sees it nor gets its data.
+- The views of alerts ask again at `pollInterval` (the API has no push channel), keep what they have when a refresh fails and say so, and offer exactly the actions the API lists for an alert (`actions`): the app never works out by itself what a state allows.
+- **Times are shown in the viewer's zone** (`formatDateTime`), with the zone named. A view of a schedule also states the schedule's own zone. Weeks and days are found from calendar dates in `web/src/pages/schedules/calendar.ts`, never by adding hours, and its tests run in a zone with clock changes (`TZ` in `vite.config.ts`).
+- The app never works out who is on call: it shows `on_call` and the shifts the API answers, which already hold overrides and pending changes.
+- A form sends what was typed and lets the API judge it: the app does not repeat the API's rules. A refusal is shown with the API's message, and the field the API names is marked (`aria-invalid`). A change that takes something away, such as removing an override, asks first in a dialog.
+- The app never matches alerts against matchers by itself: the preview of a silence asks `POST /api/v1/silences/preview`, so that what is previewed is what will be silenced.
+- A secret that the API answers once (a new API token, a link code) lives in a component's state and nowhere else: not in the query cache, not in browser storage, not in the address. It is gone when the person puts it away or leaves the page.
+- A control with a visible word and an `aria-label` that says more ("Revoke" and "Revoke the token deploy") must begin its label with the visible word; axe fails it otherwise.
+- What the configuration defines is read-only in the app: such a view says that the object is managed in the configuration files and offers no control that changes it. Build one with `ConfigurationPage` (`web/src/pages/configuration/Shell.tsx`), and keep its test's `expectReadOnly`.
+- Everything is served from the binary: no fonts, scripts, images or requests to another host, and no telemetry.
+- Accessibility is part of done: semantic elements, a label for every control, a visible focus ring, text contrast of at least 4.5:1 in both themes, and a layout that works at 390 pixels. A new view gets `expectAccessible` in a browser test, which runs axe in both themes and at phone width.
+- Runtime dependencies are few on purpose (React, React DOM, React Router, TanStack Query, `openapi-fetch`). Adding one needs a reason in the PR. Versions are exact in `package.json`, and the lockfile is committed.
+- Component tests (`*.test.tsx`) use `fakeApi` from `web/src/test/api.ts` in place of the API and query by role and label. Browser tests (`web/e2e`) use the real binary from outside, wait for what they expect to see and never for a time, never retry, and fail on any violation of the Content-Security-Policy.
 
 ### Database
 
@@ -295,12 +336,13 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - **Never downgrade.** With `starttls`, a server that does not offer `STARTTLS` is refused for good; the certificate is verified against the system's authorities for the configured host; the password is sent with `PLAIN` or `LOGIN` only over TLS or to this machine, and validation refuses `tls: none` with a password for any other host. Do not add a setting that turns verification off.
 - **Nothing from an alert reaches a header or the SMTP exchange as it is.** The subject is the only header an alert fills: it goes through `oneLine` and RFC 2047 encoding. The body is quoted-printable, the HTML form passes everything through `html.EscapeString`, and an address becomes a link only through `webAddress`. A destination must be one plain address (`recipient`), and only a `Message-ID` that Beacon made goes back into `In-Reply-To`. `TestAnAlertCannotAddHeadersOrMessages` runs the usual attacks through a real server.
 - A reply that starts with 5 is `notify.Permanent`; one that starts with 4, and every failure of the network, is retried.
+- The link in an email leads to the alert's page in the web interface (`AlertPath`), which asks for a sign-in.
 - An email carries no link that changes anything. A link that acknowledges would be followed by mail scanners; a safe one needs a confirmation page, which belongs to the web interface.
 - Tests that need a real SMTP server use `mailpittest` against the Mailpit in `compose.yaml` (`dev/mailpit/auth` holds its one account). Without `BEACON_TEST_SMTP_ADDR` and `BEACON_TEST_MAILPIT_URL` they are skipped locally and fail in CI. The server is shared by every test, so a test sends to an address of its own (`mailpittest.Address`). Use the scripted server in `internal/email/fake_test.go` only for what Mailpit will not do: TLS, `LOGIN` alone, a reply at a chosen step.
 
 ### Outbound webhook
 
-- `internal/webhook` is the outbound webhook channel: one `POST` per notification, with the standard library. `docs/outbound-webhook.md` is the contract for the payload, the headers and the signature. **The payload is versioned**: adding a field is free, and removing one or changing its meaning needs a new `Version`. `testdata/payload.golden.json` holds version 1; a change to it is a change to the contract, and to the page.
+- `internal/webhook` is the outbound webhook channel: one `POST` per notification, with the standard library. `docs/outbound-webhook.md` is the contract for the payload, the headers and the signature. **The payload is versioned**: adding a field is free, and removing one or changing its meaning needs a new `Version`. `testdata/payload.golden.json` holds version 1; a change to it is a change to the contract, and to the page. An alert's `url` is its address in the API and `web_url` its page in the web interface; neither may come to mean the other.
 - Every request is signed (`Sign`: HMAC-SHA256 over `v1:<timestamp>:<body>`), and the signing secret is required by validation. `Verify` is what a receiver does; the tests use it in a receiver's place. The notification's identifier is the idempotency key, in the `Idempotency-Key` header and as the payload's `id`, and is the same in every attempt.
 - The address is the operator's, and usually internal, so private addresses are allowed. The client (`newClient`) never follows a redirect, refuses link-local addresses when the connection is made, reads a bounded part of an answer, and bounds every attempt. Keep all four.
 - **Nothing of the address, the headers or the answer goes into an error or a log**: the address can hold a token, and an answer can repeat one. An error names the status code. The destination of a webhook notification is the name of the integration.

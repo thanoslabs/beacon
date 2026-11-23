@@ -62,3 +62,11 @@ venv/
 *.tmp
 *.temp
 .cache/
+
+# Web interface. The build is embedded in the binary from internal/web/dist;
+# only the file that keeps the directory is in git.
+!/internal/web/dist/
+/internal/web/dist/*
+!/internal/web/dist/.gitkeep
+/web/playwright-report/
+/web/test-results/

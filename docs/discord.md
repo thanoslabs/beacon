@@ -167,7 +167,7 @@ A person is paged in a **direct message** from the bot, which looks like the mes
 
 Discord does not let an application look a person up by email address, so **each person links their Discord account themselves**, once:
 
-1. Sign in to Beacon ([[access]]) and ask it for a link code: `POST /api/v1/me/identities/discord/link-code`, where `discord` is the name of the integration. The answer holds the code and the command to type:
+1. Sign in to Beacon ([[access]]), open **Account** in the [[web#Account and chat accounts|web interface]] and press **Get a link code** beside the Discord integration. The page shows the command to type. It is the answer of `POST /api/v1/me/identities/discord/link-code`, where `discord` is the name of the integration:
 
    ```json
    {"integration": "discord", "provider": "discord", "code": "K7QF-2MXA-9DTR-PB4W", "expires_at": "2026-12-01T10:22:00Z", "command": "/beacon-link code: K7QF-2MXA-9DTR-PB4W"}
@@ -178,9 +178,8 @@ Discord does not let an application look a person up by email address, so **each
 - A code works **once**, for **ten minutes**, and only for the integration it was issued for. Asking for a new code makes the earlier one useless. Only a hash of a code is stored, and codes are never logged.
 - The code proves both ends: only the signed-in person can get it, and Discord vouches, with its signature, for which account typed it.
 - An account belongs to one user. If the account is linked to someone else, nothing changes; that person removes the link first.
-- **To remove a link**, the person calls `DELETE /api/v1/me/identities/discord`. `GET /api/v1/me/identities` lists what is linked.
+- **To remove a link**, the person presses **Remove the link** on the same page, which calls `DELETE /api/v1/me/identities/discord`. `GET /api/v1/me/identities` lists what is linked.
 - The bootstrap admin and API tokens are not people and cannot link an account.
-- Until the web interface exists, the two routes are called with the session of a signed-in browser.
 
 **Beacon registers the `/beacon-link` command by itself**, as a global command of the application, when it starts and when a Discord integration is added. It leaves the application's other commands alone. If that fails, for example because the bot token is wrong, the log says `register the link command with Discord` and Beacon tries again, after a minute and then at growing intervals up to an hour, and at once after a reload.
 

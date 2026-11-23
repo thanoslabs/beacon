@@ -143,9 +143,10 @@ func alertLinks(a alert.Alert, publicURL string) []link {
 	return out
 }
 
-// AlertPath is where Beacon serves an alert, under its public address. An
-// email links to it.
-const AlertPath = "/api/v1/alerts/"
+// AlertPath is where the web interface shows an alert, under Beacon's public
+// address. An email links to it: the page asks a person who is not signed in
+// to sign in, and then shows the alert. Following the link changes nothing.
+const AlertPath = "/alerts/"
 
 // beaconLink returns the address of an alert in Beacon, or nothing when
 // Beacon does not know its own address.
