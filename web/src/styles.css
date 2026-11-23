@@ -305,12 +305,14 @@ code,
 
 .stack {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-content: start;
 }
 
 .stack-small {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   align-content: start;
 }
@@ -477,6 +479,8 @@ code,
 
 .page {
   display: grid;
+  /* A column may be narrower than what is in it: long words wrap. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   max-width: 1100px;
   margin: 0 auto;
@@ -558,4 +562,204 @@ code,
   content: "";
   flex: 1;
   border-top: 1px solid var(--border);
+}
+
+/* Dialogs */
+
+.dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 30%);
+}
+
+.dialog::backdrop {
+  background: rgb(0 0 0 / 50%);
+}
+
+.choices {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.choices legend {
+  padding: 0;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+
+/* States and severities. Each is a colour and a word, never a colour alone. */
+
+.status-firing,
+.severity-critical {
+  color: var(--critical);
+  background: var(--critical-bg);
+}
+
+.status-acknowledged,
+.severity-info {
+  color: var(--info);
+  background: var(--info-bg);
+}
+
+.severity-warning {
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.status-snoozed {
+  color: var(--quiet);
+  background: var(--quiet-bg);
+}
+
+.status-resolved {
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+
+/* Filters */
+
+.filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  max-width: 720px;
+}
+
+/* The list of alerts */
+
+.alert-list {
+  display: grid;
+  gap: 8px;
+}
+
+.alert-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-left-width: 4px;
+}
+
+.severity-edge-critical {
+  border-left-color: var(--critical);
+}
+
+.severity-edge-warning {
+  border-left-color: var(--warning);
+}
+
+.severity-edge-info {
+  border-left-color: var(--info);
+}
+
+.alert-row-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+.alert-row-title {
+  font-weight: 650;
+  font-size: 1.02rem;
+  overflow-wrap: anywhere;
+}
+
+.alert-row-summary {
+  overflow-wrap: anywhere;
+}
+
+.alert-row-meta {
+  font-size: 0.88rem;
+  gap: 4px 12px;
+}
+
+.actions {
+  display: grid;
+  gap: 8px;
+}
+
+/* One alert */
+
+.lead {
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1000px) {
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* What an alert says is shown as it was sent, line breaks included. */
+.pair-value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.timeline {
+  display: grid;
+  gap: 0;
+  border-left: 2px solid var(--border);
+  margin-left: 6px;
+}
+
+.timeline-entry {
+  position: relative;
+  padding: 0 0 16px 18px;
+}
+
+.timeline-entry::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--border-strong);
+}
+
+.timeline-entry.tone-state::before {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.timeline-entry.tone-problem::before {
+  background: var(--critical);
+  border-color: var(--critical);
+}
+
+.timeline-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.timeline-detail {
+  overflow-wrap: anywhere;
 }

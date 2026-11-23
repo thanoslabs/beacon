@@ -14,7 +14,10 @@ interface NavSection {
   items: NavItem[];
 }
 
-const sections: NavSection[] = [{ heading: "You", items: [{ to: "/account", label: "Account" }] }];
+const sections: NavSection[] = [
+  { heading: "Respond", items: [{ to: "/alerts", label: "Alerts" }] },
+  { heading: "You", items: [{ to: "/account", label: "Account" }] },
+];
 
 /** The frame around every page behind the sign-in. */
 export function Layout() {
