@@ -29,9 +29,10 @@ The page offers the ways to sign in that the configuration has ([[access]]): the
 | An alert | What it says (labels, annotations, links), what routing decided for it, its group, and its timeline, with the same buttons |
 | On call | Who is on call now, for every schedule, team by team |
 | A schedule | Who is on call, the shifts of four weeks at a time, past and to come, its overrides, with the ways to add and remove one, and the rotation as the files define it |
+| Silences | The silences in force and to come, and on request the expired ones; a form for a new one, with a preview of the open alerts it matches; and the way to expire one |
 | Account | Who you are signed in as, your role, and until when the session lasts |
 
-The pages for silences and the rest of what the configuration defines follow; this page grows with them.
+The pages for the rest of what the configuration defines follow; this page grows with them.
 
 What the configuration files define is read-only in the app, as in the API: it is changed in the files ([[configuration]]).
 
@@ -75,6 +76,20 @@ An override puts someone on call for a period in place of whoever the rotation h
 **Add an override** asks who covers, when it ends, and optionally when it starts (now, when left empty) and why. The times are typed in the zone of your device. Beacon checks the request, and what it refuses is said in the dialog, at the field at fault. **Remove** asks first, because it changes who is on call: an override in force ends at once, and whoever is beneath takes over, an earlier override or else the rotation.
 
 Members and admins alike add and remove overrides, for themselves and for others. Who is on call, the calendar and the on-call page follow at once.
+
+## Silences
+
+![The list of silences](images/web/silences-light.png)
+
+**Silences** lists the silences that are active or pending ([[silences]]), the one that ends first at the top: what each matches, from when to when, why, and who created it. **Also show expired silences** adds the ones that are over.
+
+![A new silence, with its preview](images/web/silence-new-light.png)
+
+**New silence** asks for the matchers, for how long (or until a time you choose) and why. While you fill it in, the page shows **which open alerts the silence would keep quiet now**: it asks Beacon, which matches as it will when the silence exists, so the preview and the silence cannot disagree. A matcher that Beacon refuses, such as a pattern that is no regular expression, is said there with the part at fault. Alerts that fire later and match are silenced too.
+
+**Expire** ends a silence now, after asking: Beacon then tells about the alerts it was keeping quiet that still fire. A silence cannot be edited; expire it and create another.
+
+Members and admins alike create and expire silences, including ones that someone else created.
 
 ## Look and use
 
