@@ -65,4 +65,18 @@ test.describe("screenshots", () => {
     await capture(page, "alert");
     await signOut(page);
   });
+
+  test("on call and a schedule", async ({ page }) => {
+    // Both members of the rotation have signed in, so both take their turns.
+    await signIn(page, "grace");
+    await signOut(page);
+    await signIn(page, "ada");
+    await page.goto("/on-call");
+    await expect(page.getByRole("region", { name: "Platform" })).toBeVisible();
+    await capture(page, "on-call");
+    await page.goto("/schedules/platform-primary");
+    await expect(page.locator(".calendar-week")).toHaveCount(4);
+    await capture(page, "schedule");
+    await signOut(page);
+  });
 });
