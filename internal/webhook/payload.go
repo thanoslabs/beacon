@@ -72,8 +72,12 @@ type Alert struct {
 	AcknowledgedAt *time.Time        `json:"acknowledged_at,omitempty"`
 	SnoozedUntil   *time.Time        `json:"snoozed_until,omitempty"`
 	ResolvedAt     *time.Time        `json:"resolved_at,omitempty"`
-	// URL is the address of the alert in Beacon, when Beacon knows its own.
+	// URL is the address of the alert in Beacon's API, when Beacon knows
+	// its own address: what a program reads the alert from.
 	URL string `json:"url,omitempty"`
+	// WebURL is the page of the alert in the web interface, for a person.
+	// It was added to version 1; url keeps its meaning.
+	WebURL string `json:"web_url,omitempty"`
 }
 
 // Change is a state change and who made it.
@@ -98,8 +102,9 @@ type Person struct {
 }
 
 // build describes the group of m. alertURL returns the address of an alert
-// in Beacon, or nothing.
-func build(m notify.Message, now time.Time, alertURL func(id string) string) Payload {
+// in Beacon's API and alertPage that of its page in the web interface, or
+// nothing.
+func build(m notify.Message, now time.Time, alertURL, alertPage func(id string) string) Payload {
 	p := Payload{
 		Version: Version, ID: m.Notification.ID, Reason: m.Notification.Reason, SentAt: now.UTC(),
 		Group:  Group{ID: m.Notification.GroupID, Status: alert.StatusResolved, Labels: nonNil(m.Group.Labels), Counts: map[alert.Status]int{}},
@@ -137,7 +142,7 @@ func build(m notify.Message, now time.Time, alertURL func(id string) string) Pay
 			ID: a.ID, Fingerprint: a.Fingerprint, Status: a.Status, Severity: a.Severity,
 			Labels: nonNil(a.Labels), Annotations: nonNil(a.Annotations), Links: nonNil(a.Links), Service: a.Service,
 			StartedAt: a.StartedAt.UTC(), AcknowledgedAt: utc(a.AcknowledgedAt), SnoozedUntil: utc(a.SnoozedUntil), ResolvedAt: utc(a.ResolvedAt),
-			URL: alertURL(a.ID),
+			URL: alertURL(a.ID), WebURL: alertPage(a.ID),
 		})
 	}
 	if last := notify.LastChange(representative, m.Events); last != nil {
