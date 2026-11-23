@@ -8,6 +8,8 @@ import { AlertList } from "../pages/alerts/AlertList";
 import { Login } from "../pages/Login";
 import { OnCall } from "../pages/schedules/OnCall";
 import { SchedulePage } from "../pages/schedules/SchedulePage";
+import { NewSilence } from "../pages/silences/NewSilence";
+import { SilenceList } from "../pages/silences/SilenceList";
 import { NotFound } from "../pages/NotFound";
 import { Layout } from "./Layout";
 import { SessionProvider, forgetSession, useMeQuery } from "./session";
@@ -60,6 +62,8 @@ export function App() {
           <Route path="alerts/:id" element={<AlertDetail />} />
           <Route path="on-call" element={<OnCall />} />
           <Route path="schedules/:name" element={<SchedulePage />} />
+          <Route path="silences" element={<SilenceList />} />
+          <Route path="silences/new" element={<NewSilence />} />
           <Route path="account" element={<Account />} />
           <Route path="*" element={<NotFound />} />
         </Route>

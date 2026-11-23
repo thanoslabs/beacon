@@ -20,6 +20,7 @@ const sections: NavSection[] = [
     items: [
       { to: "/alerts", label: "Alerts" },
       { to: "/on-call", label: "On call" },
+      { to: "/silences", label: "Silences" },
     ],
   },
   { heading: "You", items: [{ to: "/account", label: "Account" }] },
