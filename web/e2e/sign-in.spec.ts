@@ -55,8 +55,7 @@ test("a person signs in through the identity provider, arrives where they asked 
 });
 
 test("a member is told their role, and the frame works from the keyboard", async ({ page }) => {
-  await signIn(page, "grace");
-  await expect(page).toHaveURL("/account");
+  await signIn(page, "grace", "/account");
   await expect(page.getByRole("region", { name: "Signed in as" })).toContainText("Member");
 
   // The first stop of the keyboard is the link past the navigation.
