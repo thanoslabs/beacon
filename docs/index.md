@@ -12,6 +12,7 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[configuration]]: reference for the YAML configuration files, and how to check them
 - [[configuration-and-data-model]]: the design behind the configuration schema and the Postgres data model
 - [[access]]: sign in through an OpenID Connect identity provider, users and sessions
+- [[web]]: the web interface: what it shows, what the browser is given, and how to work on it
 - [[alert-lifecycle]]: the states an alert moves through, and its timeline
 - [[alertmanager]]: put Beacon behind an existing Alertmanager
 - [[grafana]]: send the alerts of Grafana alerting to Beacon

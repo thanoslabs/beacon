@@ -6,8 +6,7 @@ date: 2026-11-17
 
 People sign in to Beacon through your organisation's identity provider, with OpenID Connect. A user is created in Beacon's database the first time they sign in, and updated on every later sign-in. Automation authenticates with [API tokens](#api-tokens). An install that has no identity provider yet starts with the [bootstrap admin](#bootstrap-admin).
 
-> [!note] The web interface is being built
-> Sign-in works in a browser today. After signing in, the browser lands on `/`, where Beacon serves the web interface when the binary has one; a binary without it says so there. `/api/v1/me` answers who you are as JSON.
+People use Beacon in a browser through the [[web|web interface]], which shows the sign-in page to anyone who is not signed in. After signing in, the browser lands on the page that was asked for.
 
 ## Set up the identity provider
 
@@ -72,7 +71,7 @@ Beacon is closed by default. Every route needs a session unless it is on the sho
 | `POST /api/v1/integrations/<name>/interactions` | Public | Receives button presses from Slack and from Discord. The service's signature is checked; see [[slack]] and [[discord]]. |
 | `GET /api/v1/openapi.json`, `GET /api/v1/openapi.yaml` | Public | The OpenAPI description of the API; see [[api#OpenAPI description]] |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Public | Probes and metrics, for machines that have no session |
-| `GET` on every other address that is not under `/api/` or `/auth/` | Public | The web interface: one page with its script and style sheet, the same for everyone. It holds nothing of an install; what it shows it asks of the routes above. |
+| `GET` on every other address that is not under `/api/` or `/auth/` | Public | The [[web|web interface]]: one page with its script and style sheet, the same for everyone. It holds nothing of an install; what it shows it asks of the routes above. |
 
 "Member" means anyone who is signed in or presents an API token, with either role. "Admin" needs the admin role; a member gets `403`.
 
