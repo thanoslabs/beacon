@@ -14,7 +14,8 @@
     "docker-compose",
     "dockerfile",
     "github-actions",
-    "gomod"
+    "gomod",
+    "npm"
   ],
   "packageRules": [
     {
@@ -29,6 +30,18 @@
         "go"
       ],
       "groupName": "go toolchain"
+    },
+    {
+      "description": "Node is pinned in .tool-versions and the Dockerfile; CI fails if they drift, so update them in one PR.",
+      "matchManagers": [
+        "asdf",
+        "dockerfile"
+      ],
+      "matchPackageNames": [
+        "node",
+        "nodejs"
+      ],
+      "groupName": "node toolchain"
     },
     {
       "matchManagers": [
@@ -94,6 +107,33 @@
       "addLabels": [
         "go"
       ]
+    },
+    {
+      "matchDatasources": [
+        "npm"
+      ],
+      "commitMessageTopic": "npm package {{depName}}",
+      "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps",
+      "addLabels": [
+        "web"
+      ]
+    },
+    {
+      "description": "The browser of the browser tests comes with this package, so the two always change together.",
+      "matchDatasources": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "@playwright/test",
+        "@axe-core/playwright"
+      ],
+      "groupName": "browser tests"
     },
     {
       "matchUpdateTypes": [

@@ -410,7 +410,7 @@ func TestEmailChannel(t *testing.T) {
 	}
 	for _, want := range []string{
 		"FIRING · critical", "  alertname = " + name, "  host = db1", "  severity = critical", "Status: Firing since ",
-		"Paged: ", "Open in Beacon: " + oidctest.PublicURL + "/api/v1/alerts/" + alertID, "Runbook: https://runbooks.example.com/disk-full",
+		"Paged: ", "Open in Beacon: " + oidctest.PublicURL + "/alerts/" + alertID, "Runbook: https://runbooks.example.com/disk-full",
 	} {
 		if !strings.Contains(first.Text, want) {
 			t.Errorf("the message does not contain %q:\n%s", want, first.Text)
