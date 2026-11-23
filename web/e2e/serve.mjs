@@ -48,6 +48,9 @@ const beacon = spawn(binary, ["serve", "--config", config, "--listen-address", "
     BEACON_SOURCE_TOKEN: "browser-test-source-token",
     BEACON_OIDC_CLIENT_SECRET: "beacon-local-development-client-secret",
     BEACON_SMTP_PASSWORD: "beacon-local-development-password",
+    BEACON_DISCORD_BOT_TOKEN: "browser-test-discord-bot-token",
+    // Nothing listens there, so no request of the tests reaches Discord.
+    BEACON_DISCORD_API_URL: "http://127.0.0.1:9",
   },
 });
 

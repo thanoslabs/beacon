@@ -763,3 +763,301 @@ code,
 .timeline-detail {
   overflow-wrap: anywhere;
 }
+
+h3 {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 650;
+}
+
+/* Who is on call */
+
+.on-call-list {
+  display: grid;
+  gap: 8px;
+}
+
+.on-call-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(0, 2fr);
+  gap: 4px 16px;
+  align-items: center;
+  padding: 12px 16px;
+}
+
+.on-call-schedule {
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.on-call-who {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .on-call-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.rotation-members {
+  list-style: decimal;
+  padding-left: 20px;
+}
+
+/* The calendar: one bar a week, a part of it for each shift. */
+
+.calendar {
+  display: grid;
+  gap: 12px;
+}
+
+.calendar-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.calendar-days span {
+  padding: 0 4px;
+  overflow: hidden;
+  white-space: nowrap;
+  border-left: 1px solid var(--border);
+}
+
+.calendar-bar {
+  position: relative;
+  height: 34px;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.calendar-shift {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border: 1px solid currentcolor;
+  border-radius: 4px;
+}
+
+.calendar-shift.is-planned {
+  border-style: dashed;
+}
+
+.calendar-shift.is-override {
+  border-width: 3px;
+}
+
+.calendar-now {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--critical);
+}
+
+.who-0 {
+  color: var(--info);
+  background: var(--info-bg);
+}
+
+.who-1 {
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+
+.who-2 {
+  color: var(--quiet);
+  background: var(--quiet-bg);
+}
+
+.who-3 {
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.who-4 {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.legend {
+  display: inline-block;
+  width: 18px;
+  height: 10px;
+  margin: 0 4px 0 8px;
+  border: 1px solid var(--text-muted);
+  border-radius: 2px;
+  vertical-align: baseline;
+}
+
+.legend-planned {
+  border-style: dashed;
+}
+
+.legend-override {
+  border-width: 3px;
+}
+
+.shift-list {
+  display: grid;
+}
+
+.shift-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(0, 3fr) auto;
+  gap: 4px 16px;
+  align-items: center;
+  padding: 8px 4px;
+  border-top: 1px solid var(--border);
+}
+
+.shift-row.is-current {
+  background: var(--surface-2);
+}
+
+.shift-who {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 700px) {
+  .shift-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Overrides */
+
+.override-list {
+  display: grid;
+}
+
+.override-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 10px 4px;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.input[aria-invalid="true"] {
+  border-color: var(--critical);
+  outline: 1px solid var(--critical);
+}
+
+/* Silences */
+
+.silence-list {
+  display: grid;
+  gap: 8px;
+}
+
+.silence-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding: 12px 16px;
+}
+
+.silence-row > .stack-small {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.silence-comment {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.matchers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.matcher {
+  display: inline-block;
+  padding: 2px 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+
+.matcher-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 3fr) auto;
+  gap: 8px;
+}
+
+@media (max-width: 600px) {
+  .matcher-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+textarea.input {
+  resize: vertical;
+}
+
+/* What the configuration defines */
+
+.notice-warning {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.notice-warning .hint {
+  color: inherit;
+}
+
+.steps {
+  display: grid;
+  gap: 12px;
+}
+
+.step {
+  padding-left: 12px;
+  border-left: 3px solid var(--border-strong);
+}
+
+.step-targets {
+  list-style: disc;
+  padding-left: 20px;
+}
+
+.rules {
+  display: grid;
+  gap: 16px;
+}
+
+/* A secret that is shown once: easy to select whole, and to read. */
+.secret {
+  display: inline-block;
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid currentcolor;
+  border-radius: 4px;
+  color: var(--text);
+  user-select: all;
+  overflow-wrap: anywhere;
+}

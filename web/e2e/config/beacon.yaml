@@ -19,6 +19,16 @@ integrations:
       password: {env: BEACON_SMTP_PASSWORD}
       from: beacon@example.invalid
 
+  # People link their Discord accounts with a code that the app issues.
+  # Nothing is ever sent to Discord: serve.mjs points Beacon at an address
+  # where nothing listens.
+  - name: discord
+    type: discord
+    discord:
+      bot_token: {env: BEACON_DISCORD_BOT_TOKEN}
+      application_id: "1234567890123456789"
+      public_key: 5f1c0c8e7a9b4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e
+
 teams:
   - name: platform
     display_name: Platform

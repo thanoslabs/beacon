@@ -115,3 +115,24 @@ export async function deliver(request: APIRequestContext, delivery: Delivery): P
 export function unique(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
+
+/**
+ * Waits until the schedule has someone on call, and says who. The first
+ * member of a rotation to sign in takes their place when Beacon's worker
+ * next looks, a few seconds later; a page that is already open would only
+ * show it at its next refresh.
+ */
+export async function someoneOnCall(page: Page, schedule: string): Promise<string> {
+  let user = "";
+  await expect
+    .poll(
+      async () => {
+        const answer = await page.request.get(`/api/v1/schedules/${schedule}`);
+        user = ((await answer.json()) as { on_call?: { user?: string | null } }).on_call?.user ?? "";
+        return user;
+      },
+      { message: `somebody to be on call for ${schedule}`, timeout: 30_000 },
+    )
+    .not.toBe("");
+  return user;
+}

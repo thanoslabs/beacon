@@ -2,10 +2,19 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router";
 import { setSessionEndedHandler } from "../api/client";
-import { Account } from "../pages/Account";
+import { Account } from "../pages/account/Account";
+import { Tokens } from "../pages/account/Tokens";
 import { AlertDetail } from "../pages/alerts/AlertDetail";
 import { AlertList } from "../pages/alerts/AlertList";
+import { Connections } from "../pages/configuration/Connections";
+import { Policies } from "../pages/configuration/Policies";
+import { RoutingPage } from "../pages/configuration/RoutingPage";
+import { Teams } from "../pages/configuration/Teams";
 import { Login } from "../pages/Login";
+import { OnCall } from "../pages/schedules/OnCall";
+import { SchedulePage } from "../pages/schedules/SchedulePage";
+import { NewSilence } from "../pages/silences/NewSilence";
+import { SilenceList } from "../pages/silences/SilenceList";
 import { NotFound } from "../pages/NotFound";
 import { Layout } from "./Layout";
 import { SessionProvider, forgetSession, useMeQuery } from "./session";
@@ -56,7 +65,16 @@ export function App() {
           <Route index element={<Navigate to={homePath} replace />} />
           <Route path="alerts" element={<AlertList />} />
           <Route path="alerts/:id" element={<AlertDetail />} />
+          <Route path="on-call" element={<OnCall />} />
+          <Route path="schedules/:name" element={<SchedulePage />} />
+          <Route path="silences" element={<SilenceList />} />
+          <Route path="silences/new" element={<NewSilence />} />
+          <Route path="escalation-policies" element={<Policies />} />
+          <Route path="routing" element={<RoutingPage />} />
+          <Route path="teams" element={<Teams />} />
+          <Route path="integrations" element={<Connections />} />
           <Route path="account" element={<Account />} />
+          <Route path="tokens" element={<Tokens />} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>

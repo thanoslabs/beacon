@@ -27,11 +27,17 @@ The page offers the ways to sign in that the configuration has ([[access]]): the
 |---|---|
 | Alerts | The alerts, newest first, with filters for state, severity and team, and the buttons to acknowledge, snooze and resolve |
 | An alert | What it says (labels, annotations, links), what routing decided for it, its group, and its timeline, with the same buttons |
-| Account | Who you are signed in as, your role, and until when the session lasts |
+| On call | Who is on call now, for every schedule, team by team |
+| A schedule | Who is on call, the shifts of four weeks at a time, past and to come, its overrides, with the ways to add and remove one, and the rotation as the files define it |
+| Silences | The silences in force and to come, and on request the expired ones; a form for a new one, with a preview of the open alerts it matches; and the way to expire one |
+| Escalation policies | Each policy step by step: whom it notifies, how long it waits, how often it starts again |
+| Routing | The rules in the order they are tried, with their conditions, team, service, policy and grouping, and the default route |
+| Teams | Who belongs to each team and why, its identity provider groups and its schedules; for admins, the listed people who are not users yet |
+| Sources and integrations | Where alerts come from and where notifications go, without any credential |
+| Account | Who you are signed in as, your role, until when the session lasts, and your chat accounts, with the code to link a Discord account |
+| API tokens | For admins: the tokens, a form for a new one, whose secret is shown once, and the way to revoke one |
 
-The pages for schedules, silences and what the configuration defines follow; this page grows with them.
-
-What the configuration files define is read-only in the app, as in the API: it is changed in the files ([[configuration]]).
+What the configuration files define is read-only in the app, as in the API: it is changed in the files ([[configuration]]). Every such page says so at its top, and has nothing that can be pressed or typed into.
 
 ## Alerts
 
@@ -49,6 +55,73 @@ The page of an alert has its timeline: when it fired, each escalation step with 
 > Labels, annotations and links are written by whoever can send alerts to Beacon. The app shows them as text, never as markup, and makes a link of an address only when it is an `http` or `https` address.
 
 Acting on a whole group at once is in chat and in the API ([[api#Groups]]); the app acts on one alert at a time.
+
+## On call and schedules
+
+![Who is on call](images/web/on-call-light.png)
+
+**On call** answers who is on call now ([[schedules#Who is on call]]) for every schedule, under the team that owns it: the person, until when, and, during an override, for whom they cover and why. It marks the schedules on which it is you. A schedule with nobody on call says so; that is a gap in coverage, not a fault ([[schedules]]).
+
+![The page of a schedule](images/web/schedule-light.png)
+
+The page of a schedule shows four weeks at a time, starting with last week: a bar for each week and, below, the same shifts as a list. Shifts that are over come from the record and are never recomputed; the rest is the plan as the rotation and the overrides stand now. **Earlier** and **Later** move by four weeks, and the week is part of the address.
+
+**Times are in the time zone of your device**, like everywhere in the app. A rotation hands over in the zone its schedule names, so the page states that zone, and a handoff at 09:00 in London is shown at 04:00 to someone in Toronto.
+
+The **rotation** is shown as the files define it, with the members in order, and is marked as managed in the configuration files: it cannot be changed here. When the files hold a changed rotation that has not taken over yet, the page shows it too, with the moment it takes over ([[schedules#Changing a schedule]]).
+
+### Overrides
+
+An override puts someone on call for a period in place of whoever the rotation has ([[schedules#Overrides]]). The page of a schedule lists the overrides in force and to come, with who covers, when, why and who added each.
+
+![Adding an override](images/web/override-light.png)
+
+**Add an override** asks who covers, when it ends, and optionally when it starts (now, when left empty) and why. The times are typed in the zone of your device. Beacon checks the request, and what it refuses is said in the dialog, at the field at fault. **Remove** asks first, because it changes who is on call: an override in force ends at once, and whoever is beneath takes over, an earlier override or else the rotation.
+
+Members and admins alike add and remove overrides, for themselves and for others. Who is on call, the calendar and the on-call page follow at once.
+
+## Silences
+
+![The list of silences](images/web/silences-light.png)
+
+**Silences** lists the silences that are active or pending ([[silences]]), the one that ends first at the top: what each matches, from when to when, why, and who created it. **Also show expired silences** adds the ones that are over.
+
+![A new silence, with its preview](images/web/silence-new-light.png)
+
+**New silence** asks for the matchers, for how long (or until a time you choose) and why. While you fill it in, the page shows **which open alerts the silence would keep quiet now**: it asks Beacon, which matches as it will when the silence exists, so the preview and the silence cannot disagree. A matcher that Beacon refuses, such as a pattern that is no regular expression, is said there with the part at fault. Alerts that fire later and match are silenced too.
+
+**Expire** ends a silence now, after asking: Beacon then tells about the alerts it was keeping quiet that still fire. A silence cannot be edited; expire it and create another.
+
+Members and admins alike create and expire silences, including ones that someone else created.
+
+## What the configuration defines
+
+![An escalation policy](images/web/escalation-policies-light.png)
+
+Under **Configuration** the app shows what is active now, which is what the files said at the last start or reload ([[configuration#Reload without a restart]]): the escalation policies ([[escalation]]), the routing rules in the order they are tried ([[configuration#How an alert is routed]]), the teams, and the sources and integrations. Names link to each other: a step to the schedule it pages, a rule to its team and policy, a team to its schedules. No credential is shown, because the API answers none ([[api#What the configuration defines]]).
+
+![The teams, as an admin sees them](images/web/teams-light.png)
+
+A team lists the people who belong to it now and why: listed in the files, in a group of the identity provider, or both ([[configuration#Team membership]]). **An admin also sees the addresses that the files list and that no user has**, because the person has not signed in yet: such a person is not in the team, and is not notified with it, until their first sign-in. Members do not see them; the API does not answer them to a member.
+
+## Account and chat accounts
+
+![The account page, with a link code](images/web/account-light.png)
+
+**Account** shows who you are signed in as and, under **Chat accounts**, which account in each Slack and Discord integration is yours ([[access#Chat accounts]]). Acknowledging and snoozing from chat need one, and so does being paged there.
+
+- **Slack** accounts are found by Beacon, by your email address. There is nothing to do; the page says whether it has found yours.
+- **Discord** accounts you link yourself. **Get a link code** shows the command to type in Discord ([[discord#People]]). The code works once, for ten minutes, and is shown only then. The page notices when the account is linked. **Remove the link** undoes it, after asking.
+
+The bootstrap admin is not a person and gets no code; the page says what Beacon answers.
+
+## API tokens
+
+![The API tokens, as an admin sees them](images/web/tokens-light.png)
+
+**API tokens**, under **Administration**, is for admins ([[access#API tokens]]): a token can carry any role. It lists the tokens with their role, who created them and when, when they expire and when they were last used, never their secrets. **New token** asks what it is for, its role and for how long it is valid, and then shows the secret **once**: Beacon keeps only a hash. The page keeps the secret in memory until you press **I have stored it** or leave. **Revoke** stops a token at once, after asking.
+
+A member is not offered the page, is told that it is for admins when they open its address, and gets `403` from the API whatever the app shows.
 
 ## Look and use
 
