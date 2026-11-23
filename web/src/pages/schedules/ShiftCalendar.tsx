@@ -42,7 +42,9 @@ export function ShiftCalendar({ schedule }: { schedule: string }) {
     );
   }
 
-  const all = shifts.data?.shifts ?? [];
+  // Times are shown to the minute. A shift that is over within one, as the
+  // rotation's is when an override begins the moment it would, is left out.
+  const all = (shifts.data?.shifts ?? []).filter((shift) => new Date(shift.ends_at).getTime() - new Date(shift.starts_at).getTime() >= 60_000);
   const people = [...new Set(all.map((shift) => shift.user))].sort();
   const colourOf = (email: string) => `who-${people.indexOf(email) % colours}`;
 

@@ -936,3 +936,128 @@ h3 {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Overrides */
+
+.override-list {
+  display: grid;
+}
+
+.override-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 10px 4px;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.input[aria-invalid="true"] {
+  border-color: var(--critical);
+  outline: 1px solid var(--critical);
+}
+
+/* Silences */
+
+.silence-list {
+  display: grid;
+  gap: 8px;
+}
+
+.silence-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding: 12px 16px;
+}
+
+.silence-row > .stack-small {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.silence-comment {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.matchers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.matcher {
+  display: inline-block;
+  padding: 2px 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+
+.matcher-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 3fr) auto;
+  gap: 8px;
+}
+
+@media (max-width: 600px) {
+  .matcher-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+textarea.input {
+  resize: vertical;
+}
+
+/* What the configuration defines */
+
+.notice-warning {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.notice-warning .hint {
+  color: inherit;
+}
+
+.steps {
+  display: grid;
+  gap: 12px;
+}
+
+.step {
+  padding-left: 12px;
+  border-left: 3px solid var(--border-strong);
+}
+
+.step-targets {
+  list-style: disc;
+  padding-left: 20px;
+}
+
+.rules {
+  display: grid;
+  gap: 16px;
+}
+
+/* A secret that is shown once: easy to select whole, and to read. */
+.secret {
+  display: inline-block;
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid currentcolor;
+  border-radius: 4px;
+  color: var(--text);
+  user-select: all;
+  overflow-wrap: anywhere;
+}
