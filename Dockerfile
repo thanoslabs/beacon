@@ -1,5 +1,21 @@
 # Builds the Beacon image: a static binary on a small base, run as a non-root
-# user. The Go version must match .tool-versions; CI checks that it does.
+# user. The web interface is built first and embedded in the binary. The Go
+# and Node versions must match .tool-versions; CI checks that they do.
+
+# The web interface. What it builds is the same for every platform, so the
+# stage runs on the build machine's own architecture, once, and
+# multi-platform builds need no emulation.
+FROM --platform=$BUILDPLATFORM node:26.13.1-alpine3.24 AS web
+
+WORKDIR /src/web
+
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
+
+COPY web ./
+# The build is written to where the Go code embeds it from.
+RUN mkdir -p /src/internal/web/dist && npm run build
 
 # The build stage runs on the build machine's own architecture and
 # cross-compiles, so multi-platform builds need no emulation.
@@ -21,6 +37,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 COPY cmd ./cmd
 COPY internal ./internal
+COPY --from=web /src/internal/web/dist ./internal/web/dist
+# An image without the web interface must not be built: the binary would
+# work and the release would be broken.
+RUN test -s internal/web/dist/index.html
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \

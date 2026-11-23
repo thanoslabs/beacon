@@ -93,8 +93,11 @@ jobs:
           password: ${{ github.token }}
 
       # Publishes ghcr.io/<owner>/<repository>:X.Y.Z (bare version, no 'v'
-      # prefix). The build stage cross-compiles, so no emulation is needed for
-      # the second platform.
+      # prefix). The Dockerfile builds the web interface and embeds it in the
+      # binary, and refuses to build an image without it. That stage and the
+      # Go build stage run on this machine's own architecture (the first
+      # builds files that are the same everywhere, the second
+      # cross-compiles), so no emulation is needed for the second platform.
       - name: Build and push image
         uses: docker/build-push-action@v7.4.0
         with:

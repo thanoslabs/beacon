@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -225,14 +226,18 @@ func TestWithoutABuild(t *testing.T) {
 }
 
 // TestEmbedded checks the app that is in this build of the binary. Without a
-// build it is skipped.
+// build it is skipped, except in CI, where the app is built first: a release
+// without the web interface must not pass.
 func TestEmbedded(t *testing.T) {
 	h, err := web.New(web.Dist(), theAPI)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !h.Built() {
-		t.Skip("the web interface is not built; skipping the test of the embedded app")
+		if os.Getenv("CI") != "" {
+			t.Fatal("the web interface is not built; in CI it is built before the Go code, so that the binary under test is the one that is released")
+		}
+		t.Skip("the web interface is not built (npm run build, in web/); skipping the test of the embedded app")
 	}
 	page := body(t, get(t, h, "GET", "/"))
 	if !strings.Contains(page, `<div id="root">`) {
