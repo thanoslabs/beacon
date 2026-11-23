@@ -10,7 +10,7 @@
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
 > [!WARNING]
-> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md), [routes](docs/configuration.md#how-an-alert-is-routed) them by label, [groups](docs/configuration.md#grouping) related alerts and [escalates](docs/escalation.md) each group through its policy: it pages the person on call, the team or a [Slack](docs/slack.md) or [Discord](docs/discord.md) channel, in chat and by [email](docs/email.md), and posts to an [outbound webhook](docs/outbound-webhook.md), step by step, until someone acknowledges, snoozes or resolves the alert from Slack or Discord, and it [attributes](docs/access.md#chat-accounts) those actions to the Beacon user behind the chat account. It runs [on-call rotations](docs/schedules.md), records every shift, takes [overrides](docs/schedules.md#overrides), answers [who is on call](docs/schedules.md#who-is-on-call) and [previews](docs/schedules.md#preview-a-change) what a change to a schedule would move. It has a [web interface](docs/web.md), embedded in the binary, where people sign in; the pages for alerts, schedules and silences are being added to it. Neither chat integration has been tried against the real service. The [requirements](docs/requirements.md) describe what is planned.
+> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md), [routes](docs/configuration.md#how-an-alert-is-routed) them by label, [groups](docs/configuration.md#grouping) related alerts and [escalates](docs/escalation.md) each group through its policy: it pages the person on call, the team or a [Slack](docs/slack.md) or [Discord](docs/discord.md) channel, in chat and by [email](docs/email.md), and posts to an [outbound webhook](docs/outbound-webhook.md), step by step, until someone acknowledges, snoozes or resolves the alert from Slack or Discord, and it [attributes](docs/access.md#chat-accounts) those actions to the Beacon user behind the chat account. It runs [on-call rotations](docs/schedules.md), records every shift, takes [overrides](docs/schedules.md#overrides), answers [who is on call](docs/schedules.md#who-is-on-call) and [previews](docs/schedules.md#preview-a-change) what a change to a schedule would move. It has a web interface, embedded in the binary, where people sign in; the pages for alerts, schedules and silences are being added to it. Neither chat integration has been tried against the real service. The [requirements](docs/requirements.md) describe what is planned.
 
 ## What Beacon will do
 
@@ -41,7 +41,7 @@ docker compose up --build
 curl http://localhost:8080/readyz
 ```
 
-The [web interface](docs/web.md) is at <http://localhost:8080/>. Signing in needs an `auth` block in the configuration ([access page](docs/access.md)), which the quickstart does not have.
+The web interface is at <http://localhost:8080/>. Signing in needs an `auth` block in the configuration ([access page](docs/access.md)), which the quickstart does not have.
 
 Set `BEACON_PORT` to publish Beacon on a different host port, for example `BEACON_PORT=18080 docker compose up --build`.
 
@@ -78,7 +78,7 @@ Documentation lives in [`docs/`](docs/) and is published to <https://thanoslabs.
 
 `.tool-versions` pins Go, Node and the other tools. Install them with `mise install` (or `asdf install`) before running anything.
 
-The web interface is in [`web/`](web/) and is embedded in the binary from where its build is written. Build it before the binary to have it in the binary; Go alone builds and tests without it, and without Node. The [web interface page](docs/web.md#development) describes the development server, the generated API types and the browser tests.
+The web interface is in [`web/`](web/) and is embedded in the binary from where its build is written. Build it before the binary to have it in the binary; Go alone builds and tests without it, and without Node. In `web/`, `npm run dev` serves the app with hot reload and passes the API on to a Beacon on `127.0.0.1:18080`, and `npm run generate` regenerates the API types from the OpenAPI description.
 
 ```sh
 (cd web && npm ci && npm run build)   # build the web interface; optional for work on Go alone
@@ -120,7 +120,7 @@ The server answers on these endpoints; the [API page](docs/api.md) describes how
 | `GET /api/v1/schedules`, `GET /api/v1/schedules/<name>`, `GET /api/v1/schedules/<name>/shifts`, `GET /api/v1/teams/<name>/on-call` | Who is on call, now and over a period, for a schedule and for a team. Needs a session or a token, with either role. See the [schedules page](docs/schedules.md#who-is-on-call). |
 | `GET`, `POST /api/v1/schedules/<name>/overrides`, `DELETE /api/v1/schedules/<name>/overrides/<id>` | Overrides: someone covers a schedule for a period. Needs a session or a token, with either role. See the [schedules page](docs/schedules.md#overrides). |
 | `POST /auth/bootstrap` | Sign-in of the bootstrap admin, for installs with no identity provider. Off unless configured. |
-| `GET` on every other address outside `/api/` and `/auth/` | The [web interface](docs/web.md). Open: it is the same page for everyone, and shows only the sign-in page without a session. |
+| `GET` on every other address outside `/api/` and `/auth/` | The web interface. Open: it is the same page for everyone, and shows only the sign-in page without a session. |
 | `GET /healthz` | Liveness: the process is running. It does not check the database. |
 | `GET /readyz` | Readiness: the database answers and the server is not shutting down. Returns `503` otherwise. |
 | `GET /metrics` | Prometheus metrics: Go runtime, process and build information, configuration reloads, team and rotation members that are not users yet, users without a linked chat account, and alerts that no routing rule matched. |

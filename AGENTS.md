@@ -17,7 +17,7 @@ Per `docs/requirements.md`:
 - **Declarative configuration files** in YAML for provisioned objects (sources, integrations, routing, escalation policies, teams, schedule rotations), read with [go.yaml.in/yaml/v3](https://github.com/yaml/go-yaml); the database holds runtime state
 
 - **HTTP**: the standard library `net/http` server and router, `log/slog` for structured logs, and [client_golang](https://github.com/prometheus/client_golang) for `/metrics`. There is no web framework.
-- **Web interface** (`web/`): [React](https://react.dev/) and TypeScript, built by [Vite](https://vite.dev/) into `internal/web/dist` and embedded in the binary with `go:embed`. The API client is typed from the OpenAPI description ([openapi-typescript](https://openapi-ts.dev/) and its `openapi-fetch`), server state is held by [TanStack Query](https://tanstack.com/query), and pages are routed by [React Router](https://reactrouter.com/). The style sheet is written by hand; there is no component library. Tests are [Vitest](https://vitest.dev/) with Testing Library, and [Playwright](https://playwright.dev/) with axe against the real binary.
+- **Web interface** (`web/`): [React](https://react.dev/) and TypeScript, built by [Vite](https://vite.dev/) into `internal/web/dist` and embedded in the binary with `go:embed`. The API client is typed from the OpenAPI description ([openapi-typescript](https://openapi-ts.dev/) and its `openapi-fetch`), server state is held by [TanStack Query](https://tanstack.com/query), and pages are routed by [React Router](https://reactrouter.com/). The style sheet is written by hand; there is no component library. Tests are [Vitest](https://vitest.dev/) with Testing Library.
 
 Tooling:
 
@@ -48,7 +48,7 @@ Tooling:
 │   ├── grafana/              # Provisioning of the Grafana of the Compose profile "grafana", and a rule to try it with
 │   ├── mailpit/              # The one account of the SMTP server used in development and tests
 │   └── dex/                  # Configuration of the identity provider used in development and tests
-├── docs/                     # Project documentation (markdown source for the docs site); images/web holds its screenshots of the web interface
+├── docs/                     # Project documentation (markdown source for the docs site)
 ├── examples/                 # Example configurations; a test keeps them valid
 ├── internal/
 │   ├── access/               # Roles and the principal behind a request
@@ -84,7 +84,6 @@ Tooling:
 │   │   └── dist/             # Where `npm run build` writes; only .gitkeep is in git
 │   └── webhook/              # Outbound webhook channel: signed JSON to an address of the operator's
 ├── web/                      # The web interface: a single-page app (React, TypeScript, Vite)
-│   ├── e2e/                  # Browser tests (Playwright) against the real binary, their configuration and the script that runs Beacon for them
 │   ├── public/               # Files served beside the page as they are
 │   └── src/
 │       ├── api/              # The typed API client; schema.d.ts is generated from internal/api/openapi.yaml
@@ -132,15 +131,13 @@ Run `mise install` first so that the pinned versions are used.
 | Regenerate the published API description | `go test ./internal/api -run TestPublishedDescription -update` |
 | Web interface: type check, lint, unit tests | in `web/`: `npm run typecheck`, `npm run lint`, `npm test` |
 | Regenerate the API types of the web interface | in `web/`: `npm run generate` (CI runs `npm run generate:check`) |
-| Browser tests | `docker compose up -d --wait postgres dex mailpit`, build the web interface and `bin/beacon`, then in `web/`: `npx playwright install chromium` once and `npx playwright test` |
-| Work on the web interface | in `web/`: `npm run dev:beacon` (a Beacon on `127.0.0.1:18080` with the Dex users) and `npm run dev` (the app on `http://127.0.0.1:5173`) |
-| Retake the screenshots of the docs | in `web/`: `BEACON_SCREENSHOTS=1 npx playwright test screenshots`, then look at `docs/images/web` |
+| Work on the web interface | start a Beacon on `127.0.0.1:18080`, then in `web/`: `npm run dev` (the app on `http://127.0.0.1:5173`, with `/api` and `/auth` passed on to that Beacon; `BEACON_URL` names another) |
 | Build the image | `docker build -t beacon:dev .` |
 | Run Beacon and Postgres | `docker compose up --build -d --wait`, then `curl localhost:8080/readyz` (set `BEACON_PORT` if 8080 is taken) |
 | Run them with an Alertmanager that sends to Beacon | `BEACON_CONFIG_DIR=./examples/alertmanager docker compose --profile alertmanager up --build -d --wait` (set `BEACON_ALERTMANAGER_PORT` if 9093 is taken) |
 | Run them with a Grafana that sends to Beacon | `BEACON_CONFIG_DIR=./examples/grafana docker compose --profile grafana up --build -d --wait` (set `BEACON_GRAFANA_PORT` if 3000 is taken), then create the rule as `docs/grafana.md` shows |
 
-CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It builds the web interface before the Go code, so the binary under test has the app in it. It starts Postgres, Dex and Mailpit from `compose.yaml`, so CI and development use the same versions. The tests include the end-to-end tests in `internal/e2e`. The `web` job checks that the generated API types are fresh, then type checks, lints, tests and builds the app; the `browser` job runs the Playwright tests against the real binary. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, that the image serves the web interface, the non-root user and a clean exit on termination. It then starts the Alertmanager and the Grafana of the Compose profiles `alertmanager` and `grafana` and checks that an alert of each fires and resolves in Beacon.
+CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. It builds the web interface before the Go code, so the binary under test has the app in it. It starts Postgres, Dex and Mailpit from `compose.yaml`, so CI and development use the same versions. The tests include the end-to-end tests in `internal/e2e`. The `web` job checks that the generated API types are fresh, then type checks, lints, tests and builds the app. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, that the image serves the web interface, the non-root user and a clean exit on termination. It then starts the Alertmanager and the Grafana of the Compose profiles `alertmanager` and `grafana` and checks that an alert of each fires and resolves in Beacon.
 
 ### Container image
 
@@ -168,7 +165,7 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 ### Web interface
 
-- `web/` is the app and `internal/web` serves it. `npm run build` writes into `internal/web/dist`, which `go:embed` takes into the binary. **Go must build and test without Node**: only `dist/.gitkeep` is in git, a binary without the app says so (in the log and to a browser), and no Go test may need the built app except `TestEmbedded`, which is skipped without it and fails in CI. `docs/web.md` is the guide; keep it true, and retake its screenshots when a page changes.
+- `web/` is the app and `internal/web` serves it. `npm run build` writes into `internal/web/dist`, which `go:embed` takes into the binary. **Go must build and test without Node**: only `dist/.gitkeep` is in git, a binary without the app says so (in the log and to a browser), and no Go test may need the built app except `TestEmbedded`, which is skipped without it and fails in CI.
 - **The route of the app is public and takes every `GET` that no other route takes** (`web.Pattern`). That is safe only while two things hold, and `TestRoutes` and `internal/web/web_test.go` check both. The files hold nothing of an install: never render configuration, a version that matters, or anything from the database into the page; the app asks the API. And `web.Reserved` gives every address under `/api` and `/auth` back to the server, so an unknown API address is `401` and JSON, never the page.
 - Every answer of the handler carries `web.ContentSecurityPolicy` and the other headers. The policy allows nothing inline and no other host: do not loosen it for a library; choose a library that needs no inline script or style, and serve fonts and images from the binary. Files under `assets/` have a hash in their name and are immutable; the page is `no-cache`.
 - **Alert text is attacker-controlled**: labels, annotations and links are written by whoever can send an alert. Render them as text, only ever through JSX; ESLint refuses `dangerouslySetInnerHTML` and `innerHTML`. A link from an alert is an `<a>` only when its scheme is `http` or `https`.
@@ -177,9 +174,9 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - The app decides what to *offer* by the role (`useIsAdmin`); what a person may *do* is decided by the API. Never rely on a hidden button, and when a view is for admins, a test must show that a member neither sees it nor gets its data.
 - What the configuration defines is read-only in the app: such a view says that the object is managed in the configuration files and offers no control that changes it.
 - Everything is served from the binary: no fonts, scripts, images or requests to another host, and no telemetry.
-- Accessibility is part of done: semantic elements, a label for every control, a visible focus ring, text contrast of at least 4.5:1 in both themes, and a layout that works at 390 pixels. A new view gets `expectAccessible` in a browser test, which runs axe in both themes and at phone width.
+- Accessibility is part of done: semantic elements, a label for every control, a visible focus ring, text contrast of at least 4.5:1 in both themes, and a layout that works at 390 pixels.
 - Runtime dependencies are few on purpose (React, React DOM, React Router, TanStack Query, `openapi-fetch`). Adding one needs a reason in the PR. Versions are exact in `package.json`, and the lockfile is committed.
-- Component tests (`*.test.tsx`) use `fakeApi` from `web/src/test/api.ts` in place of the API and query by role and label. Browser tests (`web/e2e`) use the real binary from outside, wait for what they expect to see and never for a time, never retry, and fail on any violation of the Content-Security-Policy.
+- Component tests (`*.test.tsx`) use `fakeApi` from `web/src/test/api.ts` in place of the API and query by role and label.
 
 ### Database
 
