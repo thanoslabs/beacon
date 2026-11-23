@@ -195,9 +195,12 @@ func runServe(ctx context.Context, e env, args []string) error {
 	linker.RegisterMetrics(registry)
 	prov.interactions.SetIdentities(prov)
 	prov.discordInteractions.SetIdentities(prov)
-	// A sign-in may have made a user: count the skipped members again, and
-	// look for the user's chat accounts without waiting.
+	// A sign-in may have made a user: a schedule with nobody on call gets
+	// its first member at once, through the same pass the worker makes, the
+	// skipped members are counted again, and the user's chat accounts are
+	// looked for without waiting.
 	prov.auth.AfterSignIn(func(ctx context.Context) {
+		schedules.AdvanceAndReport(ctx, logger)
 		prov.refreshSkipped(ctx)
 		linker.Kick()
 	})
