@@ -1017,3 +1017,47 @@ h3 {
 textarea.input {
   resize: vertical;
 }
+
+/* What the configuration defines */
+
+.notice-warning {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.notice-warning .hint {
+  color: inherit;
+}
+
+.steps {
+  display: grid;
+  gap: 12px;
+}
+
+.step {
+  padding-left: 12px;
+  border-left: 3px solid var(--border-strong);
+}
+
+.step-targets {
+  list-style: disc;
+  padding-left: 20px;
+}
+
+.rules {
+  display: grid;
+  gap: 16px;
+}
+
+/* A secret that is shown once: easy to select whole, and to read. */
+.secret {
+  display: inline-block;
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid currentcolor;
+  border-radius: 4px;
+  color: var(--text);
+  user-select: all;
+  overflow-wrap: anywhere;
+}

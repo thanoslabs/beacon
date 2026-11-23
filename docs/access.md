@@ -112,7 +112,7 @@ curl -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" https://beacon.example.co
 - A token is not tied to the person who created it. It keeps working when they leave, and when sign-in is reconfigured or removed. Review the list from time to time; it shows when each token was last used, to the minute.
 - A request that carries a token is judged by the token alone, even if the browser also has a session.
 
-The first token has to be created by an admin who is signed in: through the identity provider, or as the bootstrap admin.
+The first token has to be created by an admin who is signed in: through the identity provider, or as the bootstrap admin. In the [[web#API tokens|web interface]] that is **API tokens**, under **Administration**.
 
 ## Bootstrap admin
 
