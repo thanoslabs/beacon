@@ -195,7 +195,7 @@ Beacon links each of its users to their account in your workspace, so that it kn
 - **Someone Slack does not know** is logged as a warning, `no account in the chat service has this user's email address`, and counted in the metric `beacon_users_without_identity{integration="..."}`. Beacon asks again every hour, and at once when the person's address in Beacon changes. A member whom Slack has deactivated is not found either.
 - **The addresses must be the same** in the identity provider and in Slack. Nothing else is tried: a name or a similar address is not a match.
 - **An action in Slack is attributed to the linked user.** When someone whose account is linked presses a button, the timeline records the Beacon user together with the Slack account, the alert names them as the person who acknowledged it, and the message shows their name in Beacon. An account that is not linked can resolve an alert and nothing else; see [Who can act](#who-can-act).
-- A person sees their linked accounts at `GET /api/v1/me/identities`.
+- A person sees their linked accounts on the **Account** page of the [[web#Account and chat accounts|web interface]], and at `GET /api/v1/me/identities`.
 - **A person is paged in a direct message.** When a step of an escalation policy names a schedule, a team or a user ([[escalation#Targets]]), each person gets the group's message from the app, in the app's *Messages* tab, with the same buttons as in a channel. The manifest above turns that tab on (`messages_tab_enabled`); without it Slack refuses with `messages_tab_disabled`. A person whose account is not linked cannot be paged: the step skips them, and its event on the timeline says so.
 
 ## When something goes wrong

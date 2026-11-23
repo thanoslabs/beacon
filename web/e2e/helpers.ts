@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, expect, type APIRequestContext, type Page } from "@playwright/test";
 
 /** The users of the Dex of compose.yaml (dev/dex/config.yaml). */
 export const people = {
@@ -92,4 +92,47 @@ export async function expectAccessible(page: Page): Promise<void> {
   }
   await page.setViewportSize(looks[0].viewport);
   await page.emulateMedia({ colorScheme: looks[0].colorScheme });
+}
+
+/** The token of the source "default" (see serve.mjs). */
+const sourceToken = "browser-test-source-token";
+
+export interface Delivery {
+  status?: "firing" | "resolved";
+  labels: Record<string, string>;
+  annotations?: Record<string, string>;
+}
+
+/** Sends an alert as a source would, by the webhook. */
+export async function deliver(request: APIRequestContext, delivery: Delivery): Promise<string> {
+  const answer = await request.post("/api/v1/ingest/default", { headers: { Authorization: `Bearer ${sourceToken}` }, data: delivery });
+  expect(answer.ok(), `the webhook answered ${answer.status()}: ${await answer.text()}`).toBe(true);
+  const body = (await answer.json()) as { alert_id?: string };
+  return body.alert_id ?? "";
+}
+
+/** A name that no other test and no earlier run of this one has used. */
+export function unique(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+}
+
+/**
+ * Waits until the schedule has someone on call, and says who. The first
+ * member of a rotation to sign in takes their place when Beacon's worker
+ * next looks, a few seconds later; a page that is already open would only
+ * show it at its next refresh.
+ */
+export async function someoneOnCall(page: Page, schedule: string): Promise<string> {
+  let user = "";
+  await expect
+    .poll(
+      async () => {
+        const answer = await page.request.get(`/api/v1/schedules/${schedule}`);
+        user = ((await answer.json()) as { on_call?: { user?: string | null } }).on_call?.user ?? "";
+        return user;
+      },
+      { message: `somebody to be on call for ${schedule}`, timeout: 30_000 },
+    )
+    .not.toBe("");
+  return user;
 }

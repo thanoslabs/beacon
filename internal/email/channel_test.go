@@ -83,7 +83,7 @@ Labels:
 
 Status: Firing since 2026-03-01 12:00 UTC
 
-Open in Beacon: https://beacon.example.com/api/v1/alerts/` + alertID + `
+Open in Beacon: https://beacon.example.com/alerts/` + alertID + `
 Runbook: https://runbooks.example.com/disk?a=1&b=2
 Source: https://prometheus.example.com/graph?g0.expr=up
 
@@ -95,7 +95,7 @@ Sent by Beacon because an escalation policy asks for a response to this alert.`
 	for _, want := range []string{
 		`<h2 style="margin: 4px 0 12px 0;">Disk is full on db1</h2>`, "FIRING · critical", "<code>host = db1</code>",
 		`<a href="https://runbooks.example.com/disk?a=1&amp;b=2">Runbook</a>`,
-		`<a href="https://beacon.example.com/api/v1/alerts/` + alertID + `">Open in Beacon</a>`,
+		`<a href="https://beacon.example.com/alerts/` + alertID + `">Open in Beacon</a>`,
 	} {
 		if !strings.Contains(m.HTML, want) {
 			t.Errorf("the HTML form does not contain %q:\n%s", want, m.HTML)

@@ -38,7 +38,8 @@
       "service": "postgres",
       "started_at": "2026-03-01T12:00:00Z",
       "acknowledged_at": "2026-03-01T12:01:00Z",
-      "url": "https://beacon.example.com/api/v1/alerts/9b2d6c1e-0a4f-4a57-8a0c-5f3c7d2e1b90"
+      "url": "https://beacon.example.com/api/v1/alerts/9b2d6c1e-0a4f-4a57-8a0c-5f3c7d2e1b90",
+      "web_url": "https://beacon.example.com/alerts/9b2d6c1e-0a4f-4a57-8a0c-5f3c7d2e1b90"
     }
   ],
   "alerts_omitted": 0,

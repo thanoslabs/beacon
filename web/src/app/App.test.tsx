@@ -67,9 +67,18 @@ describe("a stranger", () => {
 });
 
 describe("someone who is signed in", () => {
-  it("lands on the first page, inside the frame", async () => {
-    fakeApi({ "GET /api/v1/me": grace });
+  it("lands on the alerts", async () => {
+    fakeApi({ "GET /api/v1/me": grace, "GET /api/v1/alerts": { alerts: [] }, "GET /api/v1/teams": { teams: [] } });
     renderApp(<App />);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Alerts" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Alerts" })).toHaveAttribute("aria-current", "page");
+    expect(await screen.findByText("No open alerts")).toBeInTheDocument();
+  });
+
+  it("sees who they are on the account page, inside the frame", async () => {
+    fakeApi({ "GET /api/v1/me": grace, "GET /api/v1/integrations": { integrations: [] }, "GET /api/v1/me/identities": { identities: [] } });
+    renderApp(<App />, { at: "/account" });
 
     expect(await screen.findByRole("heading", { level: 1, name: "Account" })).toBeInTheDocument();
     const account = screen.getByRole("region", { name: "Signed in as" });
@@ -77,6 +86,14 @@ describe("someone who is signed in", () => {
     expect(within(account).getByText("Member")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Account" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "Skip to the page" })).toHaveAttribute("href", "#main");
+    // What is for admins is not offered to a member.
+    expect(screen.queryByRole("link", { name: "API tokens" })).not.toBeInTheDocument();
+  });
+
+  it("is offered the administration when they are an admin", async () => {
+    fakeApi({ "GET /api/v1/me": ada, "GET /api/v1/integrations": { integrations: [] }, "GET /api/v1/me/identities": { identities: [] } });
+    renderApp(<App />, { at: "/account" });
+    expect(await screen.findByRole("link", { name: "API tokens" })).toHaveAttribute("href", "/tokens");
   });
 
   it("is told that an address is no page, without leaving the app", async () => {
@@ -90,41 +107,41 @@ describe("someone who is signed in", () => {
   it("signs out, and nothing that was read stays", async () => {
     const beacon = fakeApi({ "GET /api/v1/me": ada, "POST /auth/logout": () => status(204), "GET /auth/methods": { oidc: true, bootstrap_admin: false } });
     const user = userEvent.setup();
-    const { queryClient } = renderApp(<App />);
+    const { queryClient } = renderApp(<App />, { at: "/account" });
     await screen.findByRole("heading", { level: 1, name: "Account" });
-    queryClient.setQueryData(["alerts"], [{ id: "kept from the session" }]);
+    queryClient.setQueryData(["schedules"], [{ id: "kept from the session" }]);
 
     await user.click(screen.getByRole("button", { name: "Sign out" }));
 
     expect(await screen.findByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
     expect(beacon.callsTo("POST /auth/logout")).toHaveLength(1);
-    expect(queryClient.getQueryData(["alerts"])).toBeUndefined();
+    expect(queryClient.getQueryData(["schedules"])).toBeUndefined();
     expect(screen.queryByText("Ada Example")).not.toBeInTheDocument();
   });
 
   it("is sent to the sign-in page when the session ends while the app is open", async () => {
     fakeApi({ "GET /api/v1/me": ada, "GET /api/v1/alerts": unauthenticated, "GET /auth/methods": { oidc: true, bootstrap_admin: false } });
-    const { queryClient } = renderApp(<App />);
+    const { queryClient } = renderApp(<App />, { at: "/account" });
     await screen.findByRole("heading", { level: 1, name: "Account" });
-    queryClient.setQueryData(["alerts"], [{ id: "kept from the session" }]);
+    queryClient.setQueryData(["schedules"], [{ id: "kept from the session" }]);
 
     // Any request of any page that the API answers with 401.
     await expect(unwrap(api.GET("/api/v1/alerts"))).rejects.toMatchObject({ status: 401 });
 
     expect(await screen.findByText(/Your session has ended/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: "Sign in" })).toBeInTheDocument();
-    await waitFor(() => expect(queryClient.getQueryData(["alerts"])).toBeUndefined());
+    await waitFor(() => expect(queryClient.getQueryData(["schedules"])).toBeUndefined());
   });
 
   it("is told when Beacon cannot be reached, and can try again", async () => {
     const beacon = fakeApi({ "GET /api/v1/me": () => status(500, { error: "internal error" }) });
     const user = userEvent.setup();
-    renderApp(<App />);
+    renderApp(<App />, { at: "/account" });
 
     expect(await screen.findByRole("alert")).toHaveTextContent("internal error");
     beacon.on({ "GET /api/v1/me": ada });
     await user.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("heading", { level: 1, name: "Account" })).toBeInTheDocument();
+    expect(await screen.findByRole("navigation", { name: "Main" })).toBeInTheDocument();
   });
 });
 

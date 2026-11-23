@@ -1,5 +1,6 @@
-import { useSession } from "../app/session";
-import { PageHead, Time, useTitle } from "../app/ui";
+import { useSession } from "../../app/session";
+import { PageHead, Time, useTitle } from "../../app/ui";
+import { ChatAccounts } from "./ChatAccounts";
 
 /** Who is signed in. */
 export function Account() {
@@ -35,6 +36,13 @@ export function Account() {
             Your name, role and teams come from your organisation’s identity provider and are updated each time you
             sign in.
           </p>
+        </div>
+      </section>
+      <section className="card" aria-labelledby="account-chat">
+        <div className="card-body stack-small">
+          <h2 id="account-chat">Chat accounts</h2>
+          <p className="muted">Beacon needs to know which account in Slack or Discord is yours, to page you there and to know that it is you who acknowledges.</p>
+          <ChatAccounts />
         </div>
       </section>
     </div>
