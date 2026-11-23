@@ -2,8 +2,11 @@ import { deliver, expect, expectAccessible, openMenu, signIn, signOut, test, uni
 
 test("a silence is created with a preview of what it matches, keeps Beacon quiet, and is expired", async ({ page, request }) => {
   const name = unique("Backup");
+  // What the silence matches by: a label that both alerts of this test
+  // have, and no other alert.
+  const job = unique("job");
   const comment = `maintenance ${name}`;
-  await deliver(request, { labels: { alertname: name, host: "db1", severity: "warning" } });
+  await deliver(request, { labels: { alertname: name, job, host: "db1", severity: "warning" } });
 
   await signIn(page, "grace");
   await openMenu(page);
@@ -15,7 +18,8 @@ test("a silence is created with a preview of what it matches, keeps Beacon quiet
 
   // The preview follows the matchers: the alert that is open matches.
   const preview = page.getByRole("region", { name: "Open alerts this would silence now" });
-  await page.getByLabel("Value of matcher 1").fill(name);
+  await page.getByLabel("Label of matcher 1").fill("job");
+  await page.getByLabel("Value of matcher 1").fill(job);
   await expect(preview).toContainText("1 open alert matches.");
   await expect(preview.getByRole("link", { name })).toBeVisible();
   // A second matcher that the alert does not meet takes it out again.
@@ -41,14 +45,18 @@ test("a silence is created with a preview of what it matches, keeps Beacon quiet
   await expect(page).toHaveURL("/silences");
   const row = page.getByRole("list", { name: "Silences" }).getByRole("listitem").filter({ hasText: comment });
   await expect(row).toContainText("Active");
-  await expect(row).toContainText(`alertname="${name}"`);
+  await expect(row).toContainText(`job="${job}"`);
   await expect(row).toContainText('host=~"db[0-9]+"');
   await expect(row).toContainText("Created by Grace Example");
 
   // An alert that fires under the silence is recorded, and nobody is told.
-  const quiet = await deliver(request, { labels: { alertname: name, host: "db7", severity: "warning" } });
+  // It has a name of its own, and so a group of its own, which nothing
+  // has escalated before.
+  const quiet = await deliver(request, { labels: { alertname: `${name}-quiet`, job, host: "db7", severity: "warning" } });
   await page.goto(`/alerts/${quiet}`);
-  await expect(page.getByRole("region", { name: "Timeline" })).toContainText("Kept quiet by a silence");
+  const timeline = page.getByRole("region", { name: "Timeline" });
+  await expect(timeline).toContainText("Kept quiet by a silence");
+  await expect(timeline).not.toContainText("Escalation step");
 
   // Expiring asks first.
   await page.goto("/silences");
@@ -67,6 +75,6 @@ test("a silence is created with a preview of what it matches, keeps Beacon quiet
   await expect(row).toContainText("Expired");
   await expect(row.getByRole("button")).toHaveCount(0);
   await page.goto(`/alerts/${quiet}`);
-  await expect(page.getByRole("region", { name: "Timeline" })).toContainText("Escalation step 1 of 2");
+  await expect(timeline).toContainText("Escalation step 1 of 2");
   await signOut(page);
 });
