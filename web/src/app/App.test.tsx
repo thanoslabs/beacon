@@ -77,7 +77,7 @@ describe("someone who is signed in", () => {
   });
 
   it("sees who they are on the account page, inside the frame", async () => {
-    fakeApi({ "GET /api/v1/me": grace });
+    fakeApi({ "GET /api/v1/me": grace, "GET /api/v1/integrations": { integrations: [] }, "GET /api/v1/me/identities": { identities: [] } });
     renderApp(<App />, { at: "/account" });
 
     expect(await screen.findByRole("heading", { level: 1, name: "Account" })).toBeInTheDocument();
@@ -86,6 +86,14 @@ describe("someone who is signed in", () => {
     expect(within(account).getByText("Member")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Account" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "Skip to the page" })).toHaveAttribute("href", "#main");
+    // What is for admins is not offered to a member.
+    expect(screen.queryByRole("link", { name: "API tokens" })).not.toBeInTheDocument();
+  });
+
+  it("is offered the administration when they are an admin", async () => {
+    fakeApi({ "GET /api/v1/me": ada, "GET /api/v1/integrations": { integrations: [] }, "GET /api/v1/me/identities": { identities: [] } });
+    renderApp(<App />, { at: "/account" });
+    expect(await screen.findByRole("link", { name: "API tokens" })).toHaveAttribute("href", "/tokens");
   });
 
   it("is told that an address is no page, without leaving the app", async () => {

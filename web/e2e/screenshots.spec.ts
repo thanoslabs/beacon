@@ -35,7 +35,6 @@ test.describe("screenshots", () => {
 
     await signIn(page, "ada", "/account");
     await expect(page.getByRole("heading", { level: 1, name: "Account" })).toBeVisible();
-    await capture(page, "account");
     await signOut(page);
   });
 
@@ -91,6 +90,59 @@ test.describe("screenshots", () => {
     await expect(page.getByRole("dialog")).toBeVisible();
     await capture(page, "override");
     await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+    await signOut(page);
+  });
+
+  test("silences", async ({ page, request }) => {
+    await signIn(page, "ada");
+    await deliver(request, { labels: { alertname: "BackupSlow", host: "db1", severity: "warning" }, annotations: { summary: "The nightly backup of db1 is slow" } });
+    await deliver(request, { labels: { alertname: "BackupSlow", host: "db2", severity: "warning" }, annotations: { summary: "The nightly backup of db2 is slow" } });
+    for (const silence of [
+      { matchers: [{ label: "alertname", operator: "=", value: "DiskFull" }, { label: "host", operator: "=~", value: "db[0-9]+" }], duration: "2h", comment: "Replacing the disks of the database hosts" },
+      { matchers: [{ label: "service", operator: "=", value: "checkout" }], starts_at: new Date(Date.now() + 6 * 3600 * 1000).toISOString(), duration: "1h", comment: "Planned failover test of checkout" },
+    ]) {
+      expect((await page.request.post("/api/v1/silences", { data: silence })).status()).toBe(201);
+    }
+    await page.goto("/silences");
+    await expect(page.getByRole("list", { name: "Silences" }).getByRole("listitem").first()).toBeVisible();
+    await capture(page, "silences");
+
+    await page.goto("/silences/new");
+    await page.getByLabel("Value of matcher 1").fill("BackupSlow");
+    await page.getByLabel("Why").fill("The backup window is being moved");
+    await expect(page.getByRole("region", { name: "Open alerts this would silence now" })).toContainText("2 open alerts match.");
+    await capture(page, "silence-new");
+    await signOut(page);
+  });
+
+  test("what the configuration defines", async ({ page }) => {
+    await signIn(page, "ada");
+    for (const [path, name] of [["/escalation-policies", "escalation-policies"], ["/routing", "routing"], ["/teams", "teams"], ["/integrations", "integrations"]] as const) {
+      await page.goto(path);
+      await expect(page.getByRole("main").locator(".card").first()).toBeVisible();
+      await capture(page, name);
+    }
+    await signOut(page);
+  });
+
+  test("account and API tokens", async ({ page }) => {
+    await signIn(page, "ada", "/account");
+    await page.getByRole("button", { name: "Get a link code for discord" }).click();
+    await expect(page.locator(".secret")).toBeVisible();
+    await capture(page, "account");
+
+    for (const token of [
+      { name: "deploy-pipeline", role: "member", expires_in: "90d" },
+      { name: "terraform", role: "admin", expires_in: "52w" },
+    ]) {
+      expect((await page.request.post("/api/v1/tokens", { data: token })).status()).toBe(201);
+    }
+    await page.goto("/tokens");
+    await page.getByRole("button", { name: "New token" }).click();
+    await page.getByRole("dialog").getByLabel("What it is for").fill("status-page");
+    await page.getByRole("dialog").getByRole("button", { name: "Create the token" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "cannot be shown again" })).toBeVisible();
+    await capture(page, "tokens");
     await signOut(page);
   });
 });
