@@ -5,6 +5,10 @@ import { setSessionEndedHandler } from "../api/client";
 import { Account } from "../pages/Account";
 import { AlertDetail } from "../pages/alerts/AlertDetail";
 import { AlertList } from "../pages/alerts/AlertList";
+import { Connections } from "../pages/configuration/Connections";
+import { Policies } from "../pages/configuration/Policies";
+import { RoutingPage } from "../pages/configuration/RoutingPage";
+import { Teams } from "../pages/configuration/Teams";
 import { Login } from "../pages/Login";
 import { OnCall } from "../pages/schedules/OnCall";
 import { SchedulePage } from "../pages/schedules/SchedulePage";
@@ -64,6 +68,10 @@ export function App() {
           <Route path="schedules/:name" element={<SchedulePage />} />
           <Route path="silences" element={<SilenceList />} />
           <Route path="silences/new" element={<NewSilence />} />
+          <Route path="escalation-policies" element={<Policies />} />
+          <Route path="routing" element={<RoutingPage />} />
+          <Route path="teams" element={<Teams />} />
+          <Route path="integrations" element={<Connections />} />
           <Route path="account" element={<Account />} />
           <Route path="*" element={<NotFound />} />
         </Route>

@@ -1017,3 +1017,35 @@ h3 {
 textarea.input {
   resize: vertical;
 }
+
+/* What the configuration defines */
+
+.notice-warning {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.notice-warning .hint {
+  color: inherit;
+}
+
+.steps {
+  display: grid;
+  gap: 12px;
+}
+
+.step {
+  padding-left: 12px;
+  border-left: 3px solid var(--border-strong);
+}
+
+.step-targets {
+  list-style: disc;
+  padding-left: 20px;
+}
+
+.rules {
+  display: grid;
+  gap: 16px;
+}

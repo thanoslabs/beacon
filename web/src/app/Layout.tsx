@@ -23,6 +23,15 @@ const sections: NavSection[] = [
       { to: "/silences", label: "Silences" },
     ],
   },
+  {
+    heading: "Configuration",
+    items: [
+      { to: "/escalation-policies", label: "Escalation policies" },
+      { to: "/routing", label: "Routing" },
+      { to: "/teams", label: "Teams" },
+      { to: "/integrations", label: "Sources and integrations" },
+    ],
+  },
   { heading: "You", items: [{ to: "/account", label: "Account" }] },
 ];
 
