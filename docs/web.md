@@ -34,7 +34,8 @@ The page offers the ways to sign in that the configuration has ([[access]]): the
 | Routing | The rules in the order they are tried, with their conditions, team, service, policy and grouping, and the default route |
 | Teams | Who belongs to each team and why, its identity provider groups and its schedules; for admins, the listed people who are not users yet |
 | Sources and integrations | Where alerts come from and where notifications go, without any credential |
-| Account | Who you are signed in as, your role, and until when the session lasts |
+| Account | Who you are signed in as, your role, until when the session lasts, and your chat accounts, with the code to link a Discord account |
+| API tokens | For admins: the tokens, a form for a new one, whose secret is shown once, and the way to revoke one |
 
 What the configuration files define is read-only in the app, as in the API: it is changed in the files ([[configuration]]). Every such page says so at its top, and has nothing that can be pressed or typed into.
 
@@ -102,6 +103,25 @@ Under **Configuration** the app shows what is active now, which is what the file
 ![The teams, as an admin sees them](images/web/teams-light.png)
 
 A team lists the people who belong to it now and why: listed in the files, in a group of the identity provider, or both ([[configuration#Team membership]]). **An admin also sees the addresses that the files list and that no user has**, because the person has not signed in yet: such a person is not in the team, and is not notified with it, until their first sign-in. Members do not see them; the API does not answer them to a member.
+
+## Account and chat accounts
+
+![The account page, with a link code](images/web/account-light.png)
+
+**Account** shows who you are signed in as and, under **Chat accounts**, which account in each Slack and Discord integration is yours ([[access#Chat accounts]]). Acknowledging and snoozing from chat need one, and so does being paged there.
+
+- **Slack** accounts are found by Beacon, by your email address. There is nothing to do; the page says whether it has found yours.
+- **Discord** accounts you link yourself. **Get a link code** shows the command to type in Discord ([[discord#People]]). The code works once, for ten minutes, and is shown only then. The page notices when the account is linked. **Remove the link** undoes it, after asking.
+
+The bootstrap admin is not a person and gets no code; the page says what Beacon answers.
+
+## API tokens
+
+![The API tokens, as an admin sees them](images/web/tokens-light.png)
+
+**API tokens**, under **Administration**, is for admins ([[access#API tokens]]): a token can carry any role. It lists the tokens with their role, who created them and when, when they expire and when they were last used, never their secrets. **New token** asks what it is for, its role and for how long it is valid, and then shows the secret **once**: Beacon keeps only a hash. The page keeps the secret in memory until you press **I have stored it** or leave. **Revoke** stops a token at once, after asking.
+
+A member is not offered the page, is told that it is for admins when they open its address, and gets `403` from the API whatever the app shows.
 
 ## Look and use
 

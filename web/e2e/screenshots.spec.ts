@@ -35,7 +35,6 @@ test.describe("screenshots", () => {
 
     await signIn(page, "ada", "/account");
     await expect(page.getByRole("heading", { level: 1, name: "Account" })).toBeVisible();
-    await capture(page, "account");
     await signOut(page);
   });
 
@@ -123,6 +122,27 @@ test.describe("screenshots", () => {
       await expect(page.getByRole("main").locator(".card").first()).toBeVisible();
       await capture(page, name);
     }
+    await signOut(page);
+  });
+
+  test("account and API tokens", async ({ page }) => {
+    await signIn(page, "ada", "/account");
+    await page.getByRole("button", { name: "Get a link code for discord" }).click();
+    await expect(page.locator(".secret")).toBeVisible();
+    await capture(page, "account");
+
+    for (const token of [
+      { name: "deploy-pipeline", role: "member", expires_in: "90d" },
+      { name: "terraform", role: "admin", expires_in: "52w" },
+    ]) {
+      expect((await page.request.post("/api/v1/tokens", { data: token })).status()).toBe(201);
+    }
+    await page.goto("/tokens");
+    await page.getByRole("button", { name: "New token" }).click();
+    await page.getByRole("dialog").getByLabel("What it is for").fill("status-page");
+    await page.getByRole("dialog").getByRole("button", { name: "Create the token" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "cannot be shown again" })).toBeVisible();
+    await capture(page, "tokens");
     await signOut(page);
   });
 });

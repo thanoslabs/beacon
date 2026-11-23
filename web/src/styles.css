@@ -1049,3 +1049,15 @@ textarea.input {
   display: grid;
   gap: 16px;
 }
+
+/* A secret that is shown once: easy to select whole, and to read. */
+.secret {
+  display: inline-block;
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid currentcolor;
+  border-radius: 4px;
+  color: var(--text);
+  user-select: all;
+  overflow-wrap: anywhere;
+}

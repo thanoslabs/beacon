@@ -2,7 +2,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router";
 import { setSessionEndedHandler } from "../api/client";
-import { Account } from "../pages/Account";
+import { Account } from "../pages/account/Account";
+import { Tokens } from "../pages/account/Tokens";
 import { AlertDetail } from "../pages/alerts/AlertDetail";
 import { AlertList } from "../pages/alerts/AlertList";
 import { Connections } from "../pages/configuration/Connections";
@@ -73,6 +74,7 @@ export function App() {
           <Route path="teams" element={<Teams />} />
           <Route path="integrations" element={<Connections />} />
           <Route path="account" element={<Account />} />
+          <Route path="tokens" element={<Tokens />} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>
