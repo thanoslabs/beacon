@@ -25,11 +25,30 @@ The page offers the ways to sign in that the configuration has ([[access]]): the
 
 | Page | What is there |
 |---|---|
+| Alerts | The alerts, newest first, with filters for state, severity and team, and the buttons to acknowledge, snooze and resolve |
+| An alert | What it says (labels, annotations, links), what routing decided for it, its group, and its timeline, with the same buttons |
 | Account | Who you are signed in as, your role, and until when the session lasts |
 
-The pages for alerts, schedules, silences and what the configuration defines follow; this page grows with them.
+The pages for schedules, silences and what the configuration defines follow; this page grows with them.
 
 What the configuration files define is read-only in the app, as in the API: it is changed in the files ([[configuration]]).
+
+## Alerts
+
+![The list of alerts](images/web/alerts-light.png)
+
+The list opens on the alerts that are not resolved. **State**, **Severity** and **Team** narrow it, and are part of the address, so a filtered list can be bookmarked or sent to someone. The list asks Beacon again every few seconds and when you come back to its tab: a new alert appears, and one that its source resolved goes, without a reload. If a refresh fails, the list stays and says that it may be out of date.
+
+Each alert shows the buttons that its state allows ([[alert-lifecycle]]): **Acknowledge**, **Snooze** (for 30 minutes, 1 hour, 4 hours or a day) and **Resolve**. They do what the same buttons do in chat ([[slack#Who can act]]), for the one alert, as you: the timeline names you. If someone else was quicker, the page says what Beacon answered and shows the alert as it is.
+
+![The page of an alert](images/web/alert-light.png)
+
+The page of an alert has its timeline: when it fired, each escalation step with who was notified and who could not be and why, each delivery and each failure, and who acknowledged, snoozed or resolved it and from where. The links in [[email|emails]] lead to this page.
+
+> [!note] What an alert says is shown as text
+> Labels, annotations and links are written by whoever can send alerts to Beacon. The app shows them as text, never as markup, and makes a link of an address only when it is an `http` or `https` address.
+
+Acting on a whole group at once is in chat and in the API ([[api#Groups]]); the app acts on one alert at a time.
 
 ## Look and use
 
@@ -38,9 +57,9 @@ What the configuration files define is read-only in the app, as in the API: it i
 - **Keyboard.** Everything can be reached and used with the keyboard. The first stop of the Tab key on every page skips the navigation.
 - **Times** are shown in the time zone of your device, with the zone named.
 
-![The account page in the dark theme](images/web/account-dark.png)
+![The page of an alert in the dark theme](images/web/alert-dark.png)
 
-![The account page on a phone](images/web/account-phone.png)
+![The list of alerts on a phone](images/web/alerts-phone.png)
 
 ## What the browser is given
 
