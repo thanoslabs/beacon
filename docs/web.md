@@ -30,11 +30,13 @@ The page offers the ways to sign in that the configuration has ([[access]]): the
 | On call | Who is on call now, for every schedule, team by team |
 | A schedule | Who is on call, the shifts of four weeks at a time, past and to come, its overrides, with the ways to add and remove one, and the rotation as the files define it |
 | Silences | The silences in force and to come, and on request the expired ones; a form for a new one, with a preview of the open alerts it matches; and the way to expire one |
+| Escalation policies | Each policy step by step: whom it notifies, how long it waits, how often it starts again |
+| Routing | The rules in the order they are tried, with their conditions, team, service, policy and grouping, and the default route |
+| Teams | Who belongs to each team and why, its identity provider groups and its schedules; for admins, the listed people who are not users yet |
+| Sources and integrations | Where alerts come from and where notifications go, without any credential |
 | Account | Who you are signed in as, your role, and until when the session lasts |
 
-The pages for the rest of what the configuration defines follow; this page grows with them.
-
-What the configuration files define is read-only in the app, as in the API: it is changed in the files ([[configuration]]).
+What the configuration files define is read-only in the app, as in the API: it is changed in the files ([[configuration]]). Every such page says so at its top, and has nothing that can be pressed or typed into.
 
 ## Alerts
 
@@ -90,6 +92,16 @@ Members and admins alike add and remove overrides, for themselves and for others
 **Expire** ends a silence now, after asking: Beacon then tells about the alerts it was keeping quiet that still fire. A silence cannot be edited; expire it and create another.
 
 Members and admins alike create and expire silences, including ones that someone else created.
+
+## What the configuration defines
+
+![An escalation policy](images/web/escalation-policies-light.png)
+
+Under **Configuration** the app shows what is active now, which is what the files said at the last start or reload ([[configuration#Reload without a restart]]): the escalation policies ([[escalation]]), the routing rules in the order they are tried ([[configuration#How an alert is routed]]), the teams, and the sources and integrations. Names link to each other: a step to the schedule it pages, a rule to its team and policy, a team to its schedules. No credential is shown, because the API answers none ([[api#What the configuration defines]]).
+
+![The teams, as an admin sees them](images/web/teams-light.png)
+
+A team lists the people who belong to it now and why: listed in the files, in a group of the identity provider, or both ([[configuration#Team membership]]). **An admin also sees the addresses that the files list and that no user has**, because the person has not signed in yet: such a person is not in the team, and is not notified with it, until their first sign-in. Members do not see them; the API does not answer them to a member.
 
 ## Look and use
 
