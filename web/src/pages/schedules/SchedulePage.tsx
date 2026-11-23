@@ -3,6 +3,7 @@ import { ApiError } from "../../api/client";
 import { viewerZone } from "../../app/format";
 import { ErrorNotice, Loading, PageHead, Provisioned, Time, useTitle } from "../../app/ui";
 import { OnCallNowLine } from "./OnCall";
+import { Overrides } from "./Overrides";
 import { usePersonName, useSchedule, type Schedule } from "./queries";
 import { ShiftCalendar } from "./ShiftCalendar";
 
@@ -65,6 +66,13 @@ export function SchedulePage() {
         <div className="card-body stack-small">
           <h2 id="schedule-shifts">Shifts</h2>
           <ShiftCalendar schedule={data.name} />
+        </div>
+      </section>
+
+      <section className="card" aria-labelledby="schedule-overrides">
+        <div className="card-body stack-small">
+          <h2 id="schedule-overrides">Overrides</h2>
+          <Overrides schedule={data.name} />
         </div>
       </section>
 
