@@ -145,10 +145,14 @@ func TestDiscordChannel(t *testing.T) {
 	if msgs := b.discord.Messages(); len(msgs) != 1 || msg.Edits != 1 {
 		t.Errorf("Discord has %d messages and the first has %d edits, want one message edited once", len(msgs), msg.Edits)
 	}
-	var ref string
-	if err := b.db.QueryRow(context.Background(), `SELECT DISTINCT external_ref FROM notifications`).Scan(&ref); err != nil || ref != discordtest.Channel+":"+msg.ID {
-		t.Errorf("external_ref = %q, %v", ref, err)
-	}
+	// Discord has the edit before Beacon has written down that it was
+	// delivered, so the reference of the second notification is waited for.
+	b.waitFor("every notification to refer to the one message", func() bool {
+		var all bool
+		err := b.db.QueryRow(context.Background(), `SELECT COALESCE(bool_and(external_ref IS NOT DISTINCT FROM $1), false) FROM notifications`,
+			discordtest.Channel+":"+msg.ID).Scan(&all)
+		return err == nil && all
+	})
 	if len(b.slack.Messages()) != 0 {
 		t.Errorf("Slack was sent a message for a policy that names Discord only")
 	}
