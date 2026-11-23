@@ -26,7 +26,7 @@ Each has a role, `member` or `admin`. Members read everything and act on runtime
 
 | Status | Meaning |
 |---|---|
-| `401` | No valid credential. An address that does not exist answers `401` too, so that a stranger cannot map the API. |
+| `401` | No valid credential. An address under `/api/` or `/auth/` that does not exist answers `401` too, so that a stranger cannot map the API. Other addresses are pages of the web interface. |
 | `403` | The credential lacks the role, or a browser sent a request that changes something from another site |
 
 ## Conventions

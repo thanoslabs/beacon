@@ -78,6 +78,8 @@ Tooling:
 │   ├── slack/                # Slack channel: Web API client, message rendering and button presses
 │   │   └── slacktest/        # Fake Slack for tests
 │   ├── version/              # Build version reporting
+│   ├── web/                  # Serves the web interface: the embedded build, its headers, and the fallback to the page
+│   │   └── dist/             # Where the build of the web interface is written; only .gitkeep is in git
 │   └── webhook/              # Outbound webhook channel: signed JSON to an address of the operator's
 ├── .dockerignore             # Build context allow-list; add new source directories here
 ├── .golangci.yml             # golangci-lint configuration
@@ -146,6 +148,12 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Log with the `slog` methods that take a context (`InfoContext` and so on) inside request handling, so the record carries `request_id`.
 - Register metrics on the registry from `server.NewRegistry()`, not the global default. Keep label values to bounded sets (see the cardinality warning in `docs/requirements.md`).
 - The process must stay stateless: anything that has to survive a restart or be seen by another replica goes in Postgres, never in memory or on local disk.
+
+### Web interface
+
+- `internal/web` serves the web interface from `internal/web/dist`, which `go:embed` takes into the binary. **Go must build and test without Node**: only `dist/.gitkeep` is in git, a binary without the app says so (in the log and to a browser), and no Go test may need the built app except `TestEmbedded`, which is skipped without it.
+- **The route of the app is public and takes every `GET` that no other route takes** (`web.Pattern`). That is safe only while two things hold, and `TestRoutes` and `internal/web/web_test.go` check both. The files hold nothing of an install: never render configuration, a version that matters, or anything from the database into the page; the app asks the API. And `web.Reserved` gives every address under `/api` and `/auth` back to the server, so an unknown API address is `401` and JSON, never the page.
+- Every answer of the handler carries `web.ContentSecurityPolicy` and the other headers. The policy allows nothing inline and no other host: do not loosen it for a library; choose a library that needs no inline script or style, and serve fonts and images from the binary. Files under `assets/` have a hash in their name and are immutable; the page is `no-cache`.
 
 ### Database
 

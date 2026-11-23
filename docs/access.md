@@ -6,8 +6,8 @@ date: 2026-11-17
 
 People sign in to Beacon through your organisation's identity provider, with OpenID Connect. A user is created in Beacon's database the first time they sign in, and updated on every later sign-in. Automation authenticates with [API tokens](#api-tokens). An install that has no identity provider yet starts with the [bootstrap admin](#bootstrap-admin).
 
-> [!note] No web interface yet
-> Sign-in works over HTTP today and can be tried in a browser, but there are no pages. After signing in, the browser lands on `/api/v1/me`, which answers who you are as JSON.
+> [!note] The web interface is being built
+> Sign-in works in a browser today. After signing in, the browser lands on `/`, where Beacon serves the web interface when the binary has one; a binary without it says so there. `/api/v1/me` answers who you are as JSON.
 
 ## Set up the identity provider
 
@@ -50,7 +50,7 @@ Beacon reads the provider's discovery document when it starts. If the provider c
 
 ## Who may use what
 
-Beacon is closed by default. Every route needs a session unless it is on the short list of public routes below, and a request to anything else, including an address that does not exist, is answered with `401`.
+Beacon is closed by default. Every route needs a session unless it is on the short list of public routes below, and a request to anything else under `/api/` and `/auth/`, including an address that does not exist, is answered with `401`. Every other address is a page of the web interface, which is public and shows nothing but the sign-in page until someone has signed in.
 
 | Endpoint | Who | Purpose |
 |---|---|---|
@@ -72,11 +72,12 @@ Beacon is closed by default. Every route needs a session unless it is on the sho
 | `POST /api/v1/integrations/<name>/interactions` | Public | Receives button presses from Slack and from Discord. The service's signature is checked; see [[slack]] and [[discord]]. |
 | `GET /api/v1/openapi.json`, `GET /api/v1/openapi.yaml` | Public | The OpenAPI description of the API; see [[api#OpenAPI description]] |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Public | Probes and metrics, for machines that have no session |
+| `GET` on every other address that is not under `/api/` or `/auth/` | Public | The web interface: one page with its script and style sheet, the same for everyone. It holds nothing of an install; what it shows it asks of the routes above. |
 
 "Member" means anyone who is signed in or presents an API token, with either role. "Admin" needs the admin role; a member gets `403`.
 
 > [!warning] Keep `/metrics` off the public internet
-> The probes and the metrics need no session, because the systems that call them have none. Metrics name your teams. If Beacon is reachable from outside, let your proxy expose only what outsiders need: `/api/v1/ingest/`, `/api/v1/integrations/` and `/auth/`.
+> The probes and the metrics need no session, because the systems that call them have none. Metrics name your teams. If Beacon is reachable from outside, let your proxy expose only what outsiders need: `/api/v1/ingest/` and `/api/v1/integrations/` for the systems that send to Beacon, and, if people use the web interface from outside, everything except `/metrics`, `/healthz` and `/readyz`.
 
 ## API tokens
 
