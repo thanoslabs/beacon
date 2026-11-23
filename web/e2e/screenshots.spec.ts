@@ -93,4 +93,26 @@ test.describe("screenshots", () => {
     await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
     await signOut(page);
   });
+
+  test("silences", async ({ page, request }) => {
+    await signIn(page, "ada");
+    await deliver(request, { labels: { alertname: "BackupSlow", host: "db1", severity: "warning" }, annotations: { summary: "The nightly backup of db1 is slow" } });
+    await deliver(request, { labels: { alertname: "BackupSlow", host: "db2", severity: "warning" }, annotations: { summary: "The nightly backup of db2 is slow" } });
+    for (const silence of [
+      { matchers: [{ label: "alertname", operator: "=", value: "DiskFull" }, { label: "host", operator: "=~", value: "db[0-9]+" }], duration: "2h", comment: "Replacing the disks of the database hosts" },
+      { matchers: [{ label: "service", operator: "=", value: "checkout" }], starts_at: new Date(Date.now() + 6 * 3600 * 1000).toISOString(), duration: "1h", comment: "Planned failover test of checkout" },
+    ]) {
+      expect((await page.request.post("/api/v1/silences", { data: silence })).status()).toBe(201);
+    }
+    await page.goto("/silences");
+    await expect(page.getByRole("list", { name: "Silences" }).getByRole("listitem").first()).toBeVisible();
+    await capture(page, "silences");
+
+    await page.goto("/silences/new");
+    await page.getByLabel("Value of matcher 1").fill("BackupSlow");
+    await page.getByLabel("Why").fill("The backup window is being moved");
+    await expect(page.getByRole("region", { name: "Open alerts this would silence now" })).toContainText("2 open alerts match.");
+    await capture(page, "silence-new");
+    await signOut(page);
+  });
 });
