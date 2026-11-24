@@ -280,3 +280,59 @@ func TestSeverityIsMappedForEverySourceType(t *testing.T) {
 		}
 	}
 }
+
+// TestSenderNamesThePolicy: a webhook payload may name the escalation
+// policy of its alert. The alert keeps what routing gives it otherwise, and
+// its group is one of alerts that were sent to that policy the same way.
+func TestSenderNamesThePolicy(t *testing.T) {
+	f := newRouted(t)
+	// Routing would send this alert to the default policy.
+	routed := f.post(t, "staging", stagingToken, `{"labels": {"alertname": "DiskFilling", "host": "a"}}`)
+	chosen := f.post(t, "staging", stagingToken, `{"labels": {"alertname": "DiskFilling", "host": "b"}, "escalation_policy": "urgent"}`)
+	again := f.post(t, "staging", stagingToken, `{"labels": {"alertname": "DiskFilling", "host": "c"}, "escalation_policy": "urgent"}`)
+	if routed.code != http.StatusCreated || chosen.code != http.StatusCreated || again.code != http.StatusCreated {
+		t.Fatalf("fire = %d, %d, %d", routed.code, chosen.code, again.code)
+	}
+	byRouting, groupA := f.stored(t, routed.body["alert_id"])
+	byName, groupB := f.stored(t, chosen.body["alert_id"])
+	_, groupC := f.stored(t, again.body["alert_id"])
+	if byRouting.Policy != "default" || byName.Policy != "urgent" {
+		t.Errorf("policies = %q and %q, want default and urgent", byRouting.Policy, byName.Policy)
+	}
+	if byName.Team != "platform" || byName.GroupTeam != "platform" || byName.Rule != "" {
+		t.Errorf("the alert with a named policy lost what routing gives it: %+v", byName)
+	}
+	if groupA == groupB || groupB != groupC {
+		t.Errorf("groups: routed %s, named %s and %s; want the named ones together and apart from the routed one", groupA, groupB, groupC)
+	}
+	// A repeat without the field is the same alert, and stays where it is.
+	if res := f.post(t, "staging", stagingToken, `{"labels": {"alertname": "DiskFilling", "host": "b"}}`); res.code != http.StatusOK || res.body["alert_id"] != chosen.body["alert_id"] {
+		t.Errorf("repeat = %d %v", res.code, res.body)
+	}
+	if got, group := f.stored(t, chosen.body["alert_id"]); got.Policy != "urgent" || group != groupB {
+		t.Errorf("a repeat moved the alert: %+v", got)
+	}
+
+	for body, want := range map[string]string{
+		`{"labels": {"alertname": "A"}, "escalation_policy": "no-such-policy"}`:               "the configuration has no escalation policy with this name",
+		`{"labels": {"alertname": "A"}, "escalation_policy": ""}`:                             "must be the name of an escalation policy, between 1 and 100 characters",
+		`{"labels": {"alertname": "A"}, "escalation_policy": 7}`:                              "must be a string",
+		`{"status": "resolved", "labels": {"alertname": "A"}, "escalation_policy": "urgent"}`: `is only allowed when status is "firing": an alert keeps the policy it was opened with`,
+	} {
+		var out struct{ Error, Field string }
+		if code := f.postInto(t, "staging", stagingToken, body, &out); code != http.StatusBadRequest || out.Field != "escalation_policy" || out.Error != want {
+			t.Errorf("%s = %d %+v, want 400 with %q", body, code, out, want)
+		}
+	}
+	// The field belongs to Beacon's own payload: Alertmanager's has no such
+	// thing, and what it sends under that name is ignored like the rest.
+	var group map[string]any
+	if code := f.postInto(t, "am", amToken, strings.Replace(captured(t, "alertmanager/firing.json"), `{`, `{"escalation_policy": "urgent", `, 1), &group); code != http.StatusOK {
+		t.Fatalf("alertmanager = %d %v", code, group)
+	}
+	var policies string
+	if err := f.pool.QueryRow(context.Background(), `SELECT string_agg(DISTINCT p.name, ',') FROM alerts a JOIN sources s ON s.id = a.source_id
+		JOIN alert_groups g ON g.id = a.group_id JOIN escalation_policies p ON p.id = g.escalation_policy_id WHERE s.name = 'am'`).Scan(&policies); err != nil || policies == "urgent" {
+		t.Errorf("the policies of Alertmanager's alerts = %q, %v", policies, err)
+	}
+}

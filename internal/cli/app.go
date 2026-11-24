@@ -275,9 +275,36 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 	p.applyRouting(ctx, cfg, router)
 	p.applyNotifications(ctx, cfg, rows.IDs)
 	p.auth.Configure(ctx, cfg.Auth, cfg.Teams)
+	p.warnLocalCredentials(ctx, cfg)
 	p.successful.Set(1)
 	p.lastOK.SetToCurrentTime()
 	return nil
+}
+
+// The credentials that compose.yaml falls back to, so that Beacon can be
+// tried without setting any. They are published in the repository.
+const (
+	localSourceToken   = "local-development-token"
+	localAdminPassword = "local-development-password"
+	// localAdminHash is the hash of localAdminPassword in compose.yaml.
+	localAdminHash = "$2a$12$AxLH.cSYxO4J7BQSRKiZceiSKU7VLV8.WPzpFtwpkCgeMoYxt8AiW"
+)
+
+// warnLocalCredentials says so in the log when the configuration runs on
+// the credentials of the quickstart, which everyone can read in the
+// repository: a first run should work without ceremony, and an install
+// that people depend on should not stay on them unnoticed. The values are
+// public, so naming the variable to set gives nothing away.
+func (p *provisioner) warnLocalCredentials(ctx context.Context, cfg config.Config) {
+	for _, s := range cfg.Sources {
+		if s.Token.Reveal() == localSourceToken {
+			p.logger.WarnContext(ctx, "the source has the token of the quickstart, which is published: anyone who reaches Beacon can send it alerts; set BEACON_SOURCE_TOKEN before anything depends on this install",
+				slog.String("source", s.Name))
+		}
+	}
+	if cfg.Auth != nil && cfg.Auth.BootstrapAdmin != nil && cfg.Auth.BootstrapAdmin.PasswordHash.Reveal() == localAdminHash {
+		p.logger.WarnContext(ctx, "the bootstrap admin has the password of the quickstart, which is published: anyone who reaches Beacon can sign in as an admin; set BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH to a hash from `beacon hash-password` before anything depends on this install")
+	}
 }
 
 // countSkipped sets the metric of skipped team members.

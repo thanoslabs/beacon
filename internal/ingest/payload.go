@@ -16,6 +16,9 @@ const (
 // maxFingerprintLength bounds a fingerprint chosen by the sender.
 const maxFingerprintLength = 256
 
+// maxPolicyNameLength bounds the name of a policy chosen by the sender.
+const maxPolicyNameLength = 100
+
 // payload is the body of the generic JSON webhook, after validation.
 type payload struct {
 	Status      string
@@ -24,6 +27,10 @@ type payload struct {
 	Annotations map[string]string
 	StartsAt    time.Time
 	EndsAt      time.Time
+	// EscalationPolicy names the policy the alert goes through, whatever
+	// routing would choose. It is empty when the sender leaves that to
+	// routing.
+	EscalationPolicy string
 }
 
 // fieldError is a problem with the payload. field names the part at fault,
@@ -70,6 +77,10 @@ func parsePayload(body []byte) (payload, error) {
 			p.StartsAt, err = timeField(name, value)
 		case "ends_at":
 			p.EndsAt, err = timeField(name, value)
+		case "escalation_policy":
+			if err = stringField(name, value, &p.EscalationPolicy); err == nil && (p.EscalationPolicy == "" || len(p.EscalationPolicy) > maxPolicyNameLength) {
+				err = &fieldError{field: name, msg: fmt.Sprintf("must be the name of an escalation policy, between 1 and %d characters", maxPolicyNameLength)}
+			}
 		default:
 			err = &fieldError{field: name, msg: "unknown field"}
 		}
@@ -83,6 +94,8 @@ func parsePayload(body []byte) (payload, error) {
 		return payload{}, &fieldError{field: "labels", msg: "a firing alert needs at least one label"}
 	case p.Fingerprint == "" && len(p.Labels) == 0:
 		return payload{}, &fieldError{field: "labels", msg: "give the labels or the fingerprint of the alert to resolve"}
+	case p.Status == statusResolved && p.EscalationPolicy != "":
+		return payload{}, &fieldError{field: "escalation_policy", msg: `is only allowed when status is "firing": an alert keeps the policy it was opened with`}
 	case p.Status == statusFiring && !p.EndsAt.IsZero():
 		return payload{}, &fieldError{field: "ends_at", msg: `is only allowed when status is "resolved"`}
 	}

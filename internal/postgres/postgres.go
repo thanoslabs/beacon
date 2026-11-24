@@ -59,7 +59,8 @@ func Open(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	defer cancel()
 	if err := pool.Ping(pingCtx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("connect to database: %w", err)
+		// The driver's error names the host and never the password.
+		return nil, fmt.Errorf("connect to database: %w\nIs Postgres running, and is --database-url (BEACON_DATABASE_URL) its address? `docker compose up -d --wait postgres` starts the one of this repository", err)
 	}
 	return pool, nil
 }

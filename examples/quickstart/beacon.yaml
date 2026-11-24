@@ -1,11 +1,30 @@
-# The smallest useful configuration: one webhook source. compose.yaml mounts
-# this directory, so `docker compose up` receives alerts at
-# /api/v1/ingest/default.
+# The quickstart: what `docker compose up` runs. docs/quickstart.md walks
+# through it.
 #
-# The token is read from the environment; secrets are never written in files.
-# docs/configuration.md describes every field, and examples/full shows them.
+# One webhook source to send alerts to, and a sign-in for the web interface
+# at http://localhost:8080. That is enough to send a test alert and watch it
+# in the browser. To have it paged in Slack or Discord too, copy this
+# directory and take the ".example" off slack.yaml.example or
+# discord.yaml.example; every *.yaml file of a directory is read as one
+# configuration.
+#
+# Secrets are never written in files: each is a reference to an environment
+# variable or a file. compose.yaml gives both of these a value that is only
+# fit for trying Beacon out on your own machine. docs/configuration.md
+# describes every field, and examples/full shows them.
 
 sources:
+  # Alerts are sent to /api/v1/ingest/default with this token.
   - name: default
     type: webhook
     token: {env: BEACON_SOURCE_TOKEN}
+
+auth:
+  # The address at which your browser reaches Beacon.
+  public_url: http://localhost:8080
+  # One built-in admin account with a password, for an install that has no
+  # identity provider yet. People sign in through an identity provider
+  # (docs/access.md); this account is how you look around before you have
+  # set one up.
+  bootstrap_admin:
+    password_hash: {env: BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH}

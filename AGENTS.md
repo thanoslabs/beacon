@@ -6,7 +6,7 @@ Operational expectations for humans and AI agents working in this repository.
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-The project is at an early stage: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules run their rotations with overrides, and escalation policies page the person on call, teams and channels step by step until someone responds. The same works in Discord, where people link their accounts themselves, and alert groups are also sent as email and posted to outbound webhooks. The web interface is a single-page app in `web/`, embedded in the binary; people sign in to it, act on alerts, see who is on call, arrange overrides and silences, read what the configuration defines, link their chat accounts and, as admins, manage API tokens. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
+What exists: provisioned objects are read from YAML files, people sign in through an OpenID Connect identity provider, alerts are received from Alertmanager, Grafana alerting or over a generic webhook, stored, routed by label, grouped and posted to the Slack channel of their escalation policy, where people can acknowledge, snooze and resolve them. Schedules run their rotations with overrides, and escalation policies page the person on call, teams and channels step by step until someone responds. The same works in Discord, where people link their accounts themselves, and alert groups are also sent as email and posted to outbound webhooks. The web interface is a single-page app in `web/`, embedded in the binary; people sign in to it, act on alerts, see who is on call, arrange overrides and silences, read what the configuration defines, link their chat accounts and, as admins, manage API tokens. Beacon reports on itself and on how alerts are handled as Prometheus metrics, and `docs/quickstart.md` takes a new person from `docker compose up` to a test page. `docs/requirements.md` is the source of truth for what Beacon must do, which requirements are in the MVP, and the design decisions already made. Read it before proposing designs or writing code, and update it in the same PR when a decision changes.
 
 ## Tech stack
 
@@ -36,7 +36,7 @@ Tooling:
 ├── .github/
 │   ├── CODEOWNERS            # @thanoslabs/reviewers
 │   ├── renovate-config.js    # Renovate platform config
-│   ├── scripts/              # The checks of the CI job `validate`, and a script that shows they can fail
+│   ├── scripts/              # The checks of the CI job `validate` and a script that shows they can fail; the checks of the alerting rules and the dashboard; the walk through the quickstart guide
 │   └── workflows/
 │       ├── ci.yml            # Validation on pushes to main and on pull requests
 │       ├── docs.yaml         # nebula-md docs build + GitHub Pages deploy
@@ -124,10 +124,12 @@ Run `mise install` first so that the pinned versions are used.
 | Start Postgres and the identity provider | `docker compose up -d --wait postgres dex` |
 | Start everything the tests use | `docker compose up -d --wait postgres dex mailpit` |
 | Test | `BEACON_TEST_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_TEST_OIDC_ISSUER='http://127.0.0.1:5556/dex' BEACON_TEST_SMTP_ADDR='127.0.0.1:1025' BEACON_TEST_MAILPIT_URL='http://127.0.0.1:8025' go test -race ./...` |
-| Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_SOURCE_TOKEN=local-development-token ./bin/beacon serve --config examples/quickstart` then `curl localhost:8080/readyz` |
+| Run the server | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' BEACON_SOURCE_TOKEN=local-development-token BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH='$2a$12$AxLH.cSYxO4J7BQSRKiZceiSKU7VLV8.WPzpFtwpkCgeMoYxt8AiW' ./bin/beacon serve --config examples/quickstart` (the published credentials of the quickstart; the admin's password is `local-development-password`) then `curl localhost:8080/readyz` |
 | Check configuration | `./bin/beacon validate --config examples/full` |
 | Preview schedule changes | `BEACON_DATABASE_URL=... ./bin/beacon preview --config examples/full` |
 | Hash a password for the bootstrap admin | `./bin/beacon hash-password` |
+| Send a test alert to a running Beacon | `BEACON_SOURCE_TOKEN=... ./bin/beacon test-alert` (`--policy <name>` to choose the policy, `--resolve` to end it) |
+| Walk the quickstart guide as CI does | `.github/scripts/walk-quickstart.sh` (set `BEACON_PORT` if 8080 is taken; it builds the image, and ends with `docker compose down`) |
 | Apply migrations | `BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable' ./bin/beacon migrate` |
 | End-to-end tests only | `BEACON_TEST_DATABASE_URL=... go test -race -count=1 ./internal/e2e/` |
 | Lint | `golangci-lint run ./...` |
@@ -146,7 +148,7 @@ Run `mise install` first so that the pinned versions are used.
 | Run them with a Grafana that sends to Beacon | `BEACON_CONFIG_DIR=./examples/grafana docker compose --profile grafana up --build -d --wait` (set `BEACON_GRAFANA_PORT` if 3000 is taken, `BEACON_PROMETHEUS_PORT` if 9090 is), then create the rule as `docs/grafana.md` shows. The profile also starts a Prometheus that scrapes Beacon, and Grafana has the Beacon dashboard |
 | Check the alerting rules and the dashboard | `.github/scripts/check-monitoring.sh rules` (promtool, from the pinned image), and with that profile running `.github/scripts/check-monitoring.sh live` |
 
-CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. Its `validate` job refuses committed files that are sensitive by name or hold private key material, and YAML that does not parse (`.github/scripts`); `test-checks.sh` runs there too and shows that both checks fail when they should, so change a check and its cases together. It builds the web interface before the Go code, so the binary under test has the app in it. It starts Postgres, Dex and Mailpit from `compose.yaml`, so CI and development use the same versions. The tests include the end-to-end tests in `internal/e2e`. The `web` job checks that the generated API types are fresh, then type checks, lints, tests and builds the app; the `browser` job runs the Playwright tests against the real binary. A separate job builds the image, starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, that the image serves the web interface, the non-root user and a clean exit on termination. It then starts the Alertmanager and the Grafana of the Compose profiles `alertmanager` and `grafana` and checks that an alert of each fires and resolves in Beacon, and that the Prometheus of the profile scrapes Beacon, loads the example alerting rules, and answers every query of the Beacon dashboard.
+CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on every pull request, whatever its base branch. Its `validate` job refuses committed files that are sensitive by name or hold private key material, and YAML that does not parse (`.github/scripts`); `test-checks.sh` runs there too and shows that both checks fail when they should, so change a check and its cases together. It builds the web interface before the Go code, so the binary under test has the app in it. It starts Postgres, Dex and Mailpit from `compose.yaml`, so CI and development use the same versions. The tests include the end-to-end tests in `internal/e2e`. The `web` job checks that the generated API types are fresh, then type checks, lints, tests and builds the app; the `browser` job runs the Playwright tests against the real binary. A separate job builds the image, walks the quickstart guide command by command (`walk-quickstart.sh`), starts Beacon and Postgres with Compose and the configuration in `examples/quickstart`, and checks the endpoints, that the webhook accepts an alert, that the image serves the web interface, the non-root user and a clean exit on termination. It then starts the Alertmanager and the Grafana of the Compose profiles `alertmanager` and `grafana` and checks that an alert of each fires and resolves in Beacon, and that the Prometheus of the profile scrapes Beacon, loads the example alerting rules, and answers every query of the Beacon dashboard.
 
 ### Container image
 
@@ -285,6 +287,7 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - A parser turns a payload into `delivery` values, one per alert, and `Handler.apply` hands each to the alert model. A new kind of source is a parser and a case in `ServeHTTP`; it must not reach the store by another path.
 - The generic webhook is Beacon's own contract and rejects fields it does not know. The payloads of other systems are theirs: read only the fields Beacon uses, ignore the rest, and check the shape against the sender's current documentation and source, not memory. Say in the PR which version was implemented.
 - `internal/ingest/testdata` holds notifications captured from the real senders. Capture new ones with the real sender when a payload changes, rather than editing them by hand. The Alertmanager and the Grafana under the Compose profiles `alertmanager` and `grafana` are set up for that.
+- The generic payload may name the alert's escalation policy (`escalation_policy`). It replaces only the policy: the alert keeps the team and service of routing, and its group key has the policy as its scope (`policy:<id>`), so such alerts never join a group that routing placed. `beacon test-alert --policy` depends on it.
 - A sender repeats and retries. Whatever a receiver does must be safe to do twice, and a notification that could not be stored in full is answered with `500` so that it is sent again.
 - Receivers change alerts only through `alert.Store`.
 
@@ -368,6 +371,14 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - **Nothing of the address, the headers or the answer goes into an error or a log**: the address can hold a token, and an answer can repeat one. An error names the status code. The destination of a webhook notification is the name of the integration.
 - A webhook has one address and no channels: its target is `{integration: <name>}`, and validation refuses it a `channel` and refuses it in `via`.
 - A `3xx` and a `410` are permanent; every other failure is retried, and `Retry-After` is honoured up to an hour.
+
+### First run
+
+- `docs/quickstart.md` is the path a new person takes, and `examples/quickstart` with `compose.yaml` is what it runs. **Every command in the guide is run by `.github/scripts/walk-quickstart.sh`**, in the guide's order, in the `docker` job of CI: change the guide and the script together, and never tell a reader to type something the script does not.
+- A first run needs no setup: `compose.yaml` falls back to a source token and a bootstrap admin hash that are published in the repository (`localSourceToken`, `localAdminHash` in `internal/cli/app.go`), publishes on `127.0.0.1` only, and `beacon serve` warns while it runs on either (`warnLocalCredentials`). `TestLocalCredentialsAreWhatComposeGives` holds the Compose file, the warning and the guide together. Do not add another published credential without the warning.
+- `examples/quickstart/*.yaml.example` are overlays that the guide renames into a copy of the directory; `TestQuickstartOverlays` keeps each valid together with `beacon.yaml`. The loader ignores them as they are.
+- `beacon test-alert` (`internal/cli/testalert.go`) talks to a running Beacon over HTTP as a source does and needs no database. Its errors are what a newcomer reads first: each says what to set or check, and none repeats the token.
+- The README states what Beacon does today and sends a newcomer to the guide. What is planned and not built is listed in the guide ("What is not in this release"), taken from the Later rows of `docs/requirements.md`; move an item out when it ships.
 
 ### End-to-end tests
 

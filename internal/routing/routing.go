@@ -6,6 +6,7 @@ package routing
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -84,6 +85,16 @@ func (r rule) matches(labels map[string]string) bool {
 type Router struct {
 	rules    []rule
 	fallback Route
+	// policies are the escalation policies of the configuration: name to
+	// the identifier of the row.
+	policies map[string]string
+}
+
+// Policy returns the identifier of the escalation policy with a name, for
+// a sender that names the policy of its alert itself.
+func (rt *Router) Policy(name string) (id string, ok bool) {
+	id, ok = rt.policies[name]
+	return id, ok
 }
 
 // New builds the router for a routing block. A nil block gives a router
@@ -93,7 +104,7 @@ type Router struct {
 // The block must be valid. An error means it is not, or that refs lacks the
 // row of an object the block names.
 func New(r *config.Routing, refs Refs) (*Router, error) {
-	rt := &Router{fallback: Route{Grouping: r.Grouping()}}
+	rt := &Router{fallback: Route{Grouping: r.Grouping()}, policies: maps.Clone(refs.Policies)}
 	if r == nil {
 		return rt, nil
 	}

@@ -9,21 +9,31 @@
 
 Beacon is an open-source alerting and on-call platform. It takes alerts from Prometheus-style sources and gets them to the right on-call person, with schedules, escalation and acknowledgement in one tool that is easy to run.
 
-> [!WARNING]
-> Beacon is at an early stage. It reads its [configuration](docs/configuration.md) from YAML files, signs people in through an [identity provider](docs/access.md), receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) and through a [JSON webhook](docs/webhook.md), tracks their [state](docs/alert-lifecycle.md), [routes](docs/configuration.md#how-an-alert-is-routed) them by label, [groups](docs/configuration.md#grouping) related alerts and [escalates](docs/escalation.md) each group through its policy: it pages the person on call, the team or a [Slack](docs/slack.md) or [Discord](docs/discord.md) channel, in chat and by [email](docs/email.md), and posts to an [outbound webhook](docs/outbound-webhook.md), step by step, until someone acknowledges, snoozes or resolves the alert from Slack or Discord, and it [attributes](docs/access.md#chat-accounts) those actions to the Beacon user behind the chat account. It runs [on-call rotations](docs/schedules.md), records every shift, takes [overrides](docs/schedules.md#overrides), answers [who is on call](docs/schedules.md#who-is-on-call) and [previews](docs/schedules.md#preview-a-change) what a change to a schedule would move. It has a [web interface](docs/web.md), embedded in the binary, where people sign in, watch the alerts and acknowledge, snooze and resolve them, see who is on call and the shifts of each schedule, arrange cover with overrides, create and expire silences with a preview of what they match, read what the configuration defines (escalation policies, routing, teams, sources and integrations), link their Discord account, and, as admins, manage API tokens. Neither chat integration has been tried against the real service. The [requirements](docs/requirements.md) describe what is planned.
+It receives alerts from [Alertmanager](docs/alertmanager.md), [Grafana alerting](docs/grafana.md) or a [JSON webhook](docs/webhook.md), [routes and groups](docs/configuration.md#how-an-alert-is-routed) them by label, and [escalates](docs/escalation.md) each group through a policy: the person [on call](docs/schedules.md), then the team, then a channel, in [Slack](docs/slack.md), [Discord](docs/discord.md), [email](docs/email.md) or an [outbound webhook](docs/outbound-webhook.md), until someone acknowledges. People respond from chat or from the [web interface](docs/web.md), which is in the binary.
 
-## What Beacon will do
+## Quickstart
 
-The first release is planned to cover:
+With Docker, from a clone of this repository:
 
-- **Ingestion**: receive alerts from Alertmanager, Grafana alerting and a generic JSON webhook.
-- **Routing**: deduplicate and group alerts, then route them by label to a team or service.
-- **On-call schedules**: rotations and overrides, with a view of who is on call now.
-- **Escalation**: multi-step policies that repeat until someone acknowledges.
-- **Notifications**: Slack, Discord, email and outbound webhooks, with acknowledge and resolve from chat.
-- **Metrics**: a Prometheus `/metrics` endpoint covering both Beacon itself and how alerts are handled.
+```sh
+docker compose up --build -d --wait             # Beacon and Postgres
+docker compose exec beacon beacon test-alert    # send a test alert
+```
 
-The full list, including what comes later, is in the [requirements](docs/requirements.md).
+Open <http://localhost:8080>, sign in with the password `local-development-password`, and the alert is there. The **[quickstart guide](docs/quickstart.md)** takes it from here to a page in Slack or Discord, in about five minutes, and says what a real install needs beyond that. The password and the token of this first run are published in `compose.yaml` and are for your own machine only.
+
+## What Beacon does
+
+- **Ingestion**: alerts from Alertmanager, Grafana alerting and a generic JSON webhook, deduplicated by fingerprint and resolved when the source resolves them.
+- **Routing**: label-based rules that give an alert its team, service and escalation policy, with related alerts grouped into one notification, and [silences](docs/silences.md).
+- **On-call schedules**: rotations with handoffs in the schedule's own time zone, layered overrides, a record of every shift, and a [preview](docs/schedules.md#preview-a-change) of what a change would move.
+- **Escalation**: multi-step policies with timeouts that page the person on call, teams and channels, and repeat until someone responds.
+- **Notifications**: Slack, Discord, email and signed outbound webhooks, with retries and a timeline of every attempt. Acknowledge, snooze and resolve from Slack and Discord.
+- **A web interface and an API**: alerts, who is on call, overrides, silences, and what the configuration defines; sign-in through any OpenID Connect provider, and [API tokens](docs/access.md#api-tokens). The API has an [OpenAPI description](docs/api-reference.md).
+- **Metrics**: a Prometheus [`/metrics`](docs/metrics.md) endpoint for how Beacon runs and how alerts are handled, with alerting rules and a Grafana dashboard to copy.
+- **Configuration as code**: sources, routing, policies, teams and schedules are [YAML files](docs/configuration.md), checked by `beacon validate` and reloaded without a restart.
+
+What is planned and not built, such as SMS, voice calls, heartbeat checks and a Helm chart, is listed in the [quickstart guide](docs/quickstart.md#what-is-not-in-this-release) and in the [requirements](docs/requirements.md).
 
 ## Design principles
 
@@ -31,35 +41,11 @@ The full list, including what comes later, is in the [requirements](docs/require
 - **Configuration as code first.** Sources, integrations, routing and escalation policies are defined in files that live in version control. The database holds runtime state such as alert status and schedule overrides.
 - **One binary plus Postgres.** Beacon ships as a single Go binary and needs only a Postgres database.
 - **Works with what people already run.** Beacon sits behind an existing Alertmanager or Grafana setup.
+- **Observable by default.** Beacon reports on itself as Prometheus metrics.
 
 ## Run it
 
-Beacon needs only Postgres. With Docker, this builds Beacon from the checkout and starts both:
-
-```sh
-docker compose up --build
-curl http://localhost:8080/readyz
-```
-
-The [web interface](docs/web.md) is at <http://localhost:8080/>. Signing in needs an `auth` block in the configuration ([access page](docs/access.md)), which the quickstart does not have.
-
-Set `BEACON_PORT` to publish Beacon on a different host port, for example `BEACON_PORT=18080 docker compose up --build`.
-
-Compose gives Beacon the configuration in [`examples/quickstart`](examples/quickstart/beacon.yaml): one webhook source named `default`. Set its token before starting, then send an alert:
-
-```sh
-export BEACON_SOURCE_TOKEN="$(openssl rand -hex 32)"
-docker compose up --build -d --wait
-curl -X POST http://localhost:8080/api/v1/ingest/default \
-  -H "Authorization: Bearer $BEACON_SOURCE_TOKEN" \
-  -d '{"labels": {"alertname": "DiskFull", "severity": "critical"}, "annotations": {"summary": "Disk is full"}}'
-```
-
-Without `BEACON_SOURCE_TOKEN`, Compose uses a fixed token that is only fit for a local try-out.
-
-The [webhook page](docs/webhook.md) describes the payload and the responses. Sources, integrations and everything else that is provisioned are defined in YAML files; the [configuration page](docs/configuration.md) is the reference. To use your own, point Compose at a directory of them with `BEACON_CONFIG_DIR`. To have alerts posted to Slack, start from [`examples/slack`](examples/slack/beacon.yaml) as the [Slack page](docs/slack.md) describes; for Discord, from [`examples/discord`](examples/discord/beacon.yaml) and the [Discord page](docs/discord.md); for email, from [`examples/email`](examples/email/beacon.yaml) and the [email page](docs/email.md); and to have them posted to an endpoint of your own, from [`examples/outbound-webhook`](examples/outbound-webhook/beacon.yaml) and the [outbound webhook page](docs/outbound-webhook.md). Alerts can be resolved from Slack straight away; acknowledging and snoozing from Slack need people to sign in to Beacon through an identity provider first, so that Beacon knows whose Slack account is whose ([who can act](docs/slack.md#who-can-act)). For a rotation and a policy that pages whoever is on call, see [`examples/on-call`](examples/on-call/beacon.yaml). To put Beacon behind an Alertmanager or Grafana alerting, see the [Alertmanager page](docs/alertmanager.md) and the [Grafana page](docs/grafana.md); `docker compose --profile alertmanager up` and `--profile grafana` start one that sends to Beacon.
-
-Releases publish a container image for `linux/amd64` and `linux/arm64`, tagged with the bare version:
+Releases publish a container image for `linux/amd64` and `linux/arm64`, tagged with the bare version. It needs a Postgres database and a directory of configuration files:
 
 ```sh
 docker run --rm -p 8080:8080 \
@@ -68,7 +54,14 @@ docker run --rm -p 8080:8080 \
   ghcr.io/thanoslabs/beacon:X.Y.Z
 ```
 
-The image runs as a non-root user (`65532`) and its default command is `beacon serve`.
+The image runs as a non-root user (`65532`) and its default command is `beacon serve`. Beacon applies its database migrations when it starts.
+
+[`examples/`](examples/) has a configuration to start from for each thing Beacon does: [`quickstart`](examples/quickstart/beacon.yaml), [`slack`](examples/slack/beacon.yaml), [`discord`](examples/discord/beacon.yaml), [`email`](examples/email/beacon.yaml), [`outbound-webhook`](examples/outbound-webhook/beacon.yaml), [`alertmanager`](examples/alertmanager/beacon.yaml), [`grafana`](examples/grafana/beacon.yaml), [`on-call`](examples/on-call/beacon.yaml) for a rotation and a policy that pages whoever is on call, and [`full`](examples/full/beacon.yaml) for every field. The [configuration page](docs/configuration.md) is the reference. With the Compose file of this repository, `BEACON_CONFIG_DIR=./my-config docker compose up` runs a directory of your own, `BEACON_PORT` moves Beacon off port 8080, and `--profile alertmanager` or `--profile grafana` adds one of those, set up to send to Beacon.
+
+Acknowledging and snoozing from chat need people to sign in to Beacon through an identity provider, so that Beacon knows whose chat account is whose ([who can act](docs/slack.md#who-can-act)); anyone who sees a message may resolve it.
+
+> [!NOTE]
+> Beacon is young. Slack, Discord, hosted identity providers and hosted mail services are tested against faithful stand-ins and against Dex and Mailpit, not yet against the real services. Tell us what you find.
 
 ## Documentation
 
@@ -93,12 +86,15 @@ To run the binary outside Docker, start only Postgres from `compose.yaml`, which
 ```sh
 docker compose up -d --wait postgres
 export BEACON_DATABASE_URL='postgres://beacon:beacon@localhost:5432/beacon?sslmode=disable'
+# The published credentials of the quickstart: the admin's password is local-development-password.
+export BEACON_SOURCE_TOKEN=local-development-token BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH='$2a$12$AxLH.cSYxO4J7BQSRKiZceiSKU7VLV8.WPzpFtwpkCgeMoYxt8AiW'
 ./bin/beacon serve --config examples/quickstart   # apply pending migrations, then serve on :8080
 ./bin/beacon migrate            # apply schema migrations without serving
 ./bin/beacon migrate --status   # list migrations and their state
 ./bin/beacon validate --config examples/full   # check configuration files; needs no database
 ./bin/beacon preview --config examples/full    # show which on-call shifts a configuration would move; reads the database
 ./bin/beacon hash-password      # hash a password for the bootstrap admin
+./bin/beacon test-alert         # send a test alert to a running Beacon; reads BEACON_SOURCE_TOKEN
 ```
 
 The server answers on these endpoints; the [API page](docs/api.md) describes how they behave as a whole, and the [API reference](docs/api-reference.md) lists every route from the OpenAPI description. Everything that is not listed as open in the [access page](docs/access.md) needs a session, and an address under `/api/` or `/auth/` that does not exist answers `401` like one that does:
@@ -123,7 +119,7 @@ The server answers on these endpoints; the [API page](docs/api.md) describes how
 | `GET` on every other address outside `/api/` and `/auth/` | The [web interface](docs/web.md). Open: it is the same page for everyone, and shows only the sign-in page without a session. |
 | `GET /healthz` | Liveness: the process is running. It does not check the database. |
 | `GET /readyz` | Readiness: the database answers and the server is not shutting down. Returns `503` otherwise. |
-| `GET /metrics` | Prometheus metrics: Go runtime, process and build information, configuration reloads, team and rotation members that are not users yet, users without a linked chat account, and alerts that no routing rule matched. |
+| `GET /metrics` | Prometheus [metrics](docs/metrics.md) of how Beacon runs and how alerts are handled. Open unless a metrics token is set. |
 
 Logs are JSON on standard error (`--log-format text` for reading by eye). Every request gets an identifier, returned in the `X-Request-Id` header and written on each log record for that request. On `SIGTERM` or `SIGINT` the server stops accepting connections and lets in-flight requests finish, for up to `--shutdown-timeout`. On `SIGHUP` it [reloads its configuration](docs/configuration.md#reload-without-a-restart).
 

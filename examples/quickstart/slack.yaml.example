@@ -1,0 +1,35 @@
+# Pages in Slack, for the quickstart. To use it, copy the quickstart
+# directory, rename this file to slack.yaml, and put the ID of your channel
+# in place of C0123456789 (in Slack: open the channel's details; the ID is
+# at the bottom). docs/slack.md explains how to create the Slack app that
+# the two credentials come from, and docs/quickstart.md is the walk-through.
+#
+# Use this file or discord.yaml.example, not both: each defines the policy
+# "default" and the routing.
+
+integrations:
+  - name: slack
+    type: slack
+    slack:
+      bot_token: {env: BEACON_SLACK_BOT_TOKEN}
+      signing_secret: {env: BEACON_SLACK_SIGNING_SECRET}
+
+# An alert group is posted to the channels named in the first step of its
+# escalation policy.
+escalation_policies:
+  - name: default
+    steps:
+      - notify:
+          - channel: C0123456789
+            integration: slack
+        timeout: 5m
+
+# Every alert takes the policy above. The message is posted five seconds
+# after the first alert of a group arrives; without group_wait it is 30s,
+# which gives related alerts time to arrive and share one message.
+routing:
+  group_by: [alertname]
+  group_wait: 5s
+  group_interval: 1m
+  default:
+    escalation_policy: default
