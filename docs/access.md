@@ -70,13 +70,14 @@ Beacon is closed by default. Every route needs a session unless it is on the sho
 | `POST /api/v1/ingest/<source>` | Public | Receives alerts. The source's own token is checked; see [[webhook]]. |
 | `POST /api/v1/integrations/<name>/interactions` | Public | Receives button presses from Slack and from Discord. The service's signature is checked; see [[slack]] and [[discord]]. |
 | `GET /api/v1/openapi.json`, `GET /api/v1/openapi.yaml` | Public | The OpenAPI description of the API; see [[api#OpenAPI description]] |
-| `GET /healthz`, `GET /readyz`, `GET /metrics` | Public | Probes and metrics, for machines that have no session |
+| `GET /healthz`, `GET /readyz` | Public | Probes, for machines that have no session |
+| `GET /metrics` | Public | [[metrics|Metrics]] for Prometheus. Open unless Beacon was started with a metrics token, which a scrape must then carry; see [[metrics#Who can read the metrics]]. |
 | `GET` on every other address that is not under `/api/` or `/auth/` | Public | The [[web|web interface]]: one page with its script and style sheet, the same for everyone. It holds nothing of an install; what it shows it asks of the routes above. |
 
 "Member" means anyone who is signed in or presents an API token, with either role. "Admin" needs the admin role; a member gets `403`.
 
 > [!warning] Keep `/metrics` off the public internet
-> The probes and the metrics need no session, because the systems that call them have none. Metrics name your teams. If Beacon is reachable from outside, let your proxy expose only what outsiders need: `/api/v1/ingest/` and `/api/v1/integrations/` for the systems that send to Beacon, and, if people use the web interface from outside, everything except `/metrics`, `/healthz` and `/readyz`.
+> The probes and the metrics need no session, because the systems that call them have none. Metrics name your teams, schedules, sources and integrations ([[metrics#What the metrics reveal]]). Set a metrics token (`--metrics-token` or `BEACON_METRICS_TOKEN`) to make Beacon ask a scrape for a credential. If Beacon is reachable from outside, let your proxy expose only what outsiders need: `/api/v1/ingest/` and `/api/v1/integrations/` for the systems that send to Beacon, and, if people use the web interface from outside, everything except `/metrics`, `/healthz` and `/readyz`.
 
 ## API tokens
 

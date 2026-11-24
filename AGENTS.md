@@ -68,6 +68,8 @@ Tooling:
 │   ├── identity/             # Which Slack or Discord account belongs to which user: lookup by email, link codes
 │   ├── ingest/               # Receivers for Alertmanager, Grafana and the generic webhook: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
+│   ├── metrics/              # The catalogue of Beacon's own metrics and the allow-list of their labels
+│   │   └── metricstest/      # Test helper: the series of a registry or a scrape, by name
 │   ├── notify/               # Notification queue, workers, retries and the Channel interface
 │   ├── postgres/             # Connection pool and migrator
 │   │   ├── migrations/       # Versioned SQL migrations, embedded in the binary
@@ -130,6 +132,7 @@ Run `mise install` first so that the pinned versions are used.
 | Lint | `golangci-lint run ./...` |
 | Fix formatting | `golangci-lint fmt ./...` |
 | Check module files | `go mod tidy -diff` |
+| Regenerate the reference of the metrics | `go test ./internal/metrics -run TestReferenceIsTheCatalogue -update` |
 | Regenerate the published API description | `go test ./internal/api -run TestPublishedDescription -update` |
 | Web interface: type check, lint, unit tests | in `web/`: `npm run typecheck`, `npm run lint`, `npm test` |
 | Regenerate the API types of the web interface | in `web/`: `npm run generate` (CI runs `npm run generate:check`) |
@@ -164,7 +167,8 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Every object schema of an answer says `additionalProperties: false` and lists what is `required`, which is what makes an undescribed field fail. `apitest` understands a small part of JSON Schema on purpose and refuses a keyword it does not check; teach it the keyword rather than loosen a schema.
 - A handler that changes something takes who is acting from `access.FromContext`, never from the request, and logs the change with `by_user` and `by_token`.
 - Log with the `slog` methods that take a context (`InfoContext` and so on) inside request handling, so the record carries `request_id`.
-- Register metrics on the registry from `server.NewRegistry()`, not the global default. Keep label values to bounded sets (see the cardinality warning in `docs/requirements.md`).
+- Register metrics on the registry from `server.NewRegistry()`, not the global default, and create them from the catalogue; see [Metrics](#metrics).
+- `GET /metrics` is public, with a credential of its own when `--metrics-token` is set (`Server.scrape`). The probes stay open.
 - The process must stay stateless: anything that has to survive a restart or be seen by another replica goes in Postgres, never in memory or on local disk.
 
 ### Web interface
@@ -188,6 +192,14 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - Accessibility is part of done: semantic elements, a label for every control, a visible focus ring, text contrast of at least 4.5:1 in both themes, and a layout that works at 390 pixels. A new view gets `expectAccessible` in a browser test, which runs axe in both themes and at phone width.
 - Runtime dependencies are few on purpose (React, React DOM, React Router, TanStack Query, `openapi-fetch`). Adding one needs a reason in the PR. Versions are exact in `package.json`, and the lockfile is committed.
 - Component tests (`*.test.tsx`) use `fakeApi` from `web/src/test/api.ts` in place of the API and query by role and label. Browser tests (`web/e2e`) use the real binary from outside, wait for what they expect to see and never for a time, never retry, and fail on any violation of the Content-Security-Policy.
+
+### Metrics
+
+- `internal/metrics` is the catalogue: **every metric of Beacon is described there once** (`catalog`), with its type, its labels and its help. Code creates a metric with `metrics.NewCounterVec(name)` and its siblings, never with the client library directly; `TestMetricsAreCreatedFromTheCatalogue` reads the source tree for that. `docs/metrics.md` is the guide, and its reference is written from the catalogue (`TestReferenceIsTheCatalogue`, with `-update`).
+- **A label must be on the allow-list `metrics.Labels`**, and its values must be a bounded set: fixed in the code, or named in the configuration files. `TestLabelsAreOnTheAllowList` fails otherwise. Never a label: anything an alert carried (its name, its labels, its fingerprint), an identifier, a rule name, a person's name or address, a chat account, a destination, an address a client asked for. To add a label, add it to the list with where its values come from, and be able to say why they are bounded.
+- A value that reaches a label from outside the code goes through something that bounds it: the pattern of the route for HTTP (`httpMetrics.instrument`), with `metrics.Other` for what the configuration no longer names. `TestMetricsMatchTheCatalogue` (`internal/cli`) scrapes the real server after sending it things that must not become labels; send it the new kind of thing when you add a metric.
+- Give a series its zero when the configuration is applied (`SetSources`), so that a rate is never empty and "nothing failed" is a number.
+- Names follow Prometheus: `beacon_` prefix, base units, `_total` for counters, `_seconds` for times. `TestCatalogFollowsTheConventions` and the client library's linter (`promlint`, in `TestCatalogPassesTheLinter` and over the real scrape) check it.
 
 ### Database
 
@@ -231,7 +243,7 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 - `config.Read` loads and validates in one call, and is what commands use. Every check of what a value means goes in `internal/config/validate.go`, reports through `object.errorf` with the path of the field, and gets a case in `testdata/invalid` (regenerate `testdata/invalid.golden` with `go test ./internal/config -run TestReadReportsEveryProblem -update`, and read the difference). Validation must never need a database.
 - Errors are `config.Errors`: each names the file, line, object and field. Never put the value of a secret field into a message, and never repeat a value that the decoder rejected; it may be a secret typed into the wrong field.
 - `docs/configuration.md` is the user's reference for the files, and `examples/` holds configurations that a test keeps valid. Update both with the schema.
-- Hold every credential in a `config.Secret`. In a file it is a reference, `{env: NAME}` or `{file: /path}`, never the value. It prints, logs and encodes as that reference; call `Reveal` only at the point of use. A new secret field also goes into `resolveSecrets` in `internal/config/load.go`. Add every new secret to `secretSettings` and `secretsConfig` in `internal/cli/secrets_test.go`, which checks that no secret reaches help, errors or logs. A credential that is a process setting, such as the database URL, is registered with `secretSetting`.
+- Hold every credential in a `config.Secret`. In a file it is a reference, `{env: NAME}` or `{file: /path}`, never the value. It prints, logs and encodes as that reference; call `Reveal` only at the point of use. A new secret field also goes into `resolveSecrets` in `internal/config/load.go`. Add every new secret to `secretSettings` and `secretsConfig` in `internal/cli/secrets_test.go`, which checks that no secret reaches help, errors or logs. A credential that is a process setting, such as the database URL or the metrics token, is registered with `secretSetting`.
 - `provision.Reconcile` makes the provisioned rows match the configuration: it creates, updates and marks as removed, in one transaction under an advisory lock, and returns the row of every object. It never deletes; a removed object keeps its row for history and is revived if it returns. A new kind needs its table (with the common columns, including `provisioned`), a constant in `provision.Kinds` in dependency order, and a case in `objectsOf`.
 - Rows with `provisioned = true` belong to the files. Nothing but reconciliation may write them: an API route for a provisioned kind is read-only.
 - `api.Provisioned` answers the provisioned objects from the active configuration, which the provisioner hands it (`SetConfig`), through types of its own, never by encoding a `config` type. **It answers no credential and no reference to one**: a new field of an integration is added to `settings` only when it is not a secret, and the address of a webhook goes out through `withoutSecrets`. `TestProvisionedObjectsAreReadable` reads every route with every secret set.
