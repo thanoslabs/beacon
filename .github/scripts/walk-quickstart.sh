@@ -8,8 +8,8 @@
 # said so: the Slack credentials are made up, so the page itself is not
 # delivered; that Beacon queues it for the right channel is checked instead.
 #
-# Run it from the checkout. BEACON_PORT moves Beacon off port 8080, as the
-# guide says.
+# Run it from a checkout whose Compose project has no data yet, as a fresh
+# clone has. BEACON_PORT moves Beacon off port 8080, as the guide says.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -37,6 +37,12 @@ docker compose up --build -d --wait
 # The port is published a moment after the container is healthy.
 wait_for "Beacon to answer on ${url}" curl --fail --silent "${url}/readyz"
 curl --fail --silent "${url}/readyz" | grep '"status":"ok"'
+
+# The guide starts from nothing, and the checks below count what they find.
+if ! count_is 0 "SELECT count(*) FROM alerts"; then
+  echo "::error::this database has alerts already: the walk needs a fresh one. In a checkout you only use for this, \`docker compose down --volumes\` removes it."
+  exit 1
+fi
 
 step "2. Sign in"
 # The page a browser opens, and the sign-in the page makes with the password
