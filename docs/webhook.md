@@ -62,8 +62,15 @@ Each source accepts only its own token. The body is limited to 1 MiB.
 | `fingerprint` | no | The identity of the alert, up to 256 characters, when the labels are not a good identity. See below. |
 | `starts_at` | no | When the problem began, in RFC 3339 form. Defaults to the time of the request. |
 | `ends_at` | no | When the problem ended, in RFC 3339 form. Only with `resolved`. Defaults to the time of the request. |
+| `escalation_policy` | no | Name of the escalation policy to page this alert through, whatever [[configuration#Routing|routing]] would choose. Only with `firing`. See below. |
 
 A field that is not in this table is an error, so that a misspelt name is noticed.
+
+### Naming the policy
+
+Routing decides which escalation policy an alert goes through. A sender that knows better may name the policy itself with `escalation_policy`; a name that the configuration does not have is refused with `400`. The alert keeps the team and the service that routing gives it. It shares a group only with alerts that were sent to the same policy in the same way, never with alerts that routing placed. The policy is decided when the alert opens: a repeat of an open alert does not move it.
+
+This is what `beacon test-alert --policy <name>` uses to send a test page through one policy ([[quickstart#3. Send a test alert]]). Whoever holds the token of a source can send any labels, and so reach any policy that a routing rule leads to; the field gives them nothing they could not do.
 
 ### Identity
 
@@ -105,6 +112,8 @@ A successful response also holds the `alert_id` and its `status`:
 
 ```sh
 export BEACON_SOURCE_TOKEN="$(openssl rand -hex 32)"
+# The quickstart configuration also has a sign-in, which wants the hash of a password.
+export BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH="$(echo 'a password of your own' | beacon hash-password)"
 beacon serve --config examples/quickstart &
 
 # Fire

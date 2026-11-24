@@ -176,6 +176,9 @@ type delivery struct {
 	// StartsAt and EndsAt are zero when the source did not say.
 	StartsAt time.Time
 	EndsAt   time.Time
+	// PolicyID is the escalation policy the sender chose for the alert, or
+	// empty when routing chooses.
+	PolicyID string
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -225,6 +228,14 @@ func (h *Handler) serveOne(w http.ResponseWriter, r *http.Request, src Source, p
 	d := delivery{
 		Resolved: p.Status == statusResolved, Fingerprint: p.Fingerprint,
 		Labels: p.Labels, Annotations: p.Annotations, StartsAt: p.StartsAt, EndsAt: p.EndsAt,
+	}
+	if p.EscalationPolicy != "" {
+		id, ok := h.router.Load().Policy(p.EscalationPolicy)
+		if !ok {
+			h.invalid(w, r, src, &fieldError{field: "escalation_policy", msg: "the configuration has no escalation policy with this name"})
+			return
+		}
+		d.PolicyID = id
 	}
 	res, err := h.apply(r.Context(), src, d)
 	if err != nil {
@@ -345,7 +356,16 @@ func (h *Handler) apply(ctx context.Context, src Source, d delivery) (response, 
 	// different rules matched never share one, because the rules may send
 	// them to different people.
 	route := h.router.Load().Route(labels)
-	key, groupLabels := alert.GroupKey(route.RuleID, route.Grouping.By, labels)
+	scope := route.RuleID
+	if d.PolicyID != "" {
+		// The sender chose the policy. The alert keeps the team and the
+		// service that routing gives it, and groups only with alerts that
+		// were sent to the same policy in the same way: a group has one
+		// policy, decided when it opens.
+		route.PolicyID = d.PolicyID
+		scope = "policy:" + d.PolicyID
+	}
+	key, groupLabels := alert.GroupKey(scope, route.Grouping.By, labels)
 	a, created, err := h.alerts.Fire(ctx, alert.Firing{
 		SourceID:      src.ID,
 		Fingerprint:   fingerprint,
