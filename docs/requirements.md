@@ -173,7 +173,7 @@ Beacon exposes a Prometheus `/metrics` endpoint. It covers both how Beacon is ru
 | Operational metrics: ingestion rate, notification successes and failures by channel, queue depth, API latency | MVP |
 | Alert-handling metrics: alerts by team, service and severity; time to acknowledge and time to resolve as histograms; escalations | MVP |
 | On-call metrics: current on-call per schedule; pages per person | Later |
-| Example Grafana dashboard and alert rules shipped with the project | Later |
+| Example Grafana dashboard and alert rules for Beacon itself, shipped with the project and checked in CI | MVP |
 | Built-in reports: noisiest alerts, on-call load, trends | Later |
 
 > [!warning] Label cardinality

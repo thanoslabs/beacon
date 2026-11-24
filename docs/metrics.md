@@ -99,6 +99,56 @@ Each replica serves its own `/metrics`, and the reference says for every metric 
 
 Global metrics are read when Beacon is scraped: at most once in five seconds, however many scrapes arrive, and for at most two seconds. When Postgres does not answer in that time, the scrape goes on without them and `beacon_state_metrics_up` is `0`. A value from an earlier read is never served in their place, so a query over a global metric returns nothing while the database is away. Alert on `beacon_state_metrics_up == 0` to hear about that.
 
+## Alerting on Beacon itself
+
+The thing that pages you needs watching by something else. [`dev/prometheus/beacon-alerts.yml`](https://github.com/thanoslabs/beacon/blob/main/dev/prometheus/beacon-alerts.yml) is a set of alerting rules to copy into the Prometheus that scrapes Beacon.
+
+> [!warning] Do not route these alerts through Beacon
+> An alert that says Beacon cannot notify anyone must reach you some other way: a receiver of Alertmanager that goes straight to chat or email, not the webhook to Beacon.
+
+| Rule | Fires when |
+|---|---|
+| `BeaconDown` | A replica has not answered a scrape for two minutes |
+| `BeaconCannotReadState` | A replica cannot read the global metrics from Postgres |
+| `BeaconConfigurationRejected` | A reload was rejected, and a replica runs a configuration that differs from the files |
+| `BeaconNotificationsGivenUp` | A notification was given up: somebody did not get a message |
+| `BeaconNotificationsFailing` | Most delivery attempts through an integration fail |
+| `BeaconNotificationQueueStuck` | The oldest notification has waited more than five minutes |
+| `BeaconNotificationQueueGrowing` | More than 100 notifications wait |
+| `BeaconSourceSilent` | A source has delivered nothing for over an hour |
+| `BeaconIngestFailing` | Beacon cannot store what a source delivers |
+| `BeaconIngestRejected` | Beacon refuses what a source delivers as invalid |
+| `BeaconEscalationUnanswered` | Every step of a policy ran and nobody responded |
+| `BeaconEscalationStepReachedNobody` | A step ran and every target was skipped |
+| `BeaconScheduleNotCovered` | A schedule has had nobody on call for 15 minutes |
+| `BeaconAPIErrors` | More than 5% of requests end in a `5xx` answer |
+
+Three of them are the dead man's switches of the pipeline. **Notifications failing** and **the queue growing** say that alerts come in and do not go out. **A source gone silent** says that they do not come in: `BeaconSourceSilent` fires when a source that Beacon knows has delivered nothing for an hour. That only means something for a source that always has something to say. The usual way to get one is an always-firing alert in Prometheus, which Alertmanager repeats to Beacon at its `repeat_interval`; kube-prometheus calls it `Watchdog`:
+
+```yaml
+- alert: Watchdog
+  expr: vector(1)
+  labels: {severity: info}
+```
+
+Set the window of the rule to a little more than that interval, route the `Watchdog` alert in Beacon to a policy that notifies a quiet channel, and limit the rule to such sources with a matcher on `source` if your others are silent when all is well.
+
+The thresholds are starting points. The rules are checked and unit-tested with `promtool` in Beacon's CI ([`beacon-alerts.test.yml`](https://github.com/thanoslabs/beacon/blob/main/dev/prometheus/beacon-alerts.test.yml)), against the Prometheus version pinned in `compose.yaml`.
+
+## Dashboard
+
+[`dev/grafana/dashboards/beacon.json`](https://github.com/thanoslabs/beacon/blob/main/dev/grafana/dashboards/beacon.json) is a Grafana dashboard of all of the above: what is firing now, the queue, ingestion by source, time to acknowledge and to resolve by team, escalations, deliveries by integration, and the API. Import it in Grafana (Dashboards, New, Import) and choose your Prometheus data source; nothing in it belongs to one install.
+
+Its panels read global metrics with `max without (instance)`. If your replicas differ in another label, such as `pod`, add it there.
+
+To see it with data, start Beacon with the Grafana of the Compose file, which now brings a Prometheus that scrapes Beacon and evaluates the rules:
+
+```sh
+BEACON_CONFIG_DIR=./examples/grafana docker compose --profile grafana up --build -d --wait
+```
+
+Grafana is at `http://localhost:3000` (`admin` and `admin`), with the dashboard in the folder Beacon, and Prometheus at `http://localhost:9090`. Set `BEACON_GRAFANA_PORT` or `BEACON_PROMETHEUS_PORT` if a port is taken.
+
 ## Reference
 
 Every metric Beacon exposes under the prefix `beacon_`. This part of the page is written from the catalogue in `internal/metrics`, and a test fails when the two differ: do not edit it, run `go test ./internal/metrics -run TestReferenceIsTheCatalogue -update`.
