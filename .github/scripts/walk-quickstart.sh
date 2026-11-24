@@ -81,7 +81,11 @@ wait_for "the page to be queued for the channel" count_is 1 "SELECT count(*) FRO
 wait_for "the escalation step on the timeline" count_is 1 "SELECT count(*) FROM alert_events WHERE type = 'escalated' AND data->>'policy' = 'default'"
 
 step "If no message arrives"
-wait_for "the failed delivery in the log" warned
+# Slack refuses the made-up token (or cannot be reached): either way the
+# attempt is an entry on the alert's timeline with its error, and a line in
+# the log, which is where the guide sends the reader.
+wait_for "the failed delivery on the timeline" count_is 1 "SELECT (count(*) > 0)::int FROM alert_events WHERE type = 'notification_failed' AND data->>'error' <> ''"
+wait_for "a warning or an error in the log" warned
 docker compose logs beacon | grep -E '"level":"(WARN|ERROR)"' | grep -v 'of the quickstart' | tail -n 2
 docker compose exec -T beacon beacon validate --config /etc/beacon --check-secrets | grep 'is valid: 1 source, 1 integration'
 
