@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/config"
+	"github.com/thanoslabs/beacon/internal/metrics"
+	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/silence"
 )
 
@@ -183,6 +186,12 @@ type People interface {
 // used. Without one, people targets notify nobody.
 func (p *Pipeline) SetPeople(people People) { p.people.Store(&people) }
 
+// The values of the result label of the step counter.
+const (
+	stepNotified = "notified"
+	stepNobody   = "nobody"
+)
+
 // escalation is a row of the escalations table.
 type escalation struct {
 	groupID   string
@@ -290,7 +299,7 @@ func (p *Pipeline) EscalateDue(ctx context.Context) (n int, err error) {
 
 func (p *Pipeline) escalateOne(ctx context.Context) (found bool, err error) {
 	var failed string
-	err = pgx.BeginFunc(ctx, p.db, func(tx pgx.Tx) error {
+	err = postgres.InTx(ctx, p.db, func(ctx context.Context, tx pgx.Tx) error {
 		// The row is read from its own table alone: a locking read that
 		// waited sees the row as the other transaction left it, but would
 		// pair it with joined rows as they were before.
@@ -418,6 +427,13 @@ func (p *Pipeline) exhaust(ctx context.Context, tx pgx.Tx, esc escalation, why s
 	if err := alert.AppendEvent(ctx, tx, &alert.Event{GroupID: esc.groupID, Type: EventEscalationExhausted, Actor: alert.System(), OccurredAt: p.now(), Data: data}); err != nil {
 		return err
 	}
+	// Counted once the end is on record. A policy that the configuration
+	// no longer has is counted under a fixed name.
+	name := policy.Name
+	if name == "" {
+		name = metrics.Other
+	}
+	postgres.AfterCommit(ctx, func() { p.exhausted.WithLabelValues(name).Inc() })
 	return p.endEscalation(ctx, tx, esc, escalationExhausted)
 }
 
@@ -539,9 +555,15 @@ func (p *Pipeline) runStep(ctx context.Context, tx pgx.Tx, g alert.Group, policy
 			}
 		}
 	}
+	result := stepNotified
 	if len(sent) == 0 {
+		result = stepNobody
 		p.logger.WarnContext(ctx, "an escalation step notified nobody", slog.String("group_id", g.ID), slog.String("policy", policy.Name), slog.Int("step", esc.stepIndex+1))
 	}
+	// The step is counted once the transaction that ran it has committed:
+	// a step that is rolled back runs again, and is one step.
+	number := strconv.Itoa(esc.stepIndex + 1)
+	postgres.AfterCommit(ctx, func() { p.steps.WithLabelValues(policy.Name, number, result).Inc() })
 	return alert.AppendEvent(ctx, tx, &alert.Event{GroupID: g.ID, Type: EventEscalated, Actor: alert.System(), OccurredAt: p.now(), Data: map[string]any{
 		"policy":   policy.Name,
 		"step":     esc.stepIndex + 1,

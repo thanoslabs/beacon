@@ -176,6 +176,11 @@ func runServe(ctx context.Context, e env, args []string) error {
 		logger.WarnContext(ctx, "this binary was built without the web interface: the API works, and a browser is told how to build it; the release image includes it")
 	}
 	alerts.Observe(pipeline.Observe)
+	// How alerts are handled is counted where they change. What is true of
+	// the whole install is read from Postgres when the metrics are scraped.
+	alertMetrics := metrics.NewAlerts()
+	alerts.Observe(observeAlerts(alertMetrics))
+	state := &installState{pool: pool, pipeline: pipeline, alerts: alerts, schedules: schedules, metrics: alertMetrics}
 	prov := &provisioner{
 		logger: logger, pool: pool, path: cfgPath, getenv: e.getenv, slackAPIURL: slackAPIURL, discordAPIURL: discordAPIURL,
 		ingest:              ingest.New(logger, alerts, nil),
@@ -194,6 +199,8 @@ func runServe(ctx context.Context, e env, args []string) error {
 		identityAPI:         identity.NewHandler(logger, identities, linker.Integrations),
 		linker:              linker,
 		web:                 app,
+		alertMetrics:        alertMetrics,
+		state:               state,
 	}
 	prov.silences.SetAlerts(alerts)
 	prov.registerMetrics(registry)
@@ -202,10 +209,8 @@ func runServe(ctx context.Context, e env, args []string) error {
 	// What is true of the whole install is read from Postgres when the
 	// metrics are scraped, within a bound, so that a slow database costs a
 	// scrape two seconds and never hangs it.
-	registry.MustRegister(metrics.NewStateCollector(logger, func(ctx context.Context) (metrics.State, error) {
-		pending, oldest, err := pipeline.QueueStats(ctx)
-		return metrics.State{PendingNotifications: pending, OldestPending: oldest}, err
-	}))
+	alertMetrics.Register(registry)
+	registry.MustRegister(metrics.NewStateCollector(logger, state.read))
 	linker.RegisterMetrics(registry)
 	prov.interactions.SetIdentities(prov)
 	prov.discordInteractions.SetIdentities(prov)

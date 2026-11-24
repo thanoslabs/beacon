@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -75,6 +76,10 @@ type provisioner struct {
 	linker         *identity.Linker
 	// web serves the web interface, to every address that is not the API's.
 	web http.Handler
+	// alertMetrics and state are told the names of the configuration, which
+	// bound the labels of the metrics. Both may be nil in tests.
+	alertMetrics *metrics.Alerts
+	state        *installState
 
 	// mu makes applications take turns, so that the configuration that was
 	// reconciled last is also the one that is live.
@@ -256,6 +261,14 @@ func (p *provisioner) apply(ctx context.Context, cfg config.Config) error {
 	p.teams.Store(&cfg.Teams)
 	p.provisionedAPI.SetConfig(cfg)
 	p.countSkipped(cfg.Teams, rows.Skipped)
+
+	if p.alertMetrics != nil {
+		p.alertMetrics.SetNames(metricNames(cfg, rows.IDs[provision.Teams]))
+	}
+	if p.state != nil {
+		live := maps.Clone(rows.IDs[provision.Schedules])
+		p.state.live.Store(&live)
+	}
 
 	p.reportSchedules(ctx, cfg, rotations)
 	p.applySources(ctx, cfg, rows.IDs[provision.Sources])

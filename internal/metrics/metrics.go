@@ -76,8 +76,13 @@ var Labels = map[string]string{
 	"source":      "Name of a source in the configuration.",
 	"integration": "Name of an integration in the configuration.",
 	"type":        "Type of the integration: `slack`, `discord`, `email` or `webhook`.",
-	"team":        "Name of a team in the configuration.",
+	"team":        "Name of a team in the configuration; `none` for an alert that no team was assigned, and `other` for a team that has left the configuration.",
 	"schedule":    "Name of a schedule in the configuration.",
+	"policy":      "Name of an escalation policy in the configuration.",
+	"step":        "Number of a step in its escalation policy, from 1. The configuration says how many steps a policy has.",
+	"service":     "Name of a service that a routing rule of the configuration names. A service that an alert brought in its own `service` label is `other`, and an alert without a service is `none`.",
+	"severity":    "`critical`, `warning` or `info`.",
+	"state":       "State of an alert that is not resolved: `firing`, `acknowledged` or `snoozed`.",
 	"result":      "A fixed set of outcomes, listed with the metric.",
 	"outcome":     "Outcome of a delivery attempt: `success`, `retryable_error` or `permanent_error`.",
 	"route":       "Pattern of the route that took the request, such as `/api/v1/alerts/{id}`, never the address that was asked for; `unmatched` when no route did.",
@@ -94,15 +99,22 @@ const (
 	GroupHTTP          = "HTTP and API"
 	GroupIngest        = "Ingestion"
 	GroupNotifications = "Notifications"
+	GroupAlerts        = "Alert handling"
+	GroupEscalation    = "Escalation"
 	GroupPeople        = "People"
 )
 
 // Groups are the headings of the reference, in the order they are shown.
-var Groups = []string{GroupProcess, GroupHTTP, GroupIngest, GroupNotifications, GroupPeople}
+var Groups = []string{GroupProcess, GroupHTTP, GroupIngest, GroupAlerts, GroupEscalation, GroupNotifications, GroupPeople}
 
 // DurationBuckets are the buckets of a request or a delivery: five
 // milliseconds to ten seconds.
 var DurationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+
+// HandlingBuckets are the buckets of the time people take over an alert:
+// fifteen seconds to a day. On-call work is judged in minutes, so that is
+// where they are close together.
+var HandlingBuckets = []float64{15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86400}
 
 // The names of the metrics, for the code that creates them.
 const (
@@ -127,6 +139,15 @@ const (
 	NotificationsPending     = "beacon_notifications_pending"
 	NotificationsOldest      = "beacon_notifications_oldest_pending_age_seconds"
 
+	AlertsOpened           = "beacon_alerts_opened_total"
+	AlertTimeToAcknowledge = "beacon_alert_time_to_acknowledge_seconds"
+	AlertTimeToResolve     = "beacon_alert_time_to_resolve_seconds"
+	AlertsOpen             = "beacon_alerts_open"
+
+	EscalationSteps      = "beacon_escalation_steps_total"
+	EscalationsExhausted = "beacon_escalations_exhausted_total"
+
+	ScheduleCovered        = "beacon_schedule_covered"
 	TeamMembersSkipped     = "beacon_team_members_skipped"
 	ScheduleMembersSkipped = "beacon_schedule_members_skipped"
 	UsersWithoutIdentity   = "beacon_users_without_identity"
@@ -185,6 +206,32 @@ var catalog = []Def{
 	},
 
 	{
+		Name: AlertsOpened, Type: Counter, Scope: Replica, Group: GroupAlerts, Labels: []string{"team", "service", "severity"},
+		Help: "Alerts opened, by the team and the service that routing assigned and by severity. A repeated delivery of an open alert opens nothing and is not counted.",
+	},
+	{
+		Name: AlertTimeToAcknowledge, Type: Histogram, Scope: Replica, Group: GroupAlerts, Labels: []string{"team", "severity"}, Buckets: HandlingBuckets,
+		Help: "Time from the moment Beacon opened an alert to the first time a person acknowledged or snoozed it, in seconds. Observed once per alert; an alert that is resolved before anyone responds is not in it.",
+	},
+	{
+		Name: AlertTimeToResolve, Type: Histogram, Scope: Replica, Group: GroupAlerts, Labels: []string{"team", "severity"}, Buckets: HandlingBuckets,
+		Help: "Time from the moment Beacon opened an alert to its resolution, by its source or by a person, in seconds. Observed once per alert.",
+	},
+	{
+		Name: AlertsOpen, Type: Gauge, Scope: Global, Group: GroupAlerts, Labels: []string{"team", "severity", "state"},
+		Help: "Alerts that are not resolved, by team, severity and state.",
+	},
+
+	{
+		Name: EscalationSteps, Type: Counter, Scope: Replica, Group: GroupEscalation, Labels: []string{"policy", "step", "result"},
+		Help: "Escalation steps run, by policy, by the number of the step and by result: notified (at least one target was told) or nobody (every target was skipped, so the step paged no one).",
+	},
+	{
+		Name: EscalationsExhausted, Type: Counter, Scope: Replica, Group: GroupEscalation, Labels: []string{"policy"},
+		Help: "Escalations that ended because every step had run, as often as the policy repeats, while an alert was still firing: nobody responded. An escalation whose policy left the configuration while it ran ends the same way and is counted under the policy `other`.",
+	},
+
+	{
 		Name: NotificationAttempts, Type: Counter, Scope: Replica, Group: GroupNotifications, Labels: []string{"integration", "type", "outcome"},
 		Help: "Delivery attempts, by integration, its type and the outcome. A retryable_error is tried again; a permanent_error is not.",
 	},
@@ -205,6 +252,10 @@ var catalog = []Def{
 		Help: "Age in seconds of the oldest notification in the queue that is neither delivered nor given up; 0 when the queue is empty.",
 	},
 
+	{
+		Name: ScheduleCovered, Type: Gauge, Scope: Global, Group: GroupPeople, Labels: []string{"schedule"},
+		Help: "Whether somebody is on call for the schedule now, by the rotation or by an override: 1, or 0 during a gap in coverage. It says that someone is on call, never who.",
+	},
 	{
 		Name: TeamMembersSkipped, Type: Gauge, Scope: Replica, Group: GroupPeople, Labels: []string{"team"},
 		Help: "Email addresses in a team's members list that belong to no user, by team, as of the last time this process applied the configuration or completed a sign-in. Such a person joins the team when they first sign in.",

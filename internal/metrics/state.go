@@ -18,6 +18,18 @@ type State struct {
 	PendingNotifications map[string]int
 	// OldestPending is the age of the oldest of them, or zero.
 	OldestPending time.Duration
+	// OpenAlerts counts the alerts that are not resolved.
+	OpenAlerts []OpenAlerts
+	// Covered says for each schedule, by name, whether somebody is on call.
+	Covered map[string]bool
+}
+
+// OpenAlerts is how many alerts of one team and severity are in one state.
+// The values are label values: they have been through Alerts.Team and
+// Severity.
+type OpenAlerts struct {
+	Team, Severity, State string
+	Count                 int
 }
 
 // Defaults of the state collector.
@@ -46,7 +58,7 @@ type StateCollector struct {
 	maxAge  time.Duration
 	now     func() time.Time
 
-	up, duration, pending, oldest *prometheus.Desc
+	up, duration, pending, oldest, open, covered *prometheus.Desc
 
 	mu sync.Mutex
 	// state is the last read and readAt when it was made; ok is whether it
@@ -71,6 +83,7 @@ func NewStateCollector(logger *slog.Logger, read func(context.Context) (State, e
 	return &StateCollector{
 		read: read, logger: logger, timeout: StateTimeout, maxAge: StateMaxAge, now: time.Now,
 		up: Desc(StateUp), duration: Desc(StateReadDuration), pending: Desc(NotificationsPending), oldest: Desc(NotificationsOldest),
+		open: Desc(AlertsOpen), covered: Desc(ScheduleCovered),
 	}
 }
 
@@ -85,6 +98,8 @@ func (c *StateCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.duration
 	ch <- c.pending
 	ch <- c.oldest
+	ch <- c.open
+	ch <- c.covered
 }
 
 // Collect implements prometheus.Collector.
@@ -108,6 +123,16 @@ func (c *StateCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.pending, prometheus.GaugeValue, float64(n), integration)
 	}
 	ch <- prometheus.MustNewConstMetric(c.oldest, prometheus.GaugeValue, c.state.OldestPending.Seconds())
+	for _, o := range c.state.OpenAlerts {
+		ch <- prometheus.MustNewConstMetric(c.open, prometheus.GaugeValue, float64(o.Count), o.Team, o.Severity, o.State)
+	}
+	for schedule, covered := range c.state.Covered {
+		value := 0.0
+		if covered {
+			value = 1
+		}
+		ch <- prometheus.MustNewConstMetric(c.covered, prometheus.GaugeValue, value, schedule)
+	}
 }
 
 // refresh reads the state, waiting no longer than the timeout.
