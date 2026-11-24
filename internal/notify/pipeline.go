@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"math/rand/v2"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -79,6 +80,10 @@ type Pipeline struct {
 	attempts     *prometheus.CounterVec
 	failed       *prometheus.CounterVec
 	sendDuration *prometheus.HistogramVec
+	// steps counts the escalation steps that ran, and exhausted the
+	// escalations that nobody responded to.
+	steps     *prometheus.CounterVec
+	exhausted *prometheus.CounterVec
 }
 
 // New returns a pipeline. Register its channels before calling Run.
@@ -105,6 +110,7 @@ func New(db *pgxpool.Pool, alerts *alert.Store, logger *slog.Logger, cfg Config)
 		db: db, alerts: alerts, logger: logger, cfg: cfg, now: time.Now,
 		attempts: metrics.NewCounterVec(metrics.NotificationAttempts), failed: metrics.NewCounterVec(metrics.NotificationsFailed),
 		sendDuration: metrics.NewHistogramVec(metrics.NotificationSendDuration),
+		steps:        metrics.NewCounterVec(metrics.EscalationSteps), exhausted: metrics.NewCounterVec(metrics.EscalationsExhausted),
 	}
 	p.SetIntegrations(nil)
 	p.SetChannels(nil)
@@ -138,7 +144,7 @@ func (p *Pipeline) SetChannels(channels map[string]Channel) {
 
 // RegisterMetrics registers the pipeline's metrics on reg.
 func (p *Pipeline) RegisterMetrics(reg prometheus.Registerer) {
-	reg.MustRegister(p.attempts, p.failed, p.sendDuration)
+	reg.MustRegister(p.attempts, p.failed, p.sendDuration, p.steps, p.exhausted)
 }
 
 // SetIntegrations tells the pipeline the names and types of the
@@ -210,6 +216,15 @@ func (p *Pipeline) SetPolicies(policies map[string]Policy) {
 		policies = map[string]Policy{}
 	}
 	p.policies.Store(&policies)
+	// The series exist from the start, so a rate over them is never empty.
+	for _, policy := range policies {
+		for i := range policy.Steps {
+			for _, result := range []string{stepNotified, stepNobody} {
+				p.steps.WithLabelValues(policy.Name, strconv.Itoa(i+1), result)
+			}
+		}
+		p.exhausted.WithLabelValues(policy.Name)
+	}
 }
 
 // SetSilences makes the pipeline keep quiet about the alerts that the

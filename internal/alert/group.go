@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/thanoslabs/beacon/internal/postgres"
 )
 
 // GroupStatus says whether a group still has an alert that is not resolved.
@@ -251,7 +253,7 @@ type Outcome struct {
 // process that dies in the middle leaves the group due.
 func (s *Store) NotifyDueGroup(ctx context.Context, notify func(ctx context.Context, tx pgx.Tx, g Group, alerts []Alert) (Outcome, error)) (found bool, err error) {
 	var failed string
-	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+	err = postgres.InTx(ctx, s.db, func(ctx context.Context, tx pgx.Tx) error {
 		now := s.now()
 		g, err := scanGroup(tx.QueryRow(ctx, `SELECT `+groupColumns+` FROM alert_groups
 			WHERE notify_at <= $1 ORDER BY notify_at LIMIT 1 FOR UPDATE SKIP LOCKED`, now))

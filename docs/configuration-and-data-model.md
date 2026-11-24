@@ -412,6 +412,10 @@ The alerts API lists alerts newest first and a page at a time ([[api#Lists]]), w
 | `acknowledged_at`, `acknowledged_by` | | |
 | `snoozed_until` | `timestamptz` | |
 | `resolved_at` | `timestamptz` | |
+| `opened_at` | `timestamptz` | When Beacon opened the alert. `started_at` is when the source says the problem began, which may be long before. |
+| `first_response_at` | `timestamptz` | When a person first acknowledged or snoozed the alert; null until then, and never cleared. |
+
+`opened_at` and `first_response_at` were added with the alert-handling metrics (issue 44). Time to acknowledge and time to resolve are measured from `opened_at`, and `first_response_at` is what makes "first" a fact of the row: `acknowledged_at` is cleared when a snooze runs out, so it cannot tell a first acknowledgement from a second, and whichever replica makes the change sees the same row. See [[metrics#Alert handling]].
 
 A unique index on (`source_id`, `fingerprint`) for rows whose status is not `resolved` makes deduplication safe under concurrent deliveries, and lets a resolved alert that fires again open a new row.
 

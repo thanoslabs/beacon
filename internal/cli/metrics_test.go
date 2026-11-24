@@ -125,7 +125,8 @@ func TestMetricsMatchTheCatalogue(t *testing.T) {
 		// The queue is read from Postgres at most once in five seconds, so
 		// a scrape may still show a delivery that has been made since.
 		return len(missing()) == 0 && values[`beacon_notification_attempts_total{integration="slack",outcome="success",type="slack"}`] >= 2 &&
-			values[`beacon_notifications_pending{integration="slack"}`] == 0
+			values[`beacon_notifications_pending{integration="slack"}`] == 0 &&
+			values[`beacon_alerts_open{severity="critical",state="firing",team="platform"}`] == 1
 	})
 	if t.Failed() {
 		t.Fatalf("missing from the scrape: %v", missing())
@@ -185,10 +186,24 @@ func TestMetricsMatchTheCatalogue(t *testing.T) {
 	// What happened is what was counted.
 	values := metricstest.FromFamilies(slices.Collect(mapValues(families)))
 	metricstest.Expect(t, values, map[string]float64{
-		`beacon_ingest_requests_total{result="accepted",source="default"}`:                     2,
-		`beacon_ingest_requests_total{result="invalid",source="default"}`:                      1,
-		`beacon_ingest_alerts_total{result="created",source="default"}`:                        2,
-		`beacon_ingest_unauthorized_requests_total`:                                            1,
+		`beacon_ingest_requests_total{result="accepted",source="default"}`: 2,
+		`beacon_ingest_requests_total{result="invalid",source="default"}`:  1,
+		`beacon_ingest_alerts_total{result="created",source="default"}`:    2,
+		`beacon_ingest_unauthorized_requests_total`:                        1,
+		// The first alert took the default route, to the team platform, and
+		// brought a service of its own; the second matched the rule that
+		// names the service postgres and no team, with a severity
+		// the source does not map, which is a warning.
+		`beacon_alerts_opened_total{service="other",severity="critical",team="platform"}`:     1,
+		`beacon_alerts_opened_total{service="postgres",severity="warning",team="none"}`:       1,
+		`beacon_alerts_open{severity="critical",state="firing",team="platform"}`:              1,
+		`beacon_alerts_open{severity="warning",state="firing",team="none"}`:                   1,
+		`beacon_alerts_open{severity="warning",state="acknowledged",team="platform"}`:         0,
+		`beacon_alert_time_to_acknowledge_seconds_count{severity="critical",team="platform"}`: 0,
+		`beacon_escalation_steps_total{policy="default",result="notified",step="1"}`:          2,
+		`beacon_escalations_exhausted_total{policy="default"}`:                                0,
+		// Nobody of the rotation has signed in, so nobody is on call.
+		`beacon_schedule_covered{schedule="primary"}`:                                          0,
 		`beacon_routing_unmatched_alerts_total{source="default"}`:                              1,
 		`beacon_http_requests_total{code="201",method="POST",route="/api/v1/ingest/{source}"}`: 2,
 		`beacon_http_requests_total{code="401",method="GET",route="/api/v1/alerts/{id}"}`:      1,

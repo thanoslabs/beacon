@@ -163,3 +163,26 @@ func TestASlowDatabaseCannotHangAScrape(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// TestStateCollectorServesAlertsAndCoverage: the alerts that are open and
+// the schedules that have somebody on call are served as they were read,
+// and a schedule is named without the person.
+func TestStateCollectorServesAlertsAndCoverage(t *testing.T) {
+	c := metrics.NewStateCollector(quiet, func(context.Context) (metrics.State, error) {
+		return metrics.State{
+			OpenAlerts: []metrics.OpenAlerts{
+				{Team: "platform", Severity: "critical", State: "firing", Count: 4},
+				{Team: metrics.None, Severity: "info", State: "snoozed", Count: 0},
+			},
+			Covered: map[string]bool{"primary": true, "weekend": false},
+		}, nil
+	})
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(c)
+	want := help(metrics.AlertsOpen) +
+		"beacon_alerts_open{severity=\"critical\",state=\"firing\",team=\"platform\"} 4\nbeacon_alerts_open{severity=\"info\",state=\"snoozed\",team=\"none\"} 0\n" +
+		help(metrics.ScheduleCovered) + "beacon_schedule_covered{schedule=\"primary\"} 1\nbeacon_schedule_covered{schedule=\"weekend\"} 0\n"
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), metrics.AlertsOpen, metrics.ScheduleCovered); err != nil {
+		t.Error(err)
+	}
+}

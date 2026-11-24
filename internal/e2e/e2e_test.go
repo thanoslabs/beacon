@@ -507,6 +507,13 @@ func TestFirstPath(t *testing.T) {
 			b.metrics(`beacon_notifications_pending{integration="slack"}`) == `beacon_notifications_pending{integration="slack"} 0` &&
 			!strings.HasSuffix(b.metrics(`beacon_notification_attempts_total{integration="slack",outcome="success",type="slack"}`), " 0")
 	})
+	// The alert was opened once, acknowledged once by a person, and
+	// resolved once, however many replicas or retries were involved.
+	for _, counted := range []string{"beacon_alerts_opened_total", "beacon_alert_time_to_acknowledge_seconds_count", "beacon_alert_time_to_resolve_seconds_count"} {
+		if got := b.metrics(counted); strings.Count(got+"\n", "} 1\n") != 1 || strings.Contains(got+"\n", "} 2\n") {
+			t.Errorf("%s does not show one alert:\n%s", counted, got)
+		}
+	}
 	if all := b.metrics("beacon_"); strings.Contains(all, "DiskFull") || strings.Contains(all, "U0ADA") || strings.Contains(all, oidctest.Ada) {
 		t.Errorf("the metrics name an alert or a person:\n%s", all)
 	}

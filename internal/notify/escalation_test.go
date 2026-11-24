@@ -437,6 +437,20 @@ func (f *escalationFixture) replica() *notify.Pipeline {
 	return p
 }
 
+// fireInto fires an alert into a group of its own, the i-th, and returns the
+// group.
+func (f *escalationFixture) fireInto(i int) string {
+	f.t.Helper()
+	a, _, err := f.alerts.Fire(context.Background(), alert.Firing{
+		SourceID: f.sourceID, Fingerprint: fmt.Sprint(i), Severity: alert.SeverityCritical, Labels: map[string]string{"alertname": fmt.Sprint("A", i)},
+		Group: alert.Grouping{Key: fmt.Sprint(i), EscalationPolicyID: f.policyID},
+	})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return a.GroupID
+}
+
 // TestEscalationTimersSurviveARestartAndFireOnce: the timer of a step is a
 // column in Postgres. The process that ran the first step is gone when the
 // second falls due; several new ones start at the same moment, and exactly
@@ -445,14 +459,7 @@ func TestEscalationTimersSurviveARestartAndFireOnce(t *testing.T) {
 	f := newEscalationFixture(t)
 	var groups []string
 	for i := range 12 {
-		a, _, err := f.alerts.Fire(context.Background(), alert.Firing{
-			SourceID: f.sourceID, Fingerprint: fmt.Sprint(i), Severity: alert.SeverityCritical, Labels: map[string]string{"alertname": fmt.Sprint("A", i)},
-			Group: alert.Grouping{Key: fmt.Sprint(i), EscalationPolicyID: f.policyID},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		groups = append(groups, a.GroupID)
+		groups = append(groups, f.fireInto(i))
 	}
 	if n := f.tick(); n != 12 {
 		t.Fatalf("%d groups notified, want 12", n)

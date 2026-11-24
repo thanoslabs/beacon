@@ -4,7 +4,7 @@ tags: [operations, metrics, reference]
 date: 2026-11-23
 ---
 
-Beacon reports on itself in the Prometheus text format at `GET /metrics`: how the process is running, what it received and what became of the notifications it sent. The same Prometheus that produces your alerts can watch the thing that pages you.
+Beacon reports on itself in the Prometheus text format at `GET /metrics`: how the process is running, what it received, what became of the notifications it sent, and how alerts are being handled. The same Prometheus that produces your alerts can watch the thing that pages you.
 
 The page ends with the [reference](#reference) of every metric, which is written from the code.
 
@@ -42,27 +42,54 @@ The token guards `/metrics` and nothing else. The probes `/healthz` and `/readyz
 
 ### What the metrics reveal
 
-A reader of `/metrics` learns the **names** that the configuration files give to sources, integrations, teams and schedules, the routes of the API, and how much of everything there is: how many alerts a source sent, how many notifications failed.
+A reader of `/metrics` learns the **names** that the configuration files give to sources, integrations, teams, schedules, escalation policies and the services of routing rules, the routes of the API, and how much of everything there is: how many alerts a source sent, how many notifications failed.
 
-They do not learn anything an alert carried or anything about a person. No metric has a label for an alert's name, its labels, its fingerprint or an identifier; none names a user, an email address, a chat account, a channel or a webhook address; none holds a credential. That is a rule of the code, not a habit: the labels a metric may have are an allow-list ([Labels](#labels)), and a test fails when a metric gains another.
+They do not learn anything an alert carried or anything about a person. No metric has a label for an alert's name, its labels, its fingerprint or an identifier; none names a user, an email address, a chat account, a channel or a webhook address; none holds a credential. `beacon_schedule_covered` says whether somebody is on call for a schedule, never who. That is a rule of the code, not a habit: the labels a metric may have are an allow-list ([Labels](#labels)), and a test fails when a metric gains another.
 
 ## Labels are bounded
 
 Every label value comes from a set that cannot grow with traffic: a list that is fixed in the code (an outcome, a status code, the pattern of a route) or a name from the configuration files. An install with ten sources has ten values of `source` however many alerts arrive.
 
-Two rules follow from that:
+Three rules follow from that:
 
 - **Requests are counted by the route that took them**, such as `/api/v1/alerts/{id}`, never by the address that was asked for. Addresses that no route takes are counted together as `unmatched`.
 - **A request to the ingest endpoint counts under a source only when it carried that source's token.** Anyone can ask for any name; requests that are no source's are counted together in `beacon_ingest_unauthorized_requests_total`.
 
+- **A team and a service are labels only by the names the configuration gives them.** An alert's team is the one routing assigned; an alert without one is `none`, and a team that has left the configuration since is `other`. A service is a label when a routing rule names it (`service: postgres`). A rule that names none lets the alert bring its own in a `service` label, and what an alert brings is whatever its sender likes: all such services are counted together as `other`, and an alert without a service as `none`. To see a service by name in the metrics, name it in a routing rule.
+
 A name that left the configuration stays in the counters of a running process until it restarts.
+
+## Alert handling
+
+Three metrics say how alerts are handled, for the reports a team makes of its on-call work.
+
+- `beacon_alerts_opened_total` counts alerts by team, service and severity. A repeated delivery of an alert that is open opens nothing.
+- `beacon_alert_time_to_acknowledge_seconds` is the time from the moment Beacon opened an alert to the **first time a person acknowledged or snoozed it**. A snooze counts: it is someone saying "I have seen this". An alert that is resolved before anyone responds has no time to acknowledge, so the histogram's count is also the number of alerts somebody took.
+- `beacon_alert_time_to_resolve_seconds` is the time from the same moment to the alert's resolution, by its source or by a person.
+
+Each is observed **once per alert**. An alert that is acknowledged, snoozed, fires again when the snooze runs out and is acknowledged a second time was answered once, the first time. The time is measured from when Beacon opened the alert, not from when its source says the problem began: that is the part Beacon and the people on call can do something about.
+
+Both histograms have buckets from 15 seconds to 24 hours, and are labelled by team and severity, not by service, to keep them small.
+
+```promql
+# The time within which nine in ten critical alerts of a team are acknowledged, over a week
+histogram_quantile(0.9, sum by (le, team) (rate(beacon_alert_time_to_acknowledge_seconds_bucket{severity="critical"}[7d])))
+
+# The share of alerts that somebody acknowledged or snoozed before they were resolved
+sum(increase(beacon_alert_time_to_acknowledge_seconds_count[7d])) / sum(increase(beacon_alerts_opened_total[7d]))
+
+# Alerts that are firing right now, by team (a global metric: max, not sum)
+sum by (team) (max without (instance) (beacon_alerts_open{state="firing"}))
+```
+
+Escalations are counted by step: `beacon_escalation_steps_total{policy, step, result}`. A step whose every target was skipped ran and paged no one, and is counted with `result="nobody"`; `beacon_escalations_exhausted_total` counts the escalations that ran out with an alert still firing. Both are worth an alert of their own.
 
 ## Several replicas
 
 Each replica serves its own `/metrics`, and the reference says for every metric whether it is **replica** or **global**.
 
 - **Replica** metrics are what one process did. Add the replicas up: `sum by (source) (rate(beacon_ingest_alerts_total[5m]))`.
-- **Global** metrics are facts about the whole install, such as the depth of the notification queue. They are read from Postgres, so **every replica reports the same number**. Take one of them, never the sum:
+- **Global** metrics are facts about the whole install: the depth of the notification queue, the alerts that are open, whether a schedule has somebody on call. They are read from Postgres, so **every replica reports the same number**. Take one of them, never the sum:
 
   ```promql
   max by (integration) (beacon_notifications_pending)
@@ -105,6 +132,22 @@ Every metric Beacon exposes under the prefix `beacon_`. This part of the page is
 | `beacon_ingest_alerts_total` | counter | `source`, `result` | replica | Alerts in accepted deliveries, by source and by what became of them: created (a new alert), updated (a repeat of an open alert), resolved, or not_found (a resolution of an alert Beacon does not have open). |
 | `beacon_routing_unmatched_alerts_total` | counter | `source` | replica | Alerts opened that matched no routing rule and took the routing default, by source. Repeated deliveries of an open alert are not counted. |
 
+### Alert handling
+
+| Metric | Type | Labels | Scope | Meaning |
+|---|---|---|---|---|
+| `beacon_alerts_opened_total` | counter | `team`, `service`, `severity` | replica | Alerts opened, by the team and the service that routing assigned and by severity. A repeated delivery of an open alert opens nothing and is not counted. |
+| `beacon_alert_time_to_acknowledge_seconds` | histogram | `team`, `severity` | replica | Time from the moment Beacon opened an alert to the first time a person acknowledged or snoozed it, in seconds. Observed once per alert; an alert that is resolved before anyone responds is not in it. Buckets from 15 s to 24 h. |
+| `beacon_alert_time_to_resolve_seconds` | histogram | `team`, `severity` | replica | Time from the moment Beacon opened an alert to its resolution, by its source or by a person, in seconds. Observed once per alert. Buckets from 15 s to 24 h. |
+| `beacon_alerts_open` | gauge | `team`, `severity`, `state` | global | Alerts that are not resolved, by team, severity and state. |
+
+### Escalation
+
+| Metric | Type | Labels | Scope | Meaning |
+|---|---|---|---|---|
+| `beacon_escalation_steps_total` | counter | `policy`, `step`, `result` | replica | Escalation steps run, by policy, by the number of the step and by result: notified (at least one target was told) or nobody (every target was skipped, so the step paged no one). |
+| `beacon_escalations_exhausted_total` | counter | `policy` | replica | Escalations that ended because every step had run, as often as the policy repeats, while an alert was still firing: nobody responded. An escalation whose policy left the configuration while it ran ends the same way and is counted under the policy `other`. |
+
 ### Notifications
 
 | Metric | Type | Labels | Scope | Meaning |
@@ -119,6 +162,7 @@ Every metric Beacon exposes under the prefix `beacon_`. This part of the page is
 
 | Metric | Type | Labels | Scope | Meaning |
 |---|---|---|---|---|
+| `beacon_schedule_covered` | gauge | `schedule` | global | Whether somebody is on call for the schedule now, by the rotation or by an override: 1, or 0 during a gap in coverage. It says that someone is on call, never who. |
 | `beacon_team_members_skipped` | gauge | `team` | replica | Email addresses in a team's members list that belong to no user, by team, as of the last time this process applied the configuration or completed a sign-in. Such a person joins the team when they first sign in. |
 | `beacon_schedule_members_skipped` | gauge | `schedule` | replica | Email addresses in a schedule's rotation that belong to no user, by schedule, as of the last time this process applied the configuration. Such a member is passed over until the person has signed in. |
 | `beacon_users_without_identity` | gauge | `integration` | replica | Users who have no linked account in the chat service of an integration, by integration, as of the last time this process looked. Such a person cannot be reached directly through that integration. |
@@ -135,10 +179,15 @@ The only labels a Beacon metric can have. A test fails when a metric gains one t
 | `integration` | Name of an integration in the configuration. |
 | `method` | HTTP method of the route. |
 | `outcome` | Outcome of a delivery attempt: `success`, `retryable_error` or `permanent_error`. |
+| `policy` | Name of an escalation policy in the configuration. |
 | `result` | A fixed set of outcomes, listed with the metric. |
 | `route` | Pattern of the route that took the request, such as `/api/v1/alerts/{id}`, never the address that was asked for; `unmatched` when no route did. |
 | `schedule` | Name of a schedule in the configuration. |
+| `service` | Name of a service that a routing rule of the configuration names. A service that an alert brought in its own `service` label is `other`, and an alert without a service is `none`. |
+| `severity` | `critical`, `warning` or `info`. |
 | `source` | Name of a source in the configuration. |
-| `team` | Name of a team in the configuration. |
+| `state` | State of an alert that is not resolved: `firing`, `acknowledged` or `snoozed`. |
+| `step` | Number of a step in its escalation policy, from 1. The configuration says how many steps a policy has. |
+| `team` | Name of a team in the configuration; `none` for an alert that no team was assigned, and `other` for a team that has left the configuration. |
 | `type` | Type of the integration: `slack`, `discord`, `email` or `webhook`. |
 | `version` | Version of the binary. |
