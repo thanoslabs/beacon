@@ -1,4 +1,5 @@
-# Beacon and its only dependency, Postgres.
+# Beacon and its only dependency, Postgres. docs/quickstart.md walks through
+# a first run.
 #
 #   docker compose up --build        # build Beacon from this checkout and start both
 #   docker compose up -d --wait postgres   # only Postgres, for development and tests
@@ -15,6 +16,13 @@ services:
       # Token of the webhook source in the mounted configuration. The default
       # is for local use only; set your own. See docs/webhook.md.
       BEACON_SOURCE_TOKEN: ${BEACON_SOURCE_TOKEN:-local-development-token}
+      # Hash of the password of the bootstrap admin, with which the
+      # quickstart signs in to the web interface. The default is the hash of
+      # "local-development-password", which everyone knows: it is for trying
+      # Beacon out on this machine only. Make your own with
+      # `beacon hash-password`, and mind that Compose reads a $ in a value
+      # unless it is written $$. See docs/access.md.
+      BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH: ${BEACON_BOOTSTRAP_ADMIN_PASSWORD_HASH:-$$2a$$12$$AxLH.cSYxO4J7BQSRKiZceiSKU7VLV8.WPzpFtwpkCgeMoYxt8AiW}
       # Slack app credentials, read only by a configuration that has a Slack
       # integration, such as examples/slack. See docs/slack.md.
       BEACON_SLACK_BOT_TOKEN: ${BEACON_SLACK_BOT_TOKEN:-}

@@ -1,0 +1,40 @@
+# Pages in Discord, for the quickstart. To use it, copy the quickstart
+# directory, rename this file to discord.yaml, and put your application ID,
+# public key and channel ID in place of the ones below. docs/discord.md
+# explains how to create the Discord application they come from, and
+# docs/quickstart.md is the walk-through.
+#
+# Use this file or slack.yaml.example, not both: each defines the policy
+# "default" and the routing.
+
+integrations:
+  - name: discord
+    type: discord
+    discord:
+      bot_token: {env: BEACON_DISCORD_BOT_TOKEN}
+      # Both are on the application's General Information page. Neither is a
+      # secret.
+      application_id: "1234567890123456789"
+      public_key: 5f1c0c8e7a9b4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e
+
+# An alert group is posted to the channels named in the first step of its
+# escalation policy. A Discord channel is named by its numeric ID, in quotes
+# (in Discord: turn on Developer Mode, then right-click the channel and
+# choose Copy Channel ID).
+escalation_policies:
+  - name: default
+    steps:
+      - notify:
+          - channel: "1234567890123456789"
+            integration: discord
+        timeout: 5m
+
+# Every alert takes the policy above. The message is posted five seconds
+# after the first alert of a group arrives; without group_wait it is 30s,
+# which gives related alerts time to arrive and share one message.
+routing:
+  group_by: [alertname]
+  group_wait: 5s
+  group_interval: 1m
+  default:
+    escalation_policy: default
