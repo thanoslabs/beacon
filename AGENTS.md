@@ -68,7 +68,7 @@ Tooling:
 │   ├── identity/             # Which Slack or Discord account belongs to which user: lookup by email, link codes
 │   ├── ingest/               # Receivers for Alertmanager, Grafana and the generic webhook: POST /api/v1/ingest/<source>
 │   ├── logging/              # slog setup; request identifiers in log records
-│   ├── metrics/              # The catalogue of Beacon's own metrics and the allow-list of their labels
+│   ├── metrics/              # The catalogue of Beacon's own metrics, the allow-list of their labels, and the collector of what is read from Postgres
 │   │   └── metricstest/      # Test helper: the series of a registry or a scrape, by name
 │   ├── notify/               # Notification queue, workers, retries and the Channel interface
 │   ├── postgres/             # Connection pool and migrator
@@ -195,10 +195,12 @@ CI (`.github/workflows/ci.yml`) runs the build, lint, test and module checks on 
 
 ### Metrics
 
-- `internal/metrics` is the catalogue: **every metric of Beacon is described there once** (`catalog`), with its type, its labels and its help. Code creates a metric with `metrics.NewCounterVec(name)` and its siblings, never with the client library directly; `TestMetricsAreCreatedFromTheCatalogue` reads the source tree for that. `docs/metrics.md` is the guide, and its reference is written from the catalogue (`TestReferenceIsTheCatalogue`, with `-update`).
+- `internal/metrics` is the catalogue: **every metric of Beacon is described there once** (`catalog`), with its type, its labels, whether it is per replica or global, and its help. Code creates a metric with `metrics.NewCounterVec(name)` and its siblings, never with the client library directly; `TestMetricsAreCreatedFromTheCatalogue` reads the source tree for that. `docs/metrics.md` is the guide, and its reference is written from the catalogue (`TestReferenceIsTheCatalogue`, with `-update`).
 - **A label must be on the allow-list `metrics.Labels`**, and its values must be a bounded set: fixed in the code, or named in the configuration files. `TestLabelsAreOnTheAllowList` fails otherwise. Never a label: anything an alert carried (its name, its labels, its fingerprint), an identifier, a rule name, a person's name or address, a chat account, a destination, an address a client asked for. To add a label, add it to the list with where its values come from, and be able to say why they are bounded.
-- A value that reaches a label from outside the code goes through something that bounds it: the pattern of the route for HTTP (`httpMetrics.instrument`), with `metrics.Other` for what the configuration no longer names. `TestMetricsMatchTheCatalogue` (`internal/cli`) scrapes the real server after sending it things that must not become labels; send it the new kind of thing when you add a metric.
-- Give a series its zero when the configuration is applied (`SetSources`), so that a rate is never empty and "nothing failed" is a number.
+- A value that reaches a label from outside the code goes through something that bounds it: the pattern of the route for HTTP (`httpMetrics.instrument`), the source only after its token matched, the integration by the names the provisioner hands the pipeline (`Pipeline.SetIntegrations`), with `metrics.Other` for what the configuration no longer names. `TestMetricsMatchTheCatalogue` (`internal/cli`) scrapes the real server after sending it things that must not become labels; send it the new kind of thing when you add a metric.
+- Counters and histograms are what one process did. **A fact about the whole install is global** (`metrics.Global`): it is read from Postgres by `metrics.StateCollector` when the process is scraped, at most once per `StateMaxAge` and for at most `StateTimeout`, and left out of the scrape when the read fails, never served stale. Do not keep such a number in the process, and do not make the scrape wait for the database any other way; `TestASlowDatabaseCannotHangAScrape` is the guard. The read goes through the package that owns the tables (`Pipeline.QueueStats`).
+- Give a series its zero when the configuration is applied (`SetSources`, `SetIntegrations`), so that a rate is never empty and "nothing failed" is a number.
+- Count where the thing happened once: an attempt after the send, a notification that was given up only after its record committed. A counter that can move on a retry of the same thing is wrong.
 - Names follow Prometheus: `beacon_` prefix, base units, `_total` for counters, `_seconds` for times. `TestCatalogFollowsTheConventions` and the client library's linter (`promlint`, in `TestCatalogPassesTheLinter` and over the real scrape) check it.
 
 ### Database

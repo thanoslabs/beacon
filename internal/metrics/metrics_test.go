@@ -115,8 +115,8 @@ func build(t *testing.T) *prometheus.Registry {
 		}
 		constant := make([]string, len(d.ConstLabels))
 		switch {
-		case d.Scope == metrics.Global:
-			// Made by a collector of its own, when it is scraped.
+		case d.Scope == metrics.Global || d.Name == metrics.StateUp || d.Name == metrics.StateReadDuration:
+			// Made by the state collector, which TestStateCollector covers.
 			continue
 		case d.Type == metrics.Counter && len(d.Labels) == 0:
 			reg.MustRegister(metrics.NewCounter(d.Name))

@@ -14,8 +14,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/thanoslabs/beacon/internal/alert"
+	"github.com/thanoslabs/beacon/internal/metrics"
 )
 
 // Config holds the pipeline settings. Zero values take the defaults.
@@ -70,6 +72,13 @@ type Pipeline struct {
 	// people resolves the people targets of escalation steps. It holds nil
 	// until SetPeople is called.
 	people atomic.Pointer[People]
+	// integrations names the integrations of the configuration, by
+	// identifier, for the labels of the metrics.
+	integrations atomic.Pointer[map[string]Via]
+
+	attempts     *prometheus.CounterVec
+	failed       *prometheus.CounterVec
+	sendDuration *prometheus.HistogramVec
 }
 
 // New returns a pipeline. Register its channels before calling Run.
@@ -92,7 +101,12 @@ func New(db *pgxpool.Pool, alerts *alert.Store, logger *slog.Logger, cfg Config)
 	if cfg.BackoffMax <= 0 {
 		cfg.BackoffMax = DefaultBackoffMax
 	}
-	p := &Pipeline{db: db, alerts: alerts, logger: logger, cfg: cfg, now: time.Now}
+	p := &Pipeline{
+		db: db, alerts: alerts, logger: logger, cfg: cfg, now: time.Now,
+		attempts: metrics.NewCounterVec(metrics.NotificationAttempts), failed: metrics.NewCounterVec(metrics.NotificationsFailed),
+		sendDuration: metrics.NewHistogramVec(metrics.NotificationSendDuration),
+	}
+	p.SetIntegrations(nil)
 	p.SetChannels(nil)
 	p.SetPolicies(nil)
 	p.SetSilences(nil)
@@ -120,6 +134,71 @@ func (p *Pipeline) SetChannels(channels map[string]Channel) {
 		channels = map[string]Channel{}
 	}
 	p.channels.Store(&channels)
+}
+
+// RegisterMetrics registers the pipeline's metrics on reg.
+func (p *Pipeline) RegisterMetrics(reg prometheus.Registerer) {
+	reg.MustRegister(p.attempts, p.failed, p.sendDuration)
+}
+
+// SetIntegrations tells the pipeline the names and types of the
+// integrations, by identifier. It needs them for nothing but the labels of
+// its metrics: an integration it has not been told about is counted as
+// "other". It is safe while the pipeline runs.
+func (p *Pipeline) SetIntegrations(integrations map[string]Via) {
+	integrations = maps.Clone(integrations)
+	if integrations == nil {
+		integrations = map[string]Via{}
+	}
+	p.integrations.Store(&integrations)
+	// The series exist from the start, so a rate over them is never empty
+	// and an integration that has not failed shows as zero.
+	for _, i := range integrations {
+		for _, outcome := range []string{OutcomeSuccess, OutcomeRetryableError, OutcomePermanentError} {
+			p.attempts.WithLabelValues(i.Name, i.Provider, outcome)
+		}
+		p.failed.WithLabelValues(i.Name, i.Provider)
+	}
+}
+
+// integration returns the labels of the integration with an identifier.
+func (p *Pipeline) integration(id string) (name, typ string) {
+	if i, ok := (*p.integrations.Load())[id]; ok {
+		return i.Name, i.Provider
+	}
+	return metrics.Other, metrics.Other
+}
+
+// QueueStats says how deep the queue is: how many notifications are neither
+// delivered nor given up, by the name of their integration, and how old the
+// oldest of them is. Every integration of the configuration is in the
+// answer, with zero when nothing waits for it. It is what the metrics read.
+func (p *Pipeline) QueueStats(ctx context.Context) (pending map[string]int, oldest time.Duration, err error) {
+	rows, err := p.db.Query(ctx, `
+		SELECT i.name, count(n.id) FROM integrations i
+		LEFT JOIN notifications n ON n.integration_id = i.id AND n.status = 'pending'
+		WHERE i.removed_at IS NULL OR n.id IS NOT NULL
+		GROUP BY i.name`)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count pending notifications: %w", err)
+	}
+	pending = map[string]int{}
+	var name string
+	var n int
+	if _, err := pgx.ForEachRow(rows, []any{&name, &n}, func() error {
+		pending[name] += n
+		return nil
+	}); err != nil {
+		return nil, 0, fmt.Errorf("count pending notifications: %w", err)
+	}
+	var since *time.Time
+	if err := p.db.QueryRow(ctx, `SELECT min(created_at) FROM notifications WHERE status = 'pending'`).Scan(&since); err != nil {
+		return nil, 0, fmt.Errorf("find the oldest pending notification: %w", err)
+	}
+	if since != nil {
+		oldest = max(p.now().Sub(*since), 0)
+	}
+	return pending, oldest, nil
 }
 
 // SetPolicies replaces the escalation policies, by the identifier of their
@@ -232,12 +311,25 @@ func (p *Pipeline) deliver(ctx context.Context, n Notification) {
 	// Not cancelled by shutdown; see Run.
 	ctx = context.WithoutCancel(ctx)
 	sendCtx, cancel := context.WithTimeout(ctx, p.cfg.SendTimeout)
+	start := time.Now()
 	ref, sendErr := p.send(sendCtx, n)
 	cancel()
+	// The attempt is counted where it was made, whether or not the record
+	// of it can be written: the service was asked either way.
+	name, typ := p.integration(n.IntegrationID)
+	p.sendDuration.WithLabelValues(typ).Observe(time.Since(start).Seconds())
+	outcome, givenUp := p.outcome(n, sendErr)
+	p.attempts.WithLabelValues(name, typ, outcome).Inc()
 
 	recordCtx, cancel := context.WithTimeout(ctx, claimMargin/2)
 	defer cancel()
-	if err := p.record(recordCtx, n, ref, sendErr); err != nil {
+	err := p.record(recordCtx, n, ref, sendErr)
+	if err == nil && givenUp {
+		// Counted once it is on record: until then the claim can run out
+		// and the notification be tried again.
+		p.failed.WithLabelValues(name, typ).Inc()
+	}
+	if err != nil {
 		// The claim runs out and the notification is tried again. If this
 		// attempt was delivered, that sends the message a second time.
 		p.logger.ErrorContext(ctx, "record notification attempt", slog.String("notification_id", n.ID), slog.Any("error", err))
@@ -278,27 +370,38 @@ func (p *Pipeline) send(ctx context.Context, n Notification) (ref string, err er
 	return ch.Send(ctx, m)
 }
 
+// outcome classifies an attempt: its outcome, and whether the notification
+// is given up because of it.
+func (p *Pipeline) outcome(n Notification, sendErr error) (outcome string, givenUp bool) {
+	if sendErr == nil {
+		return OutcomeSuccess, false
+	}
+	if permanent, _ := Classify(sendErr); permanent {
+		return OutcomePermanentError, true
+	}
+	return OutcomeRetryableError, n.Attempts >= p.cfg.MaxAttempts
+}
+
 // record writes the outcome of an attempt: the new state of the notification,
 // the attempt row and the timeline event, in one transaction.
 func (p *Pipeline) record(ctx context.Context, n Notification, ref string, sendErr error) error {
 	now := p.now()
-	outcome, status, errText := OutcomeSuccess, "sent", ""
+	outcome, givenUp := p.outcome(n, sendErr)
+	status, errText := "sent", ""
 	var nextAttempt, sentAt *time.Time
-	if sendErr == nil {
+	switch {
+	case sendErr == nil:
 		sentAt = &now
-	} else {
+	case givenUp:
+		status = "failed"
+	default:
+		status = "pending"
+		_, retryAfter := Classify(sendErr)
+		at := now.Add(max(p.backoff(n.Attempts), retryAfter))
+		nextAttempt = &at
+	}
+	if sendErr != nil {
 		errText = truncate(sendErr.Error(), maxErrorLength)
-		permanent, retryAfter := Classify(sendErr)
-		switch {
-		case permanent:
-			outcome, status = OutcomePermanentError, "failed"
-		case n.Attempts >= p.cfg.MaxAttempts:
-			outcome, status = OutcomeRetryableError, "failed"
-		default:
-			outcome, status = OutcomeRetryableError, "pending"
-			at := now.Add(max(p.backoff(n.Attempts), retryAfter))
-			nextAttempt = &at
-		}
 	}
 
 	return pgx.BeginFunc(ctx, p.db, func(tx pgx.Tx) error {

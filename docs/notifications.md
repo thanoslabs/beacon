@@ -47,6 +47,7 @@ Notifications are about a group of alerts, not about each alert; [[configuration
 ## Delivery
 
 - **Durable.** A queued notification survives a restart, and exists exactly when the change that caused it was committed.
+- **Counted.** Every attempt is counted in `beacon_notification_attempts_total` with its outcome, every notification that is given up in `beacon_notifications_failed_total`, and the depth of the queue is `beacon_notifications_pending`; see [[metrics]].
 - **Several workers.** Each process runs `--notification-workers` workers (default 4), and several replicas can run at once. A worker claims a notification before it sends it, and no other worker takes a claimed notification.
 - **In order per destination.** Notifications about one group to one destination are delivered one at a time, oldest first. An update never overtakes the message it updates. Other groups are not held up.
 - **Updates in place.** When a channel returns a reference to the message it delivered, later notifications about the same group to the same destination are given that reference, so a channel that can edit a message, as Slack and Discord can, does so and sends nothing new. Email cannot: there, every notification is a message, and the reference makes it an answer to the one before ([[email#The message]]). An outbound webhook has nothing to update either: every notification is a request ([[outbound-webhook]]). An escalation step is the exception: it is there to be noticed, so a channel says the alert again.

@@ -116,12 +116,16 @@ func TestMetricsMatchTheCatalogue(t *testing.T) {
 		}
 		return out
 	}
-	waitFor(t, "a scrape with every metric of the catalogue", func() bool {
+	waitFor(t, "a scrape with every metric of the catalogue, both deliveries made and none waiting", func() bool {
 		var status int
 		if status, body, families = scrapeMetrics(t, srv, ""); status != http.StatusOK {
 			t.Fatalf("GET /metrics = %d", status)
 		}
-		return len(missing()) == 0
+		values := metricstest.FromFamilies(slices.Collect(mapValues(families)))
+		// The queue is read from Postgres at most once in five seconds, so
+		// a scrape may still show a delivery that has been made since.
+		return len(missing()) == 0 && values[`beacon_notification_attempts_total{integration="slack",outcome="success",type="slack"}`] >= 2 &&
+			values[`beacon_notifications_pending{integration="slack"}`] == 0
 	})
 	if t.Failed() {
 		t.Fatalf("missing from the scrape: %v", missing())
@@ -181,12 +185,21 @@ func TestMetricsMatchTheCatalogue(t *testing.T) {
 	// What happened is what was counted.
 	values := metricstest.FromFamilies(slices.Collect(mapValues(families)))
 	metricstest.Expect(t, values, map[string]float64{
+		`beacon_ingest_requests_total{result="accepted",source="default"}`:                     2,
+		`beacon_ingest_requests_total{result="invalid",source="default"}`:                      1,
+		`beacon_ingest_alerts_total{result="created",source="default"}`:                        2,
+		`beacon_ingest_unauthorized_requests_total`:                                            1,
 		`beacon_routing_unmatched_alerts_total{source="default"}`:                              1,
 		`beacon_http_requests_total{code="201",method="POST",route="/api/v1/ingest/{source}"}`: 2,
 		`beacon_http_requests_total{code="401",method="GET",route="/api/v1/alerts/{id}"}`:      1,
 		`beacon_http_requests_total{code="200",method="GET",route="/healthz"}`:                 1,
-		`beacon_config_last_reload_successful`:                                                 1,
+		`beacon_state_metrics_up`:                           1,
+		`beacon_notifications_pending{integration="slack"}`: 0,
+		`beacon_config_last_reload_successful`:              1,
 	})
+	if _, ok := values[`beacon_notifications_pending{integration="tickets"}`]; !ok {
+		t.Error("the queue of an integration of the configuration is not exposed")
+	}
 }
 
 func mapValues[K comparable, V any](m map[K]V) func(func(V) bool) {
