@@ -93,6 +93,8 @@ curl -u admin:admin -X POST http://localhost:3000/api/v1/provisioning/alert-rule
   -d @dev/grafana/demo-rule.json
 ```
 
+The profile also starts a Prometheus that scrapes Beacon's own metrics, and this Grafana has a dashboard of them in the folder Beacon; see [[metrics#Dashboard]].
+
 Within about a minute, Beacon logs `alerts received` with `"created":1`. A Grafana that has just started takes up to a minute before it uses a provisioned contact point. To resolve the alert, pause the rule *HighLatency* in Grafana, at <http://localhost:3000> (sign in as `admin` with the password `admin`), or with:
 
 ```sh

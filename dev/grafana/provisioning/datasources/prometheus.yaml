@@ -1,0 +1,10 @@
+# The data source of the Beacon dashboard: the Prometheus of the same
+# Compose profile, which scrapes Beacon.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: beacon-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true

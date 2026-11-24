@@ -1,0 +1,120 @@
+# Unit tests of beacon-alerts.yml, run by `promtool test rules` in CI. They
+# show that each kind of rule fires on the situation it is for and stays
+# quiet otherwise, and that a global metric reported by three replicas is
+# not multiplied by three.
+rule_files:
+  - beacon-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # All is well: three replicas, an empty queue, a source that sends.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="beacon", instance="a"}'
+        values: '1x120'
+      - series: 'beacon_state_metrics_up{instance="a"}'
+        values: '1x120'
+      - series: 'beacon_notifications_pending{instance="a", integration="slack"}'
+        values: '40x120'
+      - series: 'beacon_notifications_pending{instance="b", integration="slack"}'
+        values: '40x120'
+      - series: 'beacon_notifications_pending{instance="c", integration="slack"}'
+        values: '40x120'
+      - series: 'beacon_notifications_oldest_pending_age_seconds{instance="a"}'
+        values: '20x120'
+      - series: 'beacon_notifications_failed_total{instance="a", integration="slack", type="slack"}'
+        values: '0x120'
+      - series: 'beacon_ingest_requests_total{instance="a", source="alertmanager", result="accepted"}'
+        values: '0+1x120'
+      - series: 'beacon_schedule_covered{instance="a", schedule="primary"}'
+        values: '1x120'
+      - series: 'beacon_schedule_covered{instance="b", schedule="primary"}'
+        values: '1x120'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: BeaconDown
+      - eval_time: 2h
+        alertname: BeaconNotificationsGivenUp
+      - eval_time: 2h
+        alertname: BeaconNotificationQueueStuck
+      # 40 on each of three replicas is 40, not 120.
+      - eval_time: 2h
+        alertname: BeaconNotificationQueueGrowing
+      - eval_time: 2h
+        alertname: BeaconSourceSilent
+      - eval_time: 2h
+        alertname: BeaconScheduleNotCovered
+
+  # Notifications are given up, the queue backs up, and a source that was
+  # sending goes quiet.
+  - interval: 1m
+    input_series:
+      - series: 'beacon_notifications_failed_total{instance="a", integration="slack", type="slack"}'
+        values: '0x60 0+1x60'
+      - series: 'beacon_notifications_oldest_pending_age_seconds{instance="a"}'
+        values: '0x60 60+60x60'
+      - series: 'beacon_notifications_pending{instance="a", integration="slack"}'
+        values: '0x60 150x60'
+      - series: 'beacon_notifications_pending{instance="b", integration="slack"}'
+        values: '0x60 150x60'
+      - series: 'beacon_ingest_requests_total{instance="a", source="alertmanager", result="accepted"}'
+        values: '0+1x30 30x90'
+      - series: 'beacon_escalations_exhausted_total{instance="b", policy="default"}'
+        values: '0x100 1x20'
+      - series: 'beacon_escalation_steps_total{instance="b", policy="default", step="1", result="nobody"}'
+        values: '0x100 2x20'
+      - series: 'beacon_schedule_covered{instance="a", schedule="primary"}'
+        values: '1x60 0x60'
+      - series: 'beacon_schedule_covered{instance="b", schedule="primary"}'
+        values: '1x60 0x60'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: BeaconNotificationsGivenUp
+        exp_alerts:
+          - exp_labels: {severity: critical, integration: slack}
+            exp_annotations:
+              summary: Beacon gave up on notifications through slack
+              description: "15 notifications through the integration slack were given up in the last 15 minutes: the service refused them for good, or every attempt failed. Each is a message somebody did not get. The timeline of the alert says why."
+      - eval_time: 2h
+        alertname: BeaconNotificationQueueStuck
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: A notification has been waiting for 1h 0m 0s
+              description: "The oldest notification in Beacon's queue has been waiting for more than five minutes. Deliveries are failing and being retried, or no replica is delivering."
+      - eval_time: 2h
+        alertname: BeaconNotificationQueueGrowing
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "150 notifications are waiting"
+              description: "More than 100 notifications have been waiting in Beacon's queue for ten minutes. Raise --notification-workers or add a replica if deliveries are slow rather than failing."
+      - eval_time: 2h
+        alertname: BeaconSourceSilent
+        exp_alerts:
+          - exp_labels: {severity: warning, source: alertmanager}
+            exp_annotations:
+              summary: Beacon has heard nothing from the source alertmanager
+              description: "The source alertmanager has delivered nothing to Beacon for over an hour. If it normally sends, the path from it to Beacon is broken, and its alerts are not reaching anyone."
+      - eval_time: 2h
+        alertname: BeaconEscalationUnanswered
+        exp_alerts:
+          - exp_labels: {severity: critical, policy: default}
+            exp_annotations:
+              summary: Nobody responded to an escalation of the policy default
+              description: "Every step of the escalation policy default ran and nobody acknowledged. The alert is still firing and Beacon has stopped paging for it."
+      - eval_time: 2h
+        alertname: BeaconEscalationStepReachedNobody
+        exp_alerts:
+          - exp_labels: {severity: warning, policy: default, step: "1"}
+            exp_annotations:
+              summary: Step 1 of the policy default paged nobody
+              description: "Step 1 of the escalation policy default ran and every target was skipped: nobody was on call, or the people have no linked account. The timeline of the alert lists who was skipped and why."
+      - eval_time: 2h
+        alertname: BeaconScheduleNotCovered
+        exp_alerts:
+          - exp_labels: {severity: warning, schedule: primary}
+            exp_annotations:
+              summary: Nobody is on call for the schedule primary
+              description: "The schedule primary has had nobody on call for 15 minutes. A step that names it pages no one. If the gap is intended, exclude the schedule from this rule."

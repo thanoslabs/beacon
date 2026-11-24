@@ -262,6 +262,22 @@ jobs:
             "SELECT count(*) FROM alerts WHERE links ? 'generator' AND links ? 'dashboard' AND links ? 'panel'")"
           test "$links" = "1"
 
+      # What Beacon ships for monitoring itself. promtool, from the
+      # Prometheus image pinned in compose.yaml, checks the example alerting
+      # rules and runs their unit tests. Then, against the Prometheus and the
+      # Grafana that the profile started: Beacon is scraped, every rule is
+      # loaded, the dashboard is provisioned, and each of its queries is one
+      # Prometheus accepts.
+      - name: Check the alerting rules and the dashboard
+        env:
+          BEACON_SOURCE_TOKEN: ci-only-source-token-0123456789
+          BEACON_CONFIG_DIR: ./ci-sources
+          COMPOSE_PROFILES: alertmanager,grafana
+        run: |
+          set -euo pipefail
+          .github/scripts/check-monitoring.sh rules
+          .github/scripts/check-monitoring.sh live
+
       - name: Show logs
         if: always()
         env:

@@ -141,8 +141,9 @@ services:
   #
   #   BEACON_CONFIG_DIR=./examples/grafana docker compose --profile grafana up --build
   #
-  # Its contact point and notification policy are in dev/grafana. Sign in
-  # with Grafana's initial account, admin and admin. See docs/grafana.md.
+  # Its contact point and notification policy are in dev/grafana, and so is
+  # the Beacon dashboard, which reads the Prometheus below. Sign in with
+  # Grafana's initial account, admin and admin. See docs/grafana.md.
   grafana:
     image: grafana/grafana:13.3.1
     profiles: ["grafana"]
@@ -153,6 +154,7 @@ services:
       GF_SERVER_ROOT_URL: http://localhost:${BEACON_GRAFANA_PORT:-3000}/
     volumes:
       - ./dev/grafana/provisioning/alerting:/etc/grafana/provisioning/alerting:ro
+      - ./dev/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./dev/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./dev/grafana/dashboards:/etc/grafana/dashboards:ro
     ports:
@@ -162,6 +164,24 @@ services:
       interval: 2s
       timeout: 3s
       retries: 60
+
+  # A Prometheus that scrapes Beacon's own metrics and evaluates the example
+  # alerting rules in dev/prometheus, so that the Beacon dashboard of the
+  # Grafana above has data. It starts with the same profile. See
+  # docs/metrics.md.
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    profiles: ["grafana"]
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=1d"]
+    volumes:
+      - ./dev/prometheus:/etc/prometheus:ro
+    ports:
+      - "127.0.0.1:${BEACON_PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9090/-/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
 # The token of Beacon's source, as a file for the senders that read their
 # credentials from one.

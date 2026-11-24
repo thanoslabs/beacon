@@ -1,0 +1,152 @@
+# Alerting rules for Beacon itself: copy them into the Prometheus that
+# scrapes Beacon. docs/metrics.md explains each one.
+#
+# Send these alerts to a receiver that does not go through Beacon. An alert
+# that says Beacon cannot notify anyone must not depend on Beacon to reach
+# you.
+#
+# The rules assume the scrape job is called "beacon"; change the job label
+# in BeaconDown if yours is not. Metrics that are read from Postgres are
+# the same on every replica, so they are taken with max, never sum.
+groups:
+  - name: beacon
+    rules:
+      - alert: BeaconDown
+        expr: up{job="beacon"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Beacon is not answering scrapes
+          description: "{{ $labels.instance }} has not answered a scrape for two minutes. While no replica is up, alerts are not received and nobody is paged."
+
+      - alert: BeaconCannotReadState
+        expr: beacon_state_metrics_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Beacon cannot read its global metrics from Postgres
+          description: "{{ $labels.instance }} has not been able to read the queue depth and the open alerts from Postgres for five minutes. The database is slow or unreachable, and the rules below that use those metrics see nothing."
+
+      - alert: BeaconConfigurationRejected
+        expr: beacon_config_last_reload_successful == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Beacon rejected its configuration
+          description: "{{ $labels.instance }} rejected the last reload and runs the configuration it had before, which differs from the files. Run `beacon validate` on them."
+
+      # Notifications failing.
+      - alert: BeaconNotificationsGivenUp
+        expr: sum by (integration) (increase(beacon_notifications_failed_total[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Beacon gave up on notifications through {{ $labels.integration }}
+          description: "{{ $value | humanize }} notifications through the integration {{ $labels.integration }} were given up in the last 15 minutes: the service refused them for good, or every attempt failed. Each is a message somebody did not get. The timeline of the alert says why."
+
+      - alert: BeaconNotificationsFailing
+        expr: |
+          sum by (integration) (rate(beacon_notification_attempts_total{outcome!="success"}[10m]))
+            /
+          sum by (integration) (rate(beacon_notification_attempts_total[10m]))
+            > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Most delivery attempts through {{ $labels.integration }} fail
+          description: "More than half of the delivery attempts through the integration {{ $labels.integration }} have failed for ten minutes. They are retried, so people are told late; if it goes on they are not told at all."
+
+      # Queue growing.
+      - alert: BeaconNotificationQueueStuck
+        expr: max(beacon_notifications_oldest_pending_age_seconds) > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: A notification has been waiting for {{ $value | humanizeDuration }}
+          description: "The oldest notification in Beacon's queue has been waiting for more than five minutes. Deliveries are failing and being retried, or no replica is delivering."
+
+      - alert: BeaconNotificationQueueGrowing
+        expr: sum(max without (instance) (beacon_notifications_pending)) > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanize }} notifications are waiting"
+          description: "More than 100 notifications have been waiting in Beacon's queue for ten minutes. Raise --notification-workers or add a replica if deliveries are slow rather than failing."
+
+      # A source that should be sending and is not. This suits a source that
+      # always has something to say, such as an Alertmanager whose Prometheus
+      # has an always-firing Watchdog alert: Alertmanager repeats it at its
+      # repeat_interval, so set the window below to a little more than that.
+      # Remove the rule, or limit it to such sources with a matcher on
+      # "source", if your sources are quiet when all is well.
+      - alert: BeaconSourceSilent
+        expr: sum by (source) (increase(beacon_ingest_requests_total{result="accepted"}[1h])) == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Beacon has heard nothing from the source {{ $labels.source }}
+          description: "The source {{ $labels.source }} has delivered nothing to Beacon for over an hour. If it normally sends, the path from it to Beacon is broken, and its alerts are not reaching anyone."
+
+      - alert: BeaconIngestFailing
+        expr: sum by (source) (increase(beacon_ingest_requests_total{result="error"}[10m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Beacon cannot store alerts from {{ $labels.source }}
+          description: "Beacon answered deliveries of the source {{ $labels.source }} with an error because it could not store them. The sender retries, so nothing is lost yet; the log of Beacon says what failed."
+
+      - alert: BeaconIngestRejected
+        expr: sum by (source) (increase(beacon_ingest_requests_total{result="invalid"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Beacon refuses what {{ $labels.source }} sends
+          description: "Beacon has refused deliveries of the source {{ $labels.source }} as invalid for 15 minutes. The sender's payload does not fit the type of the source; the answer to each request names the field at fault."
+
+      # Pages that reached nobody.
+      - alert: BeaconEscalationUnanswered
+        expr: sum by (policy) (increase(beacon_escalations_exhausted_total[30m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Nobody responded to an escalation of the policy {{ $labels.policy }}
+          description: "Every step of the escalation policy {{ $labels.policy }} ran and nobody acknowledged. The alert is still firing and Beacon has stopped paging for it."
+
+      - alert: BeaconEscalationStepReachedNobody
+        expr: sum by (policy, step) (increase(beacon_escalation_steps_total{result="nobody"}[30m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Step {{ $labels.step }} of the policy {{ $labels.policy }} paged nobody
+          description: "Step {{ $labels.step }} of the escalation policy {{ $labels.policy }} ran and every target was skipped: nobody was on call, or the people have no linked account. The timeline of the alert lists who was skipped and why."
+
+      - alert: BeaconScheduleNotCovered
+        expr: max without (instance) (beacon_schedule_covered) == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Nobody is on call for the schedule {{ $labels.schedule }}
+          description: "The schedule {{ $labels.schedule }} has had nobody on call for 15 minutes. A step that names it pages no one. If the gap is intended, exclude the schedule from this rule."
+
+      - alert: BeaconAPIErrors
+        expr: |
+          sum(rate(beacon_http_requests_total{code=~"5.."}[5m]))
+            /
+          sum(rate(beacon_http_requests_total[5m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Beacon answers {{ $value | humanizePercentage }} of its requests with an error
+          description: "More than 5% of the requests to Beacon have ended in a 5xx answer for ten minutes."
