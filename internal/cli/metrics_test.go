@@ -198,3 +198,30 @@ func mapValues[K comparable, V any](m map[K]V) func(func(V) bool) {
 		}
 	}
 }
+
+// TestServeProtectsMetricsWithAToken: with BEACON_METRICS_TOKEN set, the
+// real server refuses a scrape without it, and never logs it.
+func TestServeProtectsMetricsWithAToken(t *testing.T) {
+	token := secretSettings["BEACON_METRICS_TOKEN"]
+	srv := startServe(t, map[string]string{"BEACON_DATABASE_URL": postgrestest.NewURL(t), "BEACON_METRICS_TOKEN": token})
+	if status, body, _ := scrapeMetrics(t, srv, ""); status != http.StatusUnauthorized || strings.Contains(body, "beacon_") {
+		t.Errorf("a scrape without the token = %d %s", status, body)
+	}
+	if status, _, _ := scrapeMetrics(t, srv, "not-the-token"); status != http.StatusUnauthorized {
+		t.Errorf("a scrape with a wrong token = %d", status)
+	}
+	if status, body, _ := scrapeMetrics(t, srv, token); status != http.StatusOK || !strings.Contains(body, "beacon_build_info") {
+		t.Errorf("a scrape with the token = %d", status)
+	}
+	resp, err := http.Get(srv.baseURL + "/readyz")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /readyz = %v, %v; the probes stay open", resp, err)
+	}
+	if resp != nil {
+		resp.Body.Close() //nolint:errcheck,gosec // test cleanup
+	}
+	if !strings.Contains(srv.logs.String(), `"msg":"the metrics endpoint asks for the metrics token"`) {
+		t.Errorf("the logs do not say that the metrics are protected:\n%s", srv.logs.String())
+	}
+	assertNoSecrets(t, "the logs", srv.logs.String(), "metrics-token-marker-8b1d")
+}

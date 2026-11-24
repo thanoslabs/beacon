@@ -73,3 +73,42 @@ func TestHTTPMetrics(t *testing.T) {
 		}
 	}
 }
+
+// TestMetricsToken: without a token the metrics are open; with one, a
+// scrape must carry it, and the probes stay open.
+func TestMetricsToken(t *testing.T) {
+	const token = "metrics-token-marker-3e9c1f"
+	open := New(Config{}, slog.New(slog.DiscardHandler), &fakeDB{}, NewRegistry())
+	if rec := do(t, open, http.MethodGet, PathMetrics, nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "beacon_build_info") {
+		t.Errorf("without a token: %d", rec.Code)
+	}
+
+	logs := &syncBuffer{}
+	s := New(Config{MetricsToken: token}, slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})), &fakeDB{}, NewRegistry())
+	for name, header := range map[string]http.Header{
+		"no credential":    nil,
+		"a wrong token":    {"Authorization": {"Bearer metrics-token-marker-3e9c1x"}},
+		"a prefix of it":   {"Authorization": {"Bearer metrics-token"}},
+		"the wrong scheme": {"Authorization": {"Basic " + token}},
+		"an empty token":   {"Authorization": {"Bearer "}},
+		"a session's role": {"X-Test-Role": {"admin"}},
+	} {
+		rec := do(t, s, http.MethodGet, PathMetrics, header)
+		if rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") == "" || strings.Contains(rec.Body.String(), "beacon_build_info") {
+			t.Errorf("%s: %d %s", name, rec.Code, rec.Body.String())
+		}
+	}
+	for _, header := range []http.Header{{"Authorization": {"Bearer " + token}}, {"Authorization": {"bearer " + token}}} {
+		if rec := do(t, s, http.MethodGet, PathMetrics, header); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "beacon_build_info") {
+			t.Errorf("with the token: %d", rec.Code)
+		}
+	}
+	for _, path := range []string{PathLiveness, PathReadiness} {
+		if rec := do(t, s, http.MethodGet, path, nil); rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d with a metrics token set, want it open", path, rec.Code)
+		}
+	}
+	if strings.Contains(logs.String(), token) || strings.Contains(logs.String(), "3e9c1x") {
+		t.Errorf("the logs contain a token:\n%s", logs.String())
+	}
+}

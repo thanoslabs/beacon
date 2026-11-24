@@ -111,6 +111,15 @@ export interface paths {
                         "text/plain": string;
                     };
                 };
+                /** @description The server was started with a metrics token, and the request does not carry it as a bearer token */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         put?: never;

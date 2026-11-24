@@ -63,6 +63,7 @@ paths:
       security: []
       responses:
         "200": {description: Metrics in the Prometheus text format, content: {text/plain: {schema: {type: string}}}}
+        "401": {description: "The server was started with a metrics token, and the request does not carry it as a bearer token", content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
   /api/v1/openapi.json:
     get:
       tags: [machines]

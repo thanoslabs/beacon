@@ -9,6 +9,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -50,6 +53,10 @@ type Config struct {
 	// Authenticator tells who is behind a request to a route that is not
 	// public. Without one, every such route answers 401.
 	Authenticator access.Authenticator
+	// MetricsToken, when it is set, is the bearer token a scrape of the
+	// metrics endpoint must carry. Without one the endpoint is open, as
+	// Prometheus expects of a target.
+	MetricsToken string
 }
 
 // Defaults for Config.
@@ -93,12 +100,13 @@ func New(cfg Config, logger *slog.Logger, db Pinger, registry *prometheus.Regist
 		metrics: newHTTPMetrics(registry),
 	}
 
-	// Probes and scrapes come from machines that have no session.
+	// Probes and scrapes come from machines that have no session. The
+	// scrape carries a token of its own when the operator has set one.
 	s.Handle(access.Route{Pattern: "GET " + PathLiveness, Level: access.Public, Handler: http.HandlerFunc(s.handleLiveness)})
 	s.Handle(access.Route{Pattern: "GET " + PathReadiness, Level: access.Public, Handler: http.HandlerFunc(s.handleReadiness)})
-	s.Handle(access.Route{Pattern: "GET " + PathMetrics, Level: access.Public, Handler: promhttp.HandlerFor(registry, promhttp.HandlerOpts{
+	s.Handle(access.Route{Pattern: "GET " + PathMetrics, Level: access.Public, Handler: s.scrape(promhttp.HandlerFor(registry, promhttp.HandlerOpts{
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
-	})})
+	}))})
 	// Everything else is denied by default: a path that no route matches
 	// answers 401 to a stranger, like a route that exists, and 404 only to
 	// someone who is signed in.
@@ -128,6 +136,28 @@ func New(cfg Config, logger *slog.Logger, db Pinger, registry *prometheus.Regist
 func (s *Server) Handle(route access.Route) {
 	s.routes = append(s.routes, route)
 	s.mux.Handle(route.Pattern, s.metrics.instrument(route.Pattern, s.guard.Wrap(route)))
+}
+
+// scrape guards the metrics endpoint with the metrics token, when there is
+// one. The metrics name the teams, schedules, sources and integrations of
+// the configuration, which an operator may not want a stranger to read.
+func (s *Server) scrape(next http.Handler) http.Handler {
+	if s.cfg.MetricsToken == "" {
+		return next
+	}
+	want := sha256.Sum256([]byte(s.cfg.MetricsToken))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scheme, token, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+		// Hashing first makes the comparison take the same time whatever
+		// the lengths.
+		got := sha256.Sum256([]byte(strings.TrimSpace(token)))
+		if !strings.EqualFold(scheme, "Bearer") || subtle.ConstantTimeCompare(want[:], got[:]) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="beacon metrics"`)
+			s.writeJSON(w, r, http.StatusUnauthorized, map[string]string{"error": "the metrics need the metrics token as a bearer token"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // NotFound answers a request that no route takes: 401 to a stranger, and 404
