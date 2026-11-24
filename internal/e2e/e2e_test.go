@@ -1739,16 +1739,10 @@ func TestScheduleRotation(t *testing.T) {
 	if code, body := oidctest.SignIn(t, oidctest.Browser(t, strings.TrimPrefix(b.url, "http://")), oidctest.Ada, oidctest.Password); code != http.StatusOK {
 		t.Fatalf("sign-in = %d %s", code, body)
 	}
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		who, shifts := b.onCall("primary")
-		if who == oidctest.Ada && shifts == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%q is on call with %d shifts, want Ada with one\n%s", who, shifts, b.output())
-		}
-		time.Sleep(50 * time.Millisecond)
+	// She is on call from that moment: the sign-in itself starts the
+	// rotation, so there is nothing to wait for.
+	if who, shifts := b.onCall("primary"); who != oidctest.Ada || shifts != 1 {
+		t.Fatalf("%q is on call with %d shifts right after the sign-in, want Ada with one\n%s", who, shifts, b.output())
 	}
 	var started time.Time
 	if err := b.db.QueryRow(context.Background(), `SELECT starts_at FROM shifts WHERE ends_at IS NULL AND kind = 'rotation'`).Scan(&started); err != nil {

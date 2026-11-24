@@ -486,11 +486,20 @@ func (s *Store) Run(ctx context.Context, logger *slog.Logger, interval time.Dura
 			return
 		case <-ticker.C:
 		}
-		done, err := s.Advance(ctx)
-		report(ctx, logger, done)
-		if err != nil && ctx.Err() == nil {
-			logger.ErrorContext(ctx, "advance schedules", slog.Any("error", err))
-		}
+		s.AdvanceAndReport(ctx, logger)
+	}
+}
+
+// AdvanceAndReport calls Advance once and logs what it did. It is one pass
+// of the worker, for a caller that knows something has just changed: a
+// person who signs in may be the first member of a rotation to be a user,
+// and is then on call from that moment rather than from the worker's next
+// pass. A failure is logged and left to the worker.
+func (s *Store) AdvanceAndReport(ctx context.Context, logger *slog.Logger) {
+	done, err := s.Advance(ctx)
+	report(ctx, logger, done)
+	if err != nil && ctx.Err() == nil {
+		logger.ErrorContext(ctx, "advance schedules", slog.Any("error", err))
 	}
 }
 
