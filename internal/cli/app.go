@@ -488,9 +488,13 @@ func (p *provisioner) applyNotifications(ctx context.Context, cfg config.Config,
 	}
 	// via returns the integration with a name as a step uses it.
 	types := map[string]string{}
+	named := make(map[string]notify.Via, len(cfg.Integrations))
 	for _, i := range cfg.Integrations {
 		types[i.Name] = i.Type
+		named[integrations[i.Name]] = notify.Via{IntegrationID: integrations[i.Name], Name: i.Name, Provider: i.Type}
 	}
+	// The pipeline counts its deliveries by these names.
+	p.pipeline.SetIntegrations(named)
 	via := func(name string) notify.Via {
 		return notify.Via{IntegrationID: integrations[name], Name: name, Provider: types[name]}
 	}

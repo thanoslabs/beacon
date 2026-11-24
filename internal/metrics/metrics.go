@@ -75,9 +75,11 @@ const (
 var Labels = map[string]string{
 	"source":      "Name of a source in the configuration.",
 	"integration": "Name of an integration in the configuration.",
+	"type":        "Type of the integration: `slack`, `discord`, `email` or `webhook`.",
 	"team":        "Name of a team in the configuration.",
 	"schedule":    "Name of a schedule in the configuration.",
 	"result":      "A fixed set of outcomes, listed with the metric.",
+	"outcome":     "Outcome of a delivery attempt: `success`, `retryable_error` or `permanent_error`.",
 	"route":       "Pattern of the route that took the request, such as `/api/v1/alerts/{id}`, never the address that was asked for; `unmatched` when no route did.",
 	"method":      "HTTP method of the route.",
 	"code":        "HTTP status code of the answer.",
@@ -88,17 +90,18 @@ var Labels = map[string]string{
 
 // The headings of the reference, in order.
 const (
-	GroupProcess = "Process and configuration"
-	GroupHTTP    = "HTTP and API"
-	GroupIngest  = "Ingestion"
-	GroupPeople  = "People"
+	GroupProcess       = "Process and configuration"
+	GroupHTTP          = "HTTP and API"
+	GroupIngest        = "Ingestion"
+	GroupNotifications = "Notifications"
+	GroupPeople        = "People"
 )
 
 // Groups are the headings of the reference, in the order they are shown.
-var Groups = []string{GroupProcess, GroupHTTP, GroupIngest, GroupPeople}
+var Groups = []string{GroupProcess, GroupHTTP, GroupIngest, GroupNotifications, GroupPeople}
 
-// DurationBuckets are the buckets of a request: five milliseconds to ten
-// seconds.
+// DurationBuckets are the buckets of a request or a delivery: five
+// milliseconds to ten seconds.
 var DurationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
 
 // The names of the metrics, for the code that creates them.
@@ -107,11 +110,22 @@ const (
 	ConfigReloads             = "beacon_config_reloads_total"
 	ConfigLastReloadOK        = "beacon_config_last_reload_successful"
 	ConfigLastReloadTimestamp = "beacon_config_last_reload_success_timestamp_seconds"
+	StateUp                   = "beacon_state_metrics_up"
+	StateReadDuration         = "beacon_state_metrics_read_duration_seconds"
 
 	HTTPRequests        = "beacon_http_requests_total"
 	HTTPRequestDuration = "beacon_http_request_duration_seconds"
 
-	RoutingUnmatched = "beacon_routing_unmatched_alerts_total"
+	IngestRequests     = "beacon_ingest_requests_total"
+	IngestUnauthorized = "beacon_ingest_unauthorized_requests_total"
+	IngestAlerts       = "beacon_ingest_alerts_total"
+	RoutingUnmatched   = "beacon_routing_unmatched_alerts_total"
+
+	NotificationAttempts     = "beacon_notification_attempts_total"
+	NotificationsFailed      = "beacon_notifications_failed_total"
+	NotificationSendDuration = "beacon_notification_send_duration_seconds"
+	NotificationsPending     = "beacon_notifications_pending"
+	NotificationsOldest      = "beacon_notifications_oldest_pending_age_seconds"
 
 	TeamMembersSkipped     = "beacon_team_members_skipped"
 	ScheduleMembersSkipped = "beacon_schedule_members_skipped"
@@ -135,6 +149,14 @@ var catalog = []Def{
 		Name: ConfigLastReloadTimestamp, Type: Gauge, Scope: Replica, Group: GroupProcess,
 		Help: "Unix time at which the active configuration was loaded.",
 	},
+	{
+		Name: StateUp, Type: Gauge, Scope: Replica, Group: GroupProcess,
+		Help: "Whether this process could read the global metrics from Postgres for this scrape: 1 or 0. When 0, the metrics that are read from Postgres are absent from the scrape rather than stale.",
+	},
+	{
+		Name: StateReadDuration, Type: Gauge, Scope: Replica, Group: GroupProcess,
+		Help: "How long the last read of the global metrics from Postgres took, in seconds. The read is abandoned after two seconds.",
+	},
 
 	{
 		Name: HTTPRequests, Type: Counter, Scope: Replica, Group: GroupHTTP, Labels: []string{"route", "method", "code"},
@@ -146,8 +168,41 @@ var catalog = []Def{
 	},
 
 	{
+		Name: IngestRequests, Type: Counter, Scope: Replica, Group: GroupIngest, Labels: []string{"source", "result"},
+		Help: "Requests to the ingest endpoint that carried the token of a source, by source and result: accepted, invalid (the payload was refused) or error (an alert could not be stored, and the sender is asked to send again).",
+	},
+	{
+		Name: IngestUnauthorized, Type: Counter, Scope: Replica, Group: GroupIngest,
+		Help: "Requests to the ingest endpoint that named no source of the configuration or carried a wrong token. The name that was asked for is not a label: anyone can ask for any name.",
+	},
+	{
+		Name: IngestAlerts, Type: Counter, Scope: Replica, Group: GroupIngest, Labels: []string{"source", "result"},
+		Help: "Alerts in accepted deliveries, by source and by what became of them: created (a new alert), updated (a repeat of an open alert), resolved, or not_found (a resolution of an alert Beacon does not have open).",
+	},
+	{
 		Name: RoutingUnmatched, Type: Counter, Scope: Replica, Group: GroupIngest, Labels: []string{"source"},
 		Help: "Alerts opened that matched no routing rule and took the routing default, by source. Repeated deliveries of an open alert are not counted.",
+	},
+
+	{
+		Name: NotificationAttempts, Type: Counter, Scope: Replica, Group: GroupNotifications, Labels: []string{"integration", "type", "outcome"},
+		Help: "Delivery attempts, by integration, its type and the outcome. A retryable_error is tried again; a permanent_error is not.",
+	},
+	{
+		Name: NotificationsFailed, Type: Counter, Scope: Replica, Group: GroupNotifications, Labels: []string{"integration", "type"},
+		Help: "Notifications that were given up: the failure was permanent, or every attempt failed. Each is a message somebody did not get.",
+	},
+	{
+		Name: NotificationSendDuration, Type: Histogram, Scope: Replica, Group: GroupNotifications, Labels: []string{"type"}, Buckets: DurationBuckets,
+		Help: "Time one delivery attempt took, in seconds, by the type of the integration, whatever its outcome.",
+	},
+	{
+		Name: NotificationsPending, Type: Gauge, Scope: Global, Group: GroupNotifications, Labels: []string{"integration"},
+		Help: "Notifications in the queue that are neither delivered nor given up, by integration: the queue depth. It includes those that wait for their next attempt.",
+	},
+	{
+		Name: NotificationsOldest, Type: Gauge, Scope: Global, Group: GroupNotifications,
+		Help: "Age in seconds of the oldest notification in the queue that is neither delivered nor given up; 0 when the queue is empty.",
 	},
 
 	{

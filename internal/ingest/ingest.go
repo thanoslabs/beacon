@@ -63,11 +63,28 @@ type Handler struct {
 	router atomic.Pointer[routing.Router]
 	// unmatched counts new alerts that no routing rule matched, by source.
 	unmatched *prometheus.CounterVec
+	// requests counts the requests of each source by how they ended, and
+	// received the alerts in them by what became of each. unauthorized
+	// counts the requests that were no source's.
+	requests     *prometheus.CounterVec
+	received     *prometheus.CounterVec
+	unauthorized prometheus.Counter
 }
+
+// The values of the result label of the request counter.
+const (
+	requestAccepted = "accepted"
+	requestInvalid  = "invalid"
+	requestError    = "error"
+)
 
 // New returns a handler for the given sources.
 func New(logger *slog.Logger, alerts Alerts, sources []Source) *Handler {
-	h := &Handler{logger: logger, alerts: alerts, unmatched: metrics.NewCounterVec(metrics.RoutingUnmatched)}
+	h := &Handler{
+		logger: logger, alerts: alerts, unmatched: metrics.NewCounterVec(metrics.RoutingUnmatched),
+		requests: metrics.NewCounterVec(metrics.IngestRequests), received: metrics.NewCounterVec(metrics.IngestAlerts),
+		unauthorized: metrics.NewCounter(metrics.IngestUnauthorized),
+	}
 	router, _ := routing.New(nil, routing.Refs{}) // without a routing block there is nothing to fail
 	h.SetRouter(router)
 	h.SetSources(sources)
@@ -83,7 +100,7 @@ func (h *Handler) SetRouter(r *routing.Router) {
 
 // RegisterMetrics registers the handler's metrics on reg.
 func (h *Handler) RegisterMetrics(reg prometheus.Registerer) {
-	reg.MustRegister(h.unmatched)
+	reg.MustRegister(h.unmatched, h.requests, h.received, h.unauthorized)
 }
 
 // SetSources replaces the sources that the handler serves. It is safe while
@@ -92,9 +109,16 @@ func (h *Handler) SetSources(sources []Source) {
 	byName := make(map[string]Source, len(sources))
 	for _, s := range sources {
 		byName[s.Name] = s
-		// The series exists from the start, so a rate over it is never
-		// empty. The label is bounded by the configuration.
+		// The series exist from the start, so a rate over them is never
+		// empty, and a source that sends nothing shows as zero rather than
+		// as nothing. The label is bounded by the configuration.
 		h.unmatched.WithLabelValues(s.Name)
+		for _, result := range []string{requestAccepted, requestInvalid, requestError} {
+			h.requests.WithLabelValues(s.Name, result)
+		}
+		for _, result := range []string{resultCreated, resultUpdated, resultResolved, resultNotFound} {
+			h.received.WithLabelValues(s.Name, result)
+		}
 	}
 	h.sources.Store(&byName)
 }
@@ -157,6 +181,7 @@ type delivery struct {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	src, ok := h.authenticate(r)
 	if !ok {
+		h.unauthorized.Inc()
 		w.Header().Set("WWW-Authenticate", `Bearer realm="beacon"`)
 		h.write(w, r, http.StatusUnauthorized, errorResponse{Error: "unknown source or wrong token; send the source's token as a bearer token"})
 		return
@@ -169,6 +194,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
+		h.requests.WithLabelValues(src.Name, requestInvalid).Inc()
 		if errors.As(err, &tooLarge) {
 			h.write(w, r, http.StatusRequestEntityTooLarge, errorResponse{Error: fmt.Sprintf("the body is larger than %d bytes", limit)})
 			return
@@ -193,7 +219,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serveOne handles the generic webhook: one alert per request.
 func (h *Handler) serveOne(w http.ResponseWriter, r *http.Request, src Source, p payload, err error) {
 	if err != nil {
-		h.invalid(w, r, err)
+		h.invalid(w, r, src, err)
 		return
 	}
 	d := delivery{
@@ -205,6 +231,8 @@ func (h *Handler) serveOne(w http.ResponseWriter, r *http.Request, src Source, p
 		h.failed(w, r, src, err)
 		return
 	}
+	h.requests.WithLabelValues(src.Name, requestAccepted).Inc()
+	h.received.WithLabelValues(src.Name, res.Result).Inc()
 	h.logger.InfoContext(r.Context(), "alert received",
 		slog.String("source", src.Name), slog.String("result", res.Result), slog.String("alert_id", res.AlertID))
 	status := http.StatusOK
@@ -220,7 +248,7 @@ func (h *Handler) serveOne(w http.ResponseWriter, r *http.Request, src Source, p
 // stored are recognised by their fingerprints.
 func (h *Handler) serveGroup(w http.ResponseWriter, r *http.Request, src Source, g alertGroup, err error, wantVersion string) {
 	if err != nil {
-		h.invalid(w, r, err)
+		h.invalid(w, r, src, err)
 		return
 	}
 	ctx := r.Context()
@@ -239,6 +267,10 @@ func (h *Handler) serveGroup(w http.ResponseWriter, r *http.Request, src Source,
 			h.failed(w, r, src, err)
 			return
 		}
+		// Counted as it is stored: if a later alert of the request fails,
+		// the sender repeats the request and this one comes back as a
+		// repeat of an open alert, which is what it then is.
+		h.received.WithLabelValues(src.Name, res.Result).Inc()
 		switch res.Result {
 		case resultCreated:
 			out.Created++
@@ -250,18 +282,21 @@ func (h *Handler) serveGroup(w http.ResponseWriter, r *http.Request, src Source,
 			out.NotFound++
 		}
 	}
+	h.requests.WithLabelValues(src.Name, requestAccepted).Inc()
 	h.logger.InfoContext(ctx, "alerts received", slog.String("source", src.Name), slog.Int("received", out.Received),
 		slog.Int("created", out.Created), slog.Int("updated", out.Updated), slog.Int("resolved", out.Resolved), slog.Int("not_found", out.NotFound))
 	h.write(w, r, http.StatusOK, out)
 }
 
-func (h *Handler) invalid(w http.ResponseWriter, r *http.Request, err error) {
+func (h *Handler) invalid(w http.ResponseWriter, r *http.Request, src Source, err error) {
+	h.requests.WithLabelValues(src.Name, requestInvalid).Inc()
 	var fe *fieldError
 	errors.As(err, &fe)
 	h.write(w, r, http.StatusBadRequest, errorResponse{Error: fe.msg, Field: fe.field})
 }
 
 func (h *Handler) failed(w http.ResponseWriter, r *http.Request, src Source, err error) {
+	h.requests.WithLabelValues(src.Name, requestError).Inc()
 	h.logger.ErrorContext(r.Context(), "store alert", slog.String("source", src.Name), slog.Any("error", err))
 	h.write(w, r, http.StatusInternalServerError, errorResponse{Error: "internal error"})
 }

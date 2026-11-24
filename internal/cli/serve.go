@@ -21,6 +21,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/ingest"
 	"github.com/thanoslabs/beacon/internal/logging"
+	"github.com/thanoslabs/beacon/internal/metrics"
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/postgres"
 	"github.com/thanoslabs/beacon/internal/schedule"
@@ -197,6 +198,14 @@ func runServe(ctx context.Context, e env, args []string) error {
 	prov.silences.SetAlerts(alerts)
 	prov.registerMetrics(registry)
 	prov.ingest.RegisterMetrics(registry)
+	pipeline.RegisterMetrics(registry)
+	// What is true of the whole install is read from Postgres when the
+	// metrics are scraped, within a bound, so that a slow database costs a
+	// scrape two seconds and never hangs it.
+	registry.MustRegister(metrics.NewStateCollector(logger, func(ctx context.Context) (metrics.State, error) {
+		pending, oldest, err := pipeline.QueueStats(ctx)
+		return metrics.State{PendingNotifications: pending, OldestPending: oldest}, err
+	}))
 	linker.RegisterMetrics(registry)
 	prov.interactions.SetIdentities(prov)
 	prov.discordInteractions.SetIdentities(prov)

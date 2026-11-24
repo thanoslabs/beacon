@@ -497,7 +497,21 @@ func TestFirstPath(t *testing.T) {
 		t.Errorf("%d messages were posted, want 1", n)
 	}
 
-	// 6. The process stops cleanly and never printed a credential.
+	// 6. Beacon's own metrics tell the same story: one alert came in and
+	// was resolved by its source, and nothing that was sent failed. How
+	// many notifications there were is not counted here; see above.
+	b.waitFor("the metrics of the path", func() bool {
+		return b.metrics(`beacon_ingest_alerts_total{result="created",source="e2e"}`) == `beacon_ingest_alerts_total{result="created",source="e2e"} 1` &&
+			b.metrics(`beacon_ingest_alerts_total{result="resolved",source="e2e"}`) == `beacon_ingest_alerts_total{result="resolved",source="e2e"} 1` &&
+			b.metrics(`beacon_notifications_failed_total{integration="slack",type="slack"}`) == `beacon_notifications_failed_total{integration="slack",type="slack"} 0` &&
+			b.metrics(`beacon_notifications_pending{integration="slack"}`) == `beacon_notifications_pending{integration="slack"} 0` &&
+			!strings.HasSuffix(b.metrics(`beacon_notification_attempts_total{integration="slack",outcome="success",type="slack"}`), " 0")
+	})
+	if all := b.metrics("beacon_"); strings.Contains(all, "DiskFull") || strings.Contains(all, "U0ADA") || strings.Contains(all, oidctest.Ada) {
+		t.Errorf("the metrics name an alert or a person:\n%s", all)
+	}
+
+	// 7. The process stops cleanly and never printed a credential.
 	if code := b.terminate(); code != 0 {
 		t.Errorf("exit code after SIGTERM = %d, want 0", code)
 	}
@@ -1400,6 +1414,11 @@ func TestReload(t *testing.T) {
 	var destination string
 	if err := b.db.QueryRow(context.Background(), `SELECT destination FROM notifications`).Scan(&destination); err != nil || destination != "alerts" {
 		t.Errorf("the alert was sent to %q, %v; want the channel of the reloaded configuration", destination, err)
+	}
+	// The metrics follow the configuration too: the new source is counted
+	// under its name from its first delivery.
+	if want, got := `beacon_ingest_alerts_total{result="created",source="second"} 1`, b.metrics(`beacon_ingest_alerts_total{result="created",source="second"}`); got != want {
+		t.Errorf("metric after the reload: %q, want %q", got, want)
 	}
 
 	// 2. An invalid change: the first source is gone, and so is the policy
