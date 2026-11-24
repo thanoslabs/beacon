@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/thanoslabs/beacon/internal/postgres"
 )
 
 // ErrNotFound is returned when no alert or group has the given identifier.
@@ -75,13 +77,13 @@ type Options struct {
 
 const alertColumns = `id::text, source_id::text, group_id::text, fingerprint, status, severity,
 	labels, annotations, links, started_at, last_received_at, acknowledged_at, snoozed_until, resolved_at,
-	COALESCE(routing_rule_id::text, ''), COALESCE(team_id::text, ''), COALESCE(service, '')`
+	COALESCE(routing_rule_id::text, ''), COALESCE(team_id::text, ''), COALESCE(service, ''), opened_at, first_response_at`
 
 func scanAlert(row interface{ Scan(...any) error }) (Alert, error) {
 	var a Alert
 	err := row.Scan(&a.ID, &a.SourceID, &a.GroupID, &a.Fingerprint, &a.Status, &a.Severity,
 		&a.Labels, &a.Annotations, &a.Links, &a.StartedAt, &a.LastReceivedAt, &a.AcknowledgedAt, &a.SnoozedUntil, &a.ResolvedAt,
-		&a.RoutingRuleID, &a.TeamID, &a.Service)
+		&a.RoutingRuleID, &a.TeamID, &a.Service, &a.OpenedAt, &a.FirstResponseAt)
 	return a, err
 }
 
@@ -100,7 +102,7 @@ func (s *Store) Fire(ctx context.Context, f Firing) (a Alert, created bool, err 
 	if !f.Severity.Valid() {
 		return Alert{}, false, fmt.Errorf("unknown severity %q", f.Severity)
 	}
-	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+	err = postgres.InTx(ctx, s.db, func(ctx context.Context, tx pgx.Tx) error {
 		if err := lockFingerprint(ctx, tx, f.SourceID, f.Fingerprint); err != nil {
 			return err
 		}
@@ -124,8 +126,8 @@ func (s *Store) Fire(ctx context.Context, f Firing) (a Alert, created bool, err 
 		}
 		a, err = scanAlert(tx.QueryRow(ctx, `
 			INSERT INTO alerts (source_id, fingerprint, severity, labels, annotations, group_id, started_at, last_received_at, links,
-				routing_rule_id, team_id, service)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+				routing_rule_id, team_id, service, opened_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $8)
 			RETURNING `+alertColumns,
 			f.SourceID, f.Fingerprint, f.Severity, nonNil(f.Labels), nonNil(f.Annotations), groupID, startedAt, now, nonNil(f.Links),
 			nullable(f.RoutingRuleID), nullable(f.TeamID), nullable(f.Service)))
@@ -133,7 +135,7 @@ func (s *Store) Fire(ctx context.Context, f Firing) (a Alert, created bool, err 
 			return fmt.Errorf("create alert: %w", err)
 		}
 		created = true
-		return s.record(ctx, tx, a, EventFired, Source(f.SourceID), now, nil)
+		return s.record(ctx, tx, a, EventFired, Source(f.SourceID), now, nil, false)
 	})
 	return a, created, err
 }
@@ -142,7 +144,7 @@ func (s *Store) Fire(ctx context.Context, f Firing) (a Alert, created bool, err 
 // found is false, with no error, when there is none: a source may send a
 // resolve for an alert that was already resolved by hand.
 func (s *Store) ResolveFromSource(ctx context.Context, sourceID, fingerprint string, resolvedAt time.Time) (a Alert, found bool, err error) {
-	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+	err = postgres.InTx(ctx, s.db, func(ctx context.Context, tx pgx.Tx) error {
 		if err := lockFingerprint(ctx, tx, sourceID, fingerprint); err != nil {
 			return err
 		}
@@ -164,7 +166,7 @@ func (s *Store) ResolveFromSource(ctx context.Context, sourceID, fingerprint str
 // Apply takes action on one alert. It returns a *TransitionError when the
 // alert's current state does not allow the action.
 func (s *Store) Apply(ctx context.Context, alertID string, action Action, actor Actor, opts Options) (a Alert, err error) {
-	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+	err = postgres.InTx(ctx, s.db, func(ctx context.Context, tx pgx.Tx) error {
 		a, err = scanAlert(tx.QueryRow(ctx, `SELECT `+alertColumns+` FROM alerts WHERE id = $1 FOR UPDATE`, alertID))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
@@ -182,7 +184,7 @@ func (s *Store) Apply(ctx context.Context, alertID string, action Action, actor 
 // and returns the alerts it changed. When no alert could change, it returns
 // the *TransitionError of the first one, so the caller can say why.
 func (s *Store) ApplyToGroup(ctx context.Context, groupID string, action Action, actor Actor, opts Options) (changed []Alert, err error) {
-	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+	err = postgres.InTx(ctx, s.db, func(ctx context.Context, tx pgx.Tx) error {
 		changed = nil
 		alerts, err := collectAlerts(tx.Query(ctx, `SELECT `+alertColumns+` FROM alerts WHERE group_id = $1 ORDER BY id FOR UPDATE`, groupID))
 		if err != nil {
@@ -218,7 +220,7 @@ func (s *Store) ApplyToGroup(ctx context.Context, groupID string, action Action,
 // reports how many it moved. It is safe to call from several replicas at once:
 // rows another caller is working on are skipped.
 func (s *Store) ExpireSnoozes(ctx context.Context) (n int, err error) {
-	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+	err = postgres.InTx(ctx, s.db, func(ctx context.Context, tx pgx.Tx) error {
 		due, err := collectAlerts(tx.Query(ctx, `SELECT `+alertColumns+` FROM alerts
 			WHERE status = 'snoozed' AND snoozed_until <= $1
 			ORDER BY snoozed_until LIMIT 100 FOR UPDATE SKIP LOCKED`, s.now()))
@@ -254,6 +256,33 @@ func (s *Store) RunSnoozeExpiry(ctx context.Context, logger *slog.Logger, interv
 			logger.InfoContext(ctx, "snoozes ended", slog.Int("alerts", n))
 		}
 	}
+}
+
+// OpenCount is how many alerts that are not resolved share a team, a
+// severity and a status.
+type OpenCount struct {
+	// TeamID is empty for alerts without a team.
+	TeamID   string
+	Severity Severity
+	Status   Status
+	Count    int
+}
+
+// CountOpen counts the alerts that are not resolved, by team, severity and
+// status. It is what the metrics read.
+func (s *Store) CountOpen(ctx context.Context) ([]OpenCount, error) {
+	rows, err := s.db.Query(ctx, `SELECT COALESCE(team_id::text, ''), severity, status, count(*) FROM alerts
+		WHERE status <> 'resolved' GROUP BY team_id, severity, status`)
+	if err != nil {
+		return nil, fmt.Errorf("count open alerts: %w", err)
+	}
+	counts, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (c OpenCount, err error) {
+		return c, r.Scan(&c.TeamID, &c.Severity, &c.Status, &c.Count)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("count open alerts: %w", err)
+	}
+	return counts, nil
 }
 
 // Get returns one alert.
@@ -365,7 +394,8 @@ func (s *Store) transition(ctx context.Context, tx pgx.Tx, a Alert, action Actio
 	a, err = scanAlert(tx.QueryRow(ctx, `
 		UPDATE alerts SET status = $2, snoozed_until = $3, resolved_at = $4,
 			acknowledged_at = CASE $2 WHEN 'acknowledged' THEN $5::timestamptz WHEN 'firing' THEN NULL ELSE acknowledged_at END,
-			acknowledged_by = CASE $2 WHEN 'acknowledged' THEN $6::uuid WHEN 'firing' THEN NULL ELSE acknowledged_by END
+			acknowledged_by = CASE $2 WHEN 'acknowledged' THEN $6::uuid WHEN 'firing' THEN NULL ELSE acknowledged_by END,
+			first_response_at = CASE WHEN $2 IN ('acknowledged', 'snoozed') THEN COALESCE(first_response_at, $5::timestamptz) ELSE first_response_at END
 		WHERE id = $1
 		RETURNING `+alertColumns, a.ID, to, snoozedUntil, resolvedAt, now, acknowledgedBy))
 	if err != nil {
@@ -376,12 +406,16 @@ func (s *Store) transition(ctx context.Context, tx pgx.Tx, a Alert, action Actio
 			return from, err
 		}
 	}
-	return a, s.record(ctx, tx, a, eventFor[action], actor, now, data)
+	// The first time a person takes the alert, by acknowledging or snoozing
+	// it, is told to the observers as such. It happens once per alert: the
+	// row is locked, and the column is never cleared.
+	first := from.FirstResponseAt == nil && a.FirstResponseAt != nil
+	return a, s.record(ctx, tx, a, eventFor[action], actor, now, data, first)
 }
 
 // record writes a state-change event and tells the observers.
-func (s *Store) record(ctx context.Context, tx pgx.Tx, a Alert, typ EventType, actor Actor, at time.Time, data map[string]any) error {
-	ev := Event{AlertID: a.ID, GroupID: a.GroupID, Type: typ, Actor: actor, OccurredAt: at, Data: data}
+func (s *Store) record(ctx context.Context, tx pgx.Tx, a Alert, typ EventType, actor Actor, at time.Time, data map[string]any, firstResponse bool) error {
+	ev := Event{AlertID: a.ID, GroupID: a.GroupID, Type: typ, Actor: actor, OccurredAt: at, Data: data, FirstResponse: firstResponse}
 	if err := AppendEvent(ctx, tx, &ev); err != nil {
 		return err
 	}

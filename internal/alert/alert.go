@@ -110,11 +110,18 @@ type Alert struct {
 	// Service is the service the alert was assigned to, or empty.
 	Service string
 
+	// StartedAt is when the source says the problem began, and OpenedAt
+	// when Beacon opened the alert, which is what its handling is measured
+	// from.
 	StartedAt      time.Time
+	OpenedAt       time.Time
 	LastReceivedAt time.Time
 	AcknowledgedAt *time.Time
 	SnoozedUntil   *time.Time
 	ResolvedAt     *time.Time
+	// FirstResponseAt is when a person first acknowledged or snoozed the
+	// alert. Unlike AcknowledgedAt it is never cleared.
+	FirstResponseAt *time.Time
 }
 
 // The names of the links an alert can carry. Which ones an alert has depends
@@ -211,4 +218,9 @@ type Event struct {
 	OccurredAt time.Time
 	// Data holds details specific to the type.
 	Data map[string]any
+	// FirstResponse is true for the event with which a person takes the
+	// alert for the first time, by acknowledging or snoozing it. It is told
+	// to the observers of the change and is not stored: an event read from
+	// the timeline has it false.
+	FirstResponse bool
 }
