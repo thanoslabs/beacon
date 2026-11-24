@@ -278,7 +278,7 @@ An admin can ask for the same over HTTP, with `POST /api/v1/config/reload` (see 
 - Each replica reloads on its own. Send the signal to every replica.
 - Process settings (flags and their environment variables) are not part of the configuration and need a restart.
 
-Three metrics on `/metrics` follow reloads:
+Three [[metrics]] follow reloads:
 
 | Metric | Meaning |
 |---|---|

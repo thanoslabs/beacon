@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/config"
 	"github.com/thanoslabs/beacon/internal/ingest"
+	"github.com/thanoslabs/beacon/internal/metrics/metricstest"
 	"github.com/thanoslabs/beacon/internal/provision"
 	"github.com/thanoslabs/beacon/internal/routing"
 )
@@ -158,14 +160,11 @@ func TestRouting(t *testing.T) {
 	}
 	// The metric is exposed with a series for every source from the start,
 	// and with nothing but the source as a label.
-	metrics, err := f.reg.Gather()
-	if err != nil || len(metrics) != 1 || metrics[0].GetName() != "beacon_routing_unmatched_alerts_total" || len(metrics[0].GetMetric()) != 4 {
-		t.Fatalf("metrics = %v, %v", metrics, err)
-	}
-	for _, m := range metrics[0].GetMetric() {
-		if len(m.GetLabel()) != 1 || m.GetLabel()[0].GetName() != "source" {
-			t.Errorf("labels = %v, want only source", m.GetLabel())
-		}
+	series := metricstest.WithPrefix(metricstest.Values(t, f.reg), "beacon_routing_unmatched_alerts_total")
+	want := []string{`beacon_routing_unmatched_alerts_total{source="am"}`, `beacon_routing_unmatched_alerts_total{source="grafana"}`,
+		`beacon_routing_unmatched_alerts_total{source="prod"}`, `beacon_routing_unmatched_alerts_total{source="staging"}`}
+	if !slices.Equal(series, want) {
+		t.Errorf("series = %v, want %v", series, want)
 	}
 }
 

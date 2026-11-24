@@ -23,6 +23,7 @@ Link between pages with Obsidian-style `[[wikilinks]]`.
 - [[api-reference]]: every route of the API, generated from the OpenAPI description
 - [[silences]]: keep Beacon quiet about matching alerts for a period, through the API
 - [[notifications]]: how notifications are queued, retried and recorded
+- [[metrics]]: Beacon's own Prometheus metrics: what each one means, how to read them with several replicas, and who can read them
 - [[slack]]: set up the Slack app and send alerts to a channel
 - [[discord]]: set up the Discord application and send alerts to a channel
 - [[email]]: send alerts as email over SMTP

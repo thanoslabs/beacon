@@ -23,6 +23,7 @@ import (
 	"github.com/thanoslabs/beacon/internal/email"
 	"github.com/thanoslabs/beacon/internal/identity"
 	"github.com/thanoslabs/beacon/internal/ingest"
+	"github.com/thanoslabs/beacon/internal/metrics"
 	"github.com/thanoslabs/beacon/internal/notify"
 	"github.com/thanoslabs/beacon/internal/provision"
 	"github.com/thanoslabs/beacon/internal/routing"
@@ -205,26 +206,11 @@ const (
 
 // registerMetrics creates the reload metrics on reg.
 func (p *provisioner) registerMetrics(reg prometheus.Registerer) {
-	p.reloads = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "beacon_config_reloads_total",
-		Help: "Configuration reloads since the process started, by result. Loading the configuration at start is not counted.",
-	}, []string{"result"})
-	p.successful = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "beacon_config_last_reload_successful",
-		Help: "Whether the last attempt to load the configuration succeeded: 1 or 0. When 0, the configuration loaded before is still active.",
-	})
-	p.lastOK = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "beacon_config_last_reload_success_timestamp_seconds",
-		Help: "Unix time at which the active configuration was loaded.",
-	})
-	p.skipped = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "beacon_team_members_skipped",
-		Help: "Email addresses in a team's members list that belong to no user, by team, as of the last time this process applied the configuration or completed a sign-in. Such a person joins the team when they first sign in.",
-	}, []string{"team"})
-	p.rotationSkipped = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "beacon_schedule_members_skipped",
-		Help: "Email addresses in a schedule's rotation that belong to no user, by schedule, as of the last time this process applied the configuration. Such a member is passed over until the person has signed in.",
-	}, []string{"schedule"})
+	p.reloads = metrics.NewCounterVec(metrics.ConfigReloads)
+	p.successful = metrics.NewGauge(metrics.ConfigLastReloadOK)
+	p.lastOK = metrics.NewGauge(metrics.ConfigLastReloadTimestamp)
+	p.skipped = metrics.NewGaugeVec(metrics.TeamMembersSkipped)
+	p.rotationSkipped = metrics.NewGaugeVec(metrics.ScheduleMembersSkipped)
 	reg.MustRegister(p.reloads, p.successful, p.lastOK, p.skipped, p.rotationSkipped)
 	// Both results exist from the start, so a rate over them is never empty.
 	p.reloads.WithLabelValues(resultSuccess)

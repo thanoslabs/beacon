@@ -24,6 +24,7 @@ import (
 
 	"github.com/thanoslabs/beacon/internal/alert"
 	"github.com/thanoslabs/beacon/internal/config"
+	"github.com/thanoslabs/beacon/internal/metrics"
 	"github.com/thanoslabs/beacon/internal/routing"
 )
 
@@ -66,10 +67,7 @@ type Handler struct {
 
 // New returns a handler for the given sources.
 func New(logger *slog.Logger, alerts Alerts, sources []Source) *Handler {
-	h := &Handler{logger: logger, alerts: alerts, unmatched: prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "beacon_routing_unmatched_alerts_total",
-		Help: "Alerts opened that matched no routing rule and took the routing default, by source. Repeated deliveries of an open alert are not counted.",
-	}, []string{"source"})}
+	h := &Handler{logger: logger, alerts: alerts, unmatched: metrics.NewCounterVec(metrics.RoutingUnmatched)}
 	router, _ := routing.New(nil, routing.Refs{}) // without a routing block there is nothing to fail
 	h.SetRouter(router)
 	h.SetSources(sources)

@@ -77,6 +77,8 @@ func runServe(ctx context.Context, e env, args []string) error {
 		"base URL of the Slack Web API; change it only to test against a fake Slack")
 	stringSetting(fs, e, &discordAPIURL, "discord-api-url", "BEACON_DISCORD_API_URL", discord.DefaultAPIURL,
 		"base URL of the Discord HTTP API; change it only to test against a fake Discord")
+	secretSetting(fs, e, &srvCfg.MetricsToken, "metrics-token", "BEACON_METRICS_TOKEN",
+		"bearer token a scrape of /metrics must carry; without one the metrics are open to whoever reaches the port")
 	databaseSettings(fs, e, &dbCfg, &envErrs)
 	configSetting(fs, e, &cfgPath)
 	if err := parseFlags(fs, args, envErrs...); err != nil {
@@ -155,6 +157,9 @@ func runServe(ctx context.Context, e env, args []string) error {
 	pipeline.SetPeople(directory)
 
 	registry := server.NewRegistry()
+	if srvCfg.MetricsToken != "" {
+		logger.InfoContext(ctx, "the metrics endpoint asks for the metrics token")
+	}
 	srvCfg.Authenticator = signIn
 	srv := server.New(srvCfg, logger, pool, registry)
 	if err := srv.Listen(); err != nil {
