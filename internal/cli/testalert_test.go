@@ -54,6 +54,11 @@ func TestTestAlert(t *testing.T) {
 	if code, stdout, _ := run("--policy", "default", "--resolve"); code != exitOK || !strings.Contains(stdout, "no open test alert") {
 		t.Errorf("--resolve again = %d %s", code, stdout)
 	}
+	// The link is for a browser, which may know Beacon by another address.
+	if code, stdout, _ := run("--policy", "default", "--public-url", "http://localhost:18080"); code != exitOK || !strings.HasPrefix(stdout, "The test alert is firing: http://localhost:18080/alerts/") {
+		t.Errorf("--public-url = %d %s", code, stdout)
+	}
+	run("--policy", "default", "--resolve")
 	// Without a policy, routing decides, as for any alert.
 	if code, stdout, _ := run(); code != exitOK || !strings.Contains(stdout, "the escalation policy that routing gives it") {
 		t.Errorf("test-alert without a policy = %d %s", code, stdout)

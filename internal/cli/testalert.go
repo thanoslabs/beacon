@@ -27,12 +27,13 @@ const (
 // point: it is routed, grouped, and paged through an escalation policy.
 func runTestAlert(ctx context.Context, e env, args []string) error {
 	var (
-		address, source, token, policy, severity string
-		resolve                                  bool
+		address, public, source, token, policy, severity string
+		resolve                                          bool
 	)
 	fs := newFlagSet(e, "test-alert", "Send a test alert to a running Beacon, to see a page arrive. "+
 		"It goes in through a webhook source, like a real alert, and is paged by the escalation policy that routing gives it, or by the one named with --policy")
 	stringSetting(fs, e, &address, "url", "BEACON_URL", "http://127.0.0.1:8080", "address of the running Beacon")
+	stringSetting(fs, e, &public, "public-url", "BEACON_PUBLIC_URL", "", "address at which your browser reaches Beacon, for the link that is printed; the same as --url unless set")
 	fs.StringVar(&source, "source", "default", "name of a source of type webhook in the configuration")
 	secretSetting(fs, e, &token, "token", "BEACON_SOURCE_TOKEN", "token of that source")
 	fs.StringVar(&policy, "policy", "", "name of the escalation policy to page through; without it, routing decides as for any alert")
@@ -113,7 +114,15 @@ func runTestAlert(ctx context.Context, e env, args []string) error {
 		return fmt.Errorf("Beacon answered %s; its log says why", resp.Status) //nolint:staticcheck // as above
 	}
 
-	page := base.JoinPath("alerts", answer.AlertID).String()
+	// The link is for a browser, which may reach Beacon at another address
+	// than this command does: from inside a container, for one.
+	shown := base
+	if public != "" {
+		if shown, err = url.Parse(public); err != nil || shown.Host == "" {
+			return fmt.Errorf("--public-url must be an http or https address such as http://localhost:8080, got %q", public)
+		}
+	}
+	page := shown.JoinPath("alerts", answer.AlertID).String()
 	switch answer.Result {
 	case "created":
 		fmt.Fprintf(e.stdout, "The test alert is firing: %s\n", page)

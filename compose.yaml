@@ -13,6 +13,10 @@ services:
     environment:
       BEACON_DATABASE_URL: postgres://beacon:beacon@postgres:5432/beacon?sslmode=disable
       BEACON_CONFIG: /etc/beacon
+      # The address at which a browser on this machine reaches Beacon, for
+      # the links that `beacon test-alert` prints when it is run in the
+      # container.
+      BEACON_PUBLIC_URL: http://localhost:${BEACON_PORT:-8080}
       # Token of the webhook source in the mounted configuration. The default
       # is for local use only; set your own. See docs/webhook.md.
       BEACON_SOURCE_TOKEN: ${BEACON_SOURCE_TOKEN:-local-development-token}

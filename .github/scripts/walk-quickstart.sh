@@ -18,6 +18,9 @@ url="http://localhost:${port}"
 started="$(date +%s)"
 step() { echo; echo "== $1 ($(( $(date +%s) - started ))s)"; }
 psql() { docker compose exec -T postgres psql --username beacon --no-align --tuples-only --command "$1"; }
+# count_is <n> <query>: the query answers n.
+count_is() { test "$(psql "$2")" = "$1"; }
+warned() { docker compose logs beacon | grep -E '"level":"(WARN|ERROR)"' | grep -v 'of the quickstart' | grep -q .; }
 # wait_for <what> <command...>: until the command succeeds, for a minute.
 wait_for() {
   local what="$1"; shift
@@ -49,7 +52,7 @@ test "$(curl --fail --silent --cookie "$cookies" "${url}/api/v1/alerts" | jq '.a
 docker compose logs beacon | grep -c 'of the quickstart, which is published' | grep -x 2 > /dev/null
 
 step "3. Send a test alert"
-docker compose exec -T beacon beacon test-alert | tee /dev/stderr | grep '^The test alert is firing: http://127.0.0.1:8080/alerts/' > /dev/null
+docker compose exec -T beacon beacon test-alert | tee /dev/stderr | grep "^The test alert is firing: ${url}/alerts/" > /dev/null
 # What the web interface shows under Alerts.
 curl --fail --silent --cookie "$cookies" "${url}/api/v1/alerts" | jq -e '.alerts | length == 1 and .[0].labels.alertname == "BeaconTestAlert" and .[0].status == "firing" and .[0].severity == "critical"' > /dev/null
 # Acknowledge it, as the guide suggests, the way the page does.
@@ -74,11 +77,12 @@ docker compose exec -T beacon beacon test-alert --policy default | tee /dev/stde
 # and a page for the channel of the file is in the queue or was attempted.
 # Slack refuses the made-up token, which is the failure the guide's last
 # part is about.
-wait_for "the page to be queued for the channel" test "$(psql "SELECT count(*) FROM notifications WHERE destination = 'C0QUICKSTART' AND reason = 'escalation_step'")" = "1"
-wait_for "the escalation step on the timeline" test "$(psql "SELECT count(*) FROM alert_events WHERE type = 'escalated' AND data->>'policy' = 'default'")" = "1"
+wait_for "the page to be queued for the channel" count_is 1 "SELECT count(*) FROM notifications WHERE destination = 'C0QUICKSTART' AND reason = 'escalation_step'"
+wait_for "the escalation step on the timeline" count_is 1 "SELECT count(*) FROM alert_events WHERE type = 'escalated' AND data->>'policy' = 'default'"
 
 step "If no message arrives"
-wait_for "the failed delivery in the log" sh -c "docker compose logs beacon | grep -E '\"level\":\"(WARN|ERROR)\"' | grep -v 'of the quickstart' | grep -q ."
+wait_for "the failed delivery in the log" warned
+docker compose logs beacon | grep -E '"level":"(WARN|ERROR)"' | grep -v 'of the quickstart' | tail -n 2
 docker compose exec -T beacon beacon validate --config /etc/beacon --check-secrets | grep 'is valid: 1 source, 1 integration'
 
 step "Make it yours"

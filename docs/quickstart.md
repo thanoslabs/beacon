@@ -50,7 +50,7 @@ docker compose exec beacon beacon test-alert
 ```
 
 ```
-The test alert is firing: http://127.0.0.1:8080/alerts/0f3c...
+The test alert is firing: http://localhost:8080/alerts/0f3c...
 ```
 
 The alert is in the web interface now, under **Alerts**: *BeaconTestAlert*, critical, firing. Open it to see its timeline. **Acknowledge** it, and the timeline says who did; the command below ends it.
