@@ -175,6 +175,15 @@ jobs:
             exit 1
           fi
 
+      # The quickstart guide, command by command, from this fresh checkout:
+      # start, sign in with the published password, send a test alert, see
+      # and acknowledge it, then the same with a copy of the configuration
+      # that pages a Slack channel. The Slack credentials are made up, so
+      # the page itself is not delivered; that it is queued for the channel
+      # is checked instead.
+      - name: Walk the quickstart guide
+        run: .github/scripts/walk-quickstart.sh
+
       - name: Start Beacon and Postgres
         env:
           # A throwaway token, so the image can be shown to accept an alert.
