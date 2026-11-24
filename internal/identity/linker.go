@@ -11,6 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/thanoslabs/beacon/internal/metrics"
 )
 
 // Lookup finds accounts in a chat service by email address.
@@ -73,10 +75,7 @@ type Linker struct {
 
 // NewLinker returns a linker that stores what it finds in store.
 func NewLinker(store *Store, logger *slog.Logger) *Linker {
-	l := &Linker{store: store, logger: logger, kick: make(chan struct{}, 1), unlinked: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "beacon_users_without_identity",
-		Help: "Users who have no linked account in the chat service of an integration, by integration, as of the last time this process looked. Such a person cannot be reached directly through that integration.",
-	}, []string{"integration"})}
+	l := &Linker{store: store, logger: logger, kick: make(chan struct{}, 1), unlinked: metrics.NewGaugeVec(metrics.UsersWithoutIdentity)}
 	l.SetIntegrations(nil)
 	return l
 }

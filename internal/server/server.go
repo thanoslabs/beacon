@@ -69,6 +69,7 @@ type Server struct {
 	routes   []access.Route
 	http     *http.Server
 	listener net.Listener
+	metrics  *httpMetrics
 	// stopping is set when shutdown begins, so that readiness fails and load
 	// balancers stop sending new requests while in-flight ones finish.
 	stopping atomic.Bool
@@ -87,7 +88,10 @@ func New(cfg Config, logger *slog.Logger, db Pinger, registry *prometheus.Regist
 		cfg.ReadinessTimeout = DefaultReadinessTimeout
 	}
 
-	s := &Server{cfg: cfg, logger: logger, db: db, mux: http.NewServeMux(), guard: access.NewGuard(logger, cfg.Authenticator)}
+	s := &Server{
+		cfg: cfg, logger: logger, db: db, mux: http.NewServeMux(), guard: access.NewGuard(logger, cfg.Authenticator),
+		metrics: newHTTPMetrics(registry),
+	}
 
 	// Probes and scrapes come from machines that have no session.
 	s.Handle(access.Route{Pattern: "GET " + PathLiveness, Level: access.Public, Handler: http.HandlerFunc(s.handleLiveness)})
@@ -98,7 +102,7 @@ func New(cfg Config, logger *slog.Logger, db Pinger, registry *prometheus.Regist
 	// Everything else is denied by default: a path that no route matches
 	// answers 401 to a stranger, like a route that exists, and 404 only to
 	// someone who is signed in.
-	s.mux.Handle("/", s.NotFound())
+	s.mux.Handle("/", s.metrics.instrument("", s.NotFound()))
 
 	quiet := map[string]bool{PathLiveness: true, PathReadiness: true, PathMetrics: true}
 	// Outermost first: the identifier exists before anything is logged, and
@@ -123,7 +127,7 @@ func New(cfg Config, logger *slog.Logger, db Pinger, registry *prometheus.Regist
 // Serve is called.
 func (s *Server) Handle(route access.Route) {
 	s.routes = append(s.routes, route)
-	s.mux.Handle(route.Pattern, s.guard.Wrap(route))
+	s.mux.Handle(route.Pattern, s.metrics.instrument(route.Pattern, s.guard.Wrap(route)))
 }
 
 // NotFound answers a request that no route takes: 401 to a stranger, and 404
